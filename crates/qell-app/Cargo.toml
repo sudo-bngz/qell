@@ -28,3 +28,10 @@ qell-lsp.workspace = true
 qell-term.workspace = true
 qell-plugins.workspace = true
 qell-git.workspace = true
+# Native menu bar. Built on every platform (without GTK) so the menu code is
+# compiled and tested everywhere; it is only installed on macOS.
+muda = { version = "0.21", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Reads the clipboard for Edit → Paste in the native menu.
+arboard = { version = "3", default-features = false }

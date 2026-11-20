@@ -126,6 +126,8 @@ impl Command {
             Command::NextTab => s(Modifiers::CTRL, Key::Tab),
             Command::PrevTab => s(Modifiers::CTRL | Modifiers::SHIFT, Key::Tab),
             Command::Undo => s(cmd, Key::Z),
+            // macOS convention is ⇧⌘Z; elsewhere Ctrl+Y.
+            Command::Redo if cfg!(target_os = "macos") => s(cmd_shift, Key::Z),
             Command::Redo => s(cmd, Key::Y),
             Command::SelectAll => s(cmd, Key::A),
             Command::TriggerCompletion => s(Modifiers::CTRL, Key::Space),

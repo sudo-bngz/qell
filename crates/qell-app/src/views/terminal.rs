@@ -162,11 +162,12 @@ fn show_grid(app: &mut QellApp, ui: &mut egui::Ui) {
                     term.scroll_to_bottom();
                 }
                 Event::Paste(t) => term.send_text(t),
-                Event::Copy => {
-                    // Ctrl+C in a terminal means interrupt, as in VSCode.
-                    term.send_key(TermKey::Ctrl('c'));
-                }
-                Event::Cut => term.send_key(TermKey::Ctrl('x')),
+                // On Linux and Windows, Ctrl+C reaches us as Copy: in a
+                // terminal it means interrupt, as in VS Code. On macOS Copy
+                // is ⌘C (Ctrl+C arrives as a key and is handled below), and
+                // there is no selection to copy, so it does nothing.
+                Event::Copy if !cfg!(target_os = "macos") => term.send_key(TermKey::Ctrl('c')),
+                Event::Cut if !cfg!(target_os = "macos") => term.send_key(TermKey::Ctrl('x')),
                 Event::Key { key, pressed: true, modifiers, .. } => {
                     let k = match key {
                         Key::Enter => Some(TermKey::Enter),
