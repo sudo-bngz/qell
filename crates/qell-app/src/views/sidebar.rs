@@ -6,7 +6,7 @@ use egui::text::{LayoutJob, TextFormat};
 use egui::{Color32, Context, FontId, RichText};
 use qell_git::FileStatus;
 
-use crate::app::{QellApp, SidebarView};
+use crate::app::{Focus, QellApp, SidebarView, TreeEditKind};
 use crate::icons;
 
 #[derive(Debug, Clone)]
@@ -51,12 +51,28 @@ fn show_dir(app: &mut QellApp, ui: &mut egui::Ui, dir: &Path) {
         app.tree_cache.insert(dir.to_path_buf(), entries);
     }
     let entries = app.tree_cache.get(dir).cloned().unwrap_or_default();
+    // A new file or folder being named here: its field comes first.
+    let new_here = app
+        .tree_edit
+        .as_ref()
+        .is_some_and(|t| matches!(&t.kind, TreeEditKind::NewFile(d) | TreeEditKind::NewFolder(d) if d.as_path() == dir));
+    if new_here {
+        let folder = app.tree_edit.as_ref().is_some_and(|t| matches!(t.kind, TreeEditKind::NewFolder(_)));
+        let icon = if folder { (icons::FOLDER, app.palette.text_dim) } else { icons::for_file(Path::new("new")) };
+        tree_edit_row(app, ui, icon);
+    }
     let active_path = app.docs.get(app.active).and_then(|d| d.buffer.path().map(Path::to_path_buf));
 
     let default_color = app.palette.text;
     let folder_color = app.palette.text_dim;
     let show_icons = app.config.file_icons;
     for e in entries {
+        // Being renamed: a text field instead of the row.
+        if app.tree_edit.as_ref().is_some_and(|t| t.kind == TreeEditKind::Rename(e.path.clone())) {
+            let icon = if e.is_dir { (icons::FOLDER, app.palette.text_dim) } else { icons::for_file(&e.path) };
+            tree_edit_row(app, ui, icon);
+            continue;
+        }
         let git = app.git_status_of(&e.path);
         let color = git.map(|s| app.palette.git_color(s));
         let name_color = color.unwrap_or(default_color);
@@ -71,10 +87,9 @@ fn show_dir(app: &mut QellApp, ui: &mut egui::Ui, dir: &Path) {
                 .show_header(ui, |ui| {
                     // Not selectable text: a folder name is a button, so the
                     // pointer is a hand, not a text cursor.
-                    let clicked = ui
+                    let name = ui
                         .add(egui::Label::new(label).sense(egui::Sense::click()).selectable(false))
-                        .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .clicked();
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
                     // Folders get a dot rather than a letter, like VS Code.
                     if let (Some(c), Some(_)) = (color, tooltip) {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -83,17 +98,19 @@ fn show_dir(app: &mut QellApp, ui: &mut egui::Ui, dir: &Path) {
                             ui.label(RichText::new("●").monospace().size(10.0).color(c));
                         });
                     }
-                    clicked
+                    name
                 })
                 .body_unindented(|ui| {
                     ui.indent(id.with("body"), |ui| show_dir(app, ui, &e.path));
                 });
             // Clicking the name opens/closes the folder, not just the arrow.
-            if header.inner {
+            if header.inner.clicked() {
                 let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
                 state.toggle(ui);
                 state.store(ui.ctx());
             }
+            // The name takes the clicks (it sits above the row).
+            header.inner.context_menu(|ui| entry_menu(app, ui, &e.path, Some(id)));
             if let Some(t) = tooltip {
                 header.response.on_hover_text(t);
             }
@@ -113,7 +130,153 @@ fn show_dir(app: &mut QellApp, ui: &mut egui::Ui, dir: &Path) {
             if resp.clicked() {
                 app.open_file(e.path.clone());
             }
+            resp.context_menu(|ui| entry_menu(app, ui, &e.path, None));
         }
+    }
+}
+
+/// The inline field for renaming or naming a new entry. Enter or clicking
+/// away applies it, Escape cancels.
+fn tree_edit_row(app: &mut QellApp, ui: &mut egui::Ui, icon: (char, Color32)) {
+    let text_color = app.palette.text;
+    let Some(edit) = app.tree_edit.as_mut() else { return };
+    let mut done = None;
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(icon.0.to_string()).font(icons::font(14.0)).color(icon.1));
+        let id = ui.id().with("tree_edit");
+        if edit.fresh {
+            // Focus it with the name selected, minus its extension (VS Code).
+            edit.fresh = false;
+            let stem = match edit.text.rfind('.') {
+                Some(i) if i > 0 => edit.text[..i].chars().count(),
+                _ => edit.text.chars().count(),
+            };
+            let mut st = egui::text_edit::TextEditState::default();
+            st.cursor
+                .set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(stem))));
+            st.store(ui.ctx(), id);
+            ui.memory_mut(|m| m.request_focus(id));
+        }
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut edit.text)
+                .id(id)
+                .desired_width(f32::INFINITY)
+                .text_color(text_color)
+                .margin(egui::Margin::symmetric(2, 1)),
+        );
+        if resp.lost_focus() {
+            done = Some(!ui.input(|i| i.key_pressed(egui::Key::Escape)));
+            // The key that ended it isn't for the editor (which gets the
+            // focus back this same frame and would type a newline).
+            ui.input_mut(|i| {
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
+            });
+        }
+    });
+    match done {
+        Some(true) => app.commit_tree_edit(),
+        Some(false) => app.tree_edit = None,
+        None => {}
+    }
+}
+
+/// "Reveal in Finder" and its equivalents, by platform (VS Code's wording).
+pub fn reveal_label() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Reveal in Finder"
+    } else if cfg!(windows) {
+        "Reveal in File Explorer"
+    } else {
+        "Open Containing Folder"
+    }
+}
+
+/// Right-click menu of a file (`folder_id: None`) or a folder in the tree.
+fn entry_menu(app: &mut QellApp, ui: &mut egui::Ui, path: &Path, folder_id: Option<egui::Id>) {
+    let dir = if folder_id.is_some() { path.to_path_buf() } else { path.parent().unwrap_or(path).to_path_buf() };
+    if let Some(id) = folder_id {
+        let new = |kind: TreeEditKind, app: &mut QellApp, ui: &mut egui::Ui| {
+            // Open the folder so the field shows up inside it.
+            let mut st = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+            st.set_open(true);
+            st.store(ui.ctx());
+            app.start_tree_edit(kind);
+            ui.close();
+        };
+        if ui.button("New File…").clicked() {
+            new(TreeEditKind::NewFile(dir.clone()), app, ui);
+        }
+        if ui.button("New Folder…").clicked() {
+            new(TreeEditKind::NewFolder(dir.clone()), app, ui);
+        }
+    } else if ui.button("Open").clicked() {
+        app.open_file(path.to_path_buf());
+        ui.close();
+    }
+    ui.separator();
+    if ui.button(reveal_label()).clicked() {
+        app.reveal_in_file_manager(path);
+        ui.close();
+    }
+    if ui.button("Open in Integrated Terminal").clicked() {
+        app.new_terminal_in(dir);
+        app.show_terminal = true;
+        app.focus = Focus::Terminal;
+        ui.close();
+    }
+    ui.separator();
+    if ui.button("Copy Path").clicked() {
+        ui.ctx().copy_text(path.display().to_string());
+        ui.close();
+    }
+    if ui.button("Copy Relative Path").clicked() {
+        ui.ctx().copy_text(app.relative_path(path));
+        ui.close();
+    }
+    ui.separator();
+    if ui.button("Rename…").clicked() {
+        app.start_tree_edit(TreeEditKind::Rename(path.to_path_buf()));
+        ui.close();
+    }
+    if ui.button("Delete").clicked() {
+        app.confirm_delete = Some(path.to_path_buf());
+        ui.close();
+    }
+}
+
+/// "Move to Trash?" before deleting from the tree.
+pub fn show_confirm_delete(app: &mut QellApp, ctx: &Context) {
+    let Some(path) = app.confirm_delete.clone() else { return };
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let bin = if cfg!(windows) { "Recycle Bin" } else { "Trash" };
+    let what = if path.is_dir() { "folder" } else { "file" };
+    let mut choice = None;
+    let modal = egui::Modal::new(egui::Id::new("confirm_delete")).show(ctx, |ui| {
+        ui.set_width(340.0);
+        ui.label(RichText::new(format!("Move the {what} '{name}' to the {bin}?")).strong());
+        ui.add_space(4.0);
+        ui.label(RichText::new(format!("You can restore it from the {bin}.")).color(app.palette.text_dim));
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            if ui.button(format!("Move to {bin}")).clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                choice = Some(true);
+            }
+            if ui.button("Cancel").clicked() {
+                choice = Some(false);
+            }
+        });
+    });
+    if modal.should_close() && choice.is_none() {
+        choice = Some(false);
+    }
+    match choice {
+        Some(true) => {
+            app.confirm_delete = None;
+            app.trash_path(&path);
+        }
+        Some(false) => app.confirm_delete = None,
+        None => {}
     }
 }
 
@@ -124,6 +287,10 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
         .width_range(160.0..=600.0)
         .frame(egui::Frame::new().fill(bg).inner_margin(egui::Margin::symmetric(4, 6)))
         .show(ctx, |ui| {
+            // A rename or new entry only lives in the Explorer.
+            if app.sidebar_view != SidebarView::Explorer {
+                app.tree_edit = None;
+            }
             match app.sidebar_view {
                 SidebarView::SourceControl => return super::scm::show_contents(app, ui),
                 SidebarView::Search => return super::search::show_contents(app, ui),
@@ -145,6 +312,33 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                 ui.spacing_mut().item_spacing.y = 1.0;
                 let root = app.root.clone();
                 show_dir(app, ui, &root);
+                // The empty space below the tree: menu for the workspace root.
+                let h = ui.available_height();
+                let rest = ui.allocate_response(
+                    egui::vec2(ui.available_width(), if h.is_finite() { h.max(40.0) } else { 40.0 }),
+                    egui::Sense::click(),
+                );
+                rest.context_menu(|ui| {
+                    if ui.button("New File…").clicked() {
+                        app.start_tree_edit(TreeEditKind::NewFile(root.clone()));
+                        ui.close();
+                    }
+                    if ui.button("New Folder…").clicked() {
+                        app.start_tree_edit(TreeEditKind::NewFolder(root.clone()));
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button(reveal_label()).clicked() {
+                        app.reveal_in_file_manager(&root);
+                        ui.close();
+                    }
+                    if ui.button("Open in Integrated Terminal").clicked() {
+                        app.new_terminal_in(root.clone());
+                        app.show_terminal = true;
+                        app.focus = Focus::Terminal;
+                        ui.close();
+                    }
+                });
             });
         });
 }

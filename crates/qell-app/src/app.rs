@@ -46,6 +46,23 @@ fn preview_range(preview: &str, _chars: &str, word: &str) -> (usize, usize) {
     }
 }
 
+/// An inline text field in the file tree: renaming an entry, or naming a
+/// new file or folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TreeEditKind {
+    Rename(PathBuf),
+    NewFile(PathBuf),
+    NewFolder(PathBuf),
+}
+
+#[derive(Debug, Clone)]
+pub struct TreeEdit {
+    pub kind: TreeEditKind,
+    pub text: String,
+    /// Not yet focused (first frame): focus it and select the name.
+    pub fresh: bool,
+}
+
 /// Where the cursor was, for Go Back / Go Forward.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NavPoint {
@@ -186,6 +203,10 @@ pub struct QellApp {
     pub searcher: qell_index::Searcher,
     pub search: views::search::SearchState,
     pub pending_nav: Option<(RequestId, NavRequest)>,
+    /// Rename / new file / new folder being typed in the file tree.
+    pub tree_edit: Option<TreeEdit>,
+    /// "Move to Trash?" asked for this path.
+    pub confirm_delete: Option<PathBuf>,
     /// Go Back / Go Forward stacks.
     pub nav_back: Vec<NavPoint>,
     pub nav_forward: Vec<NavPoint>,
@@ -251,6 +272,8 @@ impl QellApp {
             searcher,
             search: Default::default(),
             pending_nav: None,
+            tree_edit: None,
+            confirm_delete: None,
             nav_back: Vec::new(),
             nav_forward: Vec::new(),
             snippet: None,
@@ -412,6 +435,31 @@ impl QellApp {
             self.docs.push(Document::untitled());
         }
         self.active = self.active.min(self.docs.len() - 1);
+        self.completion.open = false;
+    }
+
+    /// Close the tabs whose index matches (tab menu: others, to the right,
+    /// all). Closing everything leaves an empty untitled tab.
+    pub fn close_tabs_where(&mut self, close: impl Fn(usize) -> bool) {
+        let mut kept = Vec::new();
+        let mut active = None;
+        for (i, doc) in std::mem::take(&mut self.docs).into_iter().enumerate() {
+            if close(i) {
+                self.lsp.did_close(&doc.buffer);
+            } else {
+                if i == self.active {
+                    active = Some(kept.len());
+                }
+                kept.push(doc);
+            }
+        }
+        if kept.is_empty() {
+            kept.push(Document::untitled());
+        }
+        // The active tab closed: the nearest one to its left takes over.
+        let fallback = self.active.min(kept.len()).saturating_sub(1);
+        self.active = active.unwrap_or(fallback).min(kept.len() - 1);
+        self.docs = kept;
         self.completion.open = false;
     }
 
@@ -636,7 +684,124 @@ impl QellApp {
 
     /// The Settings window or the palette has the keyboard.
     pub fn modal_open(&self) -> bool {
-        self.command_palette.open || self.settings.open || self.scm.typing || self.search.typing
+        self.command_palette.open
+            || self.settings.open
+            || self.scm.typing
+            || self.search.typing
+            || self.tree_edit.is_some()
+            || self.confirm_delete.is_some()
+    }
+
+    // ---- file operations (file tree menu) -----------------------------------
+
+    /// Something changed on disk: refresh the tree, file list, git and index.
+    fn files_changed(&mut self) {
+        self.tree_cache.clear();
+        self.command_palette.files.clear();
+        self.git.refresh();
+        self.indexer.refresh();
+    }
+
+    /// Start naming a new file or folder in `dir`, or renaming `path`.
+    pub fn start_tree_edit(&mut self, kind: TreeEditKind) {
+        let text = match &kind {
+            TreeEditKind::Rename(p) => p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            _ => String::new(),
+        };
+        self.tree_edit = Some(TreeEdit { kind, text, fresh: true });
+        self.show_sidebar = true;
+        self.sidebar_view = SidebarView::Explorer;
+    }
+
+    /// Apply the typed name (Enter, or clicking away).
+    pub fn commit_tree_edit(&mut self) {
+        let Some(edit) = self.tree_edit.take() else { return };
+        let name = edit.text.trim();
+        if name.is_empty() || name == "." || name == ".." {
+            return;
+        }
+        let result = match &edit.kind {
+            TreeEditKind::Rename(from) => {
+                let to = from.with_file_name(name);
+                if to == *from {
+                    return;
+                }
+                if to.exists() {
+                    Err(format!("{name} already exists"))
+                } else {
+                    std::fs::rename(from, &to).map_err(|e| e.to_string()).map(|_| {
+                        self.retarget_docs(from, &to);
+                        None
+                    })
+                }
+            }
+            // "a/b.txt" makes the folders on the way, as in VS Code.
+            TreeEditKind::NewFile(dir) => {
+                let path = dir.join(name);
+                let made = path
+                    .parent()
+                    .map_or(Ok(()), std::fs::create_dir_all)
+                    .and_then(|_| std::fs::OpenOptions::new().write(true).create_new(true).open(&path).map(|_| ()));
+                made.map_err(|e| format!("Can't create {name}: {e}")).map(|_| Some(path))
+            }
+            TreeEditKind::NewFolder(dir) => {
+                let path = dir.join(name);
+                if path.exists() {
+                    Err(format!("{name} already exists"))
+                } else {
+                    std::fs::create_dir_all(&path).map_err(|e| format!("Can't create {name}: {e}")).map(|_| None)
+                }
+            }
+        };
+        match result {
+            Ok(open) => {
+                self.files_changed();
+                if let Some(p) = open {
+                    self.open_file(p);
+                }
+            }
+            Err(e) => self.notify_error(e),
+        }
+    }
+
+    /// Open tabs on a renamed file (or inside a renamed folder) follow it.
+    fn retarget_docs(&mut self, from: &Path, to: &Path) {
+        for i in 0..self.docs.len() {
+            let Some(old) = self.docs[i].buffer.path().map(Path::to_path_buf) else { continue };
+            let Ok(rest) = old.strip_prefix(from) else { continue };
+            let new = if rest.as_os_str().is_empty() { to.to_path_buf() } else { to.join(rest) };
+            self.lsp.did_close(&self.docs[i].buffer);
+            self.docs[i].buffer.set_path(new);
+        }
+    }
+
+    /// Move a file or folder to the Trash (after confirmation).
+    pub fn trash_path(&mut self, path: &Path) {
+        match trash::delete(path) {
+            Ok(()) => self.files_changed(),
+            Err(e) => self.notify_error(format!("Couldn't move {} to the Trash: {e}", path.display())),
+        }
+    }
+
+    /// Show a file or folder in Finder / Explorer / the file manager.
+    pub fn reveal_in_file_manager(&mut self, path: &Path) {
+        let spawned = if cfg!(target_os = "macos") {
+            std::process::Command::new("open").arg("-R").arg(path).spawn()
+        } else if cfg!(windows) {
+            std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn()
+        } else {
+            // No portable "select this file": open the folder holding it.
+            let dir = if path.is_dir() { path } else { path.parent().unwrap_or(path) };
+            std::process::Command::new("xdg-open").arg(dir).spawn()
+        };
+        if let Err(e) = spawned {
+            self.notify_error(format!("Couldn't open the file manager: {e}"));
+        }
+    }
+
+    /// The path relative to the workspace, as shown in the tree.
+    pub fn relative_path(&self, path: &Path) -> String {
+        path.strip_prefix(&self.root).unwrap_or(path).to_string_lossy().into_owned()
     }
 
     /// Where the cursor is now, for navigation history.
@@ -1152,7 +1317,12 @@ impl QellApp {
 
     /// Open a new shell in the workspace root and make it active.
     pub fn new_terminal(&mut self) {
-        match Terminal::new(80, 24, Some(self.root.clone()), Some(self.config.shell.as_str())) {
+        self.new_terminal_in(self.root.clone());
+    }
+
+    /// A new shell starting in `dir` ("Open in Integrated Terminal").
+    pub fn new_terminal_in(&mut self, dir: PathBuf) {
+        match Terminal::new(80, 24, Some(dir), Some(self.config.shell.as_str())) {
             Ok(term) => {
                 let number = self.next_terminal_number;
                 self.next_terminal_number += 1;
@@ -1227,7 +1397,12 @@ impl QellApp {
         }
         // In Settings, the commit box or the search box, text fields own the
         // keyboard: only Escape, the settings shortcut itself and Quit go through.
-        if self.settings.open || self.scm.typing || self.search.typing {
+        if self.settings.open
+            || self.scm.typing
+            || self.search.typing
+            || self.tree_edit.is_some()
+            || self.confirm_delete.is_some()
+        {
             if self.settings.open && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
                 self.settings.open = false;
             }
@@ -1298,6 +1473,7 @@ impl eframe::App for QellApp {
         views::editor::show_central(self, ctx);
         views::palette::show(self, ctx);
         views::settings::show(self, ctx);
+        views::sidebar::show_confirm_delete(self, ctx);
 
         for cmd in std::mem::take(&mut self.pending_commands) {
             self.execute(cmd, ctx);

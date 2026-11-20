@@ -32,6 +32,8 @@ qell-index.workspace = true
 # Native menu bar. Built on every platform (without GTK) so the menu code is
 # compiled and tested everywhere; it is only installed on macOS.
 muda = { version = "0.21", default-features = false }
+# Delete in the file tree moves to the Trash / Recycle Bin, never erases.
+trash = "5"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Reads the clipboard for Edit → Paste in the native menu.

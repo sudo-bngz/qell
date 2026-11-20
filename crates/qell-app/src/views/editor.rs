@@ -29,6 +29,18 @@ pub fn show_central(app: &mut QellApp, ctx: &Context) {
     show_completion_popup(app, ctx);
 }
 
+/// What a tab's right-click menu asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TabMenu {
+    Close,
+    CloseOthers,
+    CloseRight,
+    CloseAll,
+    CopyPath,
+    CopyRelativePath,
+    Reveal,
+}
+
 fn show_tabs(app: &mut QellApp, ui: &mut egui::Ui) {
     let chrome = app.palette.chrome_bg;
     let editor_bg = app.palette.editor_bg;
@@ -43,6 +55,8 @@ fn show_tabs(app: &mut QellApp, ui: &mut egui::Ui) {
                 ui.spacing_mut().item_spacing.x = 0.0;
                 let mut switch_to = None;
                 let mut close = None;
+                let mut tab_menu: Option<(usize, TabMenu)> = None;
+                let count = app.docs.len();
                 for (i, doc) in app.docs.iter().enumerate() {
                     let active = i == app.active;
                     let title = doc.title();
@@ -83,6 +97,24 @@ fn show_tabs(app: &mut QellApp, ui: &mut egui::Ui) {
                     if resp.middle_clicked() {
                         close = Some(i);
                     }
+                    resp.context_menu(|ui| {
+                        let mut pick = |ui: &mut egui::Ui, label: &str, enabled: bool, what: TabMenu| {
+                            if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                                tab_menu = Some((i, what));
+                                ui.close();
+                            }
+                        };
+                        pick(ui, "Close", true, TabMenu::Close);
+                        pick(ui, "Close Others", count > 1, TabMenu::CloseOthers);
+                        pick(ui, "Close to the Right", i + 1 < count, TabMenu::CloseRight);
+                        pick(ui, "Close All", true, TabMenu::CloseAll);
+                        if doc.buffer.path().is_some() {
+                            ui.separator();
+                            pick(ui, "Copy Path", true, TabMenu::CopyPath);
+                            pick(ui, "Copy Relative Path", true, TabMenu::CopyRelativePath);
+                            pick(ui, super::sidebar::reveal_label(), true, TabMenu::Reveal);
+                        }
+                    });
                     if active {
                         let r = resp.rect;
                         ui.painter().hline(r.x_range(), r.top() + 1.0, Stroke::new(2.0_f32, accent));
@@ -96,6 +128,25 @@ fn show_tabs(app: &mut QellApp, ui: &mut egui::Ui) {
                 if let Some(i) = close {
                     app.active = i;
                     app.pending_commands.push(Command::CloseTab);
+                }
+                if let Some((i, what)) = tab_menu {
+                    let path = app.docs[i].buffer.path().map(std::path::Path::to_path_buf);
+                    match what {
+                        TabMenu::Close => app.close_tabs_where(|j| j == i),
+                        TabMenu::CloseOthers => app.close_tabs_where(|j| j != i),
+                        TabMenu::CloseRight => app.close_tabs_where(|j| j > i),
+                        TabMenu::CloseAll => app.close_tabs_where(|_| true),
+                        TabMenu::CopyPath => ui.ctx().copy_text(path.map(|p| p.display().to_string()).unwrap_or_default()),
+                        TabMenu::CopyRelativePath => {
+                            let rel = path.map(|p| app.relative_path(&p)).unwrap_or_default();
+                            ui.ctx().copy_text(rel);
+                        }
+                        TabMenu::Reveal => {
+                            if let Some(p) = path {
+                                app.reveal_in_file_manager(&p);
+                            }
+                        }
+                    }
                 }
             });
         });
@@ -314,17 +365,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                     }
                     Event::Copy => ui.ctx().copy_text(copy_text(b)),
                     Event::Cut => {
-                        let t = copy_text(b);
-                        ui.ctx().copy_text(t);
-                        if b.cursor.selection.is_empty() {
-                            // Cut the whole line, like VSCode.
-                            let l = b.cursor.head().line;
-                            let end =
-                                if l + 1 < b.line_count() { Position::new(l + 1, 0) } else { Position::new(l, b.line_len(l)) };
-                            b.replace_range(Position::new(l, 0), end, "");
-                        } else {
-                            b.delete_selection();
-                        }
+                        ui.ctx().copy_text(cut(b));
                         doc.scroll_to_cursor = true;
                     }
                     Event::Key { key, pressed: true, modifiers, .. } => {
@@ -534,6 +575,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
     ui.spacing_mut().item_spacing.y = 0.0;
     let mut clicked_editor = false;
     let mut go_to_definition = false;
+    let mut menu_choice: Option<EditorMenu> = None;
     let mut cursor_screen: Option<Pos2> = None;
 
     // Clicks and drags on the minimap scroll the editor this frame.
@@ -577,9 +619,15 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                 doc.goal_col = None;
                 if resp.double_clicked() {
                     let at = pos_at(&doc.buffer, p);
-                    doc.buffer.set_cursor(at, false);
-                    doc.buffer.move_word(false, false);
-                    doc.buffer.move_word(true, true);
+                    // The word under the pointer, on this line only (word
+                    // jumps would run on past the line's end).
+                    let line = doc.buffer.line(at.line);
+                    if let Some((s, e)) = word_range(&line, at.col, false) {
+                        doc.buffer.set_cursor(Position::new(at.line, s), false);
+                        doc.buffer.set_cursor(Position::new(at.line, e), true);
+                    } else {
+                        doc.buffer.set_cursor(at, false);
+                    }
                 } else {
                     let at = pos_at(&doc.buffer, p);
                     doc.buffer.set_cursor(at, shift);
@@ -599,6 +647,20 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
         if resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
         }
+        // Right-click: the cursor moves there (unless it's inside the
+        // selection, which the menu then acts on), as in VS Code.
+        if resp.secondary_clicked() {
+            if let Some(p) = resp.interact_pointer_pos() {
+                let at = pos_at(&doc.buffer, p);
+                let (s, e) = doc.buffer.cursor.selection.ordered();
+                if doc.buffer.cursor.selection.is_empty() || at < s || at > e {
+                    doc.buffer.set_cursor(at, false);
+                }
+            }
+            clicked_editor = true;
+        }
+        let read_only = doc.read_only;
+        resp.context_menu(|ui| editor_menu(ui, &mut menu_choice, read_only));
         // Holding ⌘ / Ctrl: underline the symbol under the mouse, like a
         // link, since clicking it goes to its definition.
         let link = resp.hover_pos().filter(|_| ui.input(|i| i.modifiers.command)).and_then(|p| {
@@ -838,6 +900,24 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
     if go_to_definition {
         app.go_to_definition();
     }
+    match menu_choice {
+        Some(EditorMenu::Definition) => app.go_to_definition(),
+        Some(EditorMenu::References) => app.find_references(),
+        Some(EditorMenu::FindInFiles) => app.pending_commands.push(Command::ShowSearch),
+        Some(EditorMenu::Copy) => ui.ctx().copy_text(copy_text(&app.docs[doc_idx].buffer)),
+        Some(EditorMenu::Cut) => {
+            let t = cut(&mut app.docs[doc_idx].buffer);
+            ui.ctx().copy_text(t);
+        }
+        // Arrives next frame as a paste event, which the editor handles.
+        Some(EditorMenu::Paste) => {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+            app.focus = Focus::Editor;
+        }
+        Some(EditorMenu::SelectAll) => app.pending_commands.push(Command::SelectAll),
+        Some(EditorMenu::Palette) => app.pending_commands.push(Command::CommandPalette),
+        None => {}
+    }
     if clicked_editor
         || scroll.inner_rect.contains(ui.input(|i| i.pointer.interact_pos().unwrap_or(Pos2::ZERO)))
             && ui.input(|i| i.pointer.any_pressed())
@@ -847,6 +927,55 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
     if let Some(p) = cursor_screen {
         app.completion.anchor = p;
     }
+}
+
+/// Cut the selection, or the whole line without one (like VS Code), and
+/// return the text for the clipboard.
+fn cut(b: &mut Buffer) -> String {
+    let t = copy_text(b);
+    if b.cursor.selection.is_empty() {
+        let l = b.cursor.head().line;
+        let end = if l + 1 < b.line_count() { Position::new(l + 1, 0) } else { Position::new(l, b.line_len(l)) };
+        b.replace_range(Position::new(l, 0), end, "");
+    } else {
+        b.delete_selection();
+    }
+    t
+}
+
+/// What the editor's right-click menu asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditorMenu {
+    Definition,
+    References,
+    FindInFiles,
+    Cut,
+    Copy,
+    Paste,
+    SelectAll,
+    Palette,
+}
+
+fn editor_menu(ui: &mut egui::Ui, choice: &mut Option<EditorMenu>, read_only: bool) {
+    let ctx = ui.ctx().clone();
+    let cmd = |c: Command| c.shortcut_text(&ctx);
+    let key = |k: Key| ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, k));
+    let mut item = |ui: &mut egui::Ui, label: &str, shortcut: String, enabled: bool, which: EditorMenu| {
+        if ui.add_enabled(enabled, egui::Button::new(label).shortcut_text(shortcut)).clicked() {
+            *choice = Some(which);
+            ui.close();
+        }
+    };
+    item(ui, "Go to Definition", cmd(Command::GoToDefinition), true, EditorMenu::Definition);
+    item(ui, "Find All References", cmd(Command::FindReferences), true, EditorMenu::References);
+    item(ui, "Find in Files", cmd(Command::ShowSearch), true, EditorMenu::FindInFiles);
+    ui.separator();
+    item(ui, "Cut", key(Key::X), !read_only, EditorMenu::Cut);
+    item(ui, "Copy", key(Key::C), true, EditorMenu::Copy);
+    item(ui, "Paste", key(Key::V), !read_only, EditorMenu::Paste);
+    item(ui, "Select All", cmd(Command::SelectAll), true, EditorMenu::SelectAll);
+    ui.separator();
+    item(ui, "Command Palette…", cmd(Command::CommandPalette), true, EditorMenu::Palette);
 }
 
 fn copy_text(b: &Buffer) -> String {

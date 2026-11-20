@@ -62,6 +62,11 @@ bottom, and language-server completion for the languages you actually use.
 - **Plugins** — WebAssembly modules loaded from `~/.config/qell/plugins`,
   sandboxed by Wasmtime, exposing commands to the palette. See
   [`plugins/hello`](plugins/hello).
+- **Right-click menus** — in the file tree (New File/Folder, Rename and
+  Delete inline, Reveal in Finder, Open in Integrated Terminal, Copy Path),
+  the editor (Go to Definition, References, Cut/Copy/Paste…) and the tabs
+  (Close Others, Close to the Right, Close All…). Delete moves to the Trash
+  after asking.
 - **Minimap** — the whole file in miniature on the right of the editor, in
   its syntax colours, with the visible part shaded: click to jump, drag to
   scroll. *View → Minimap* or Settings to hide it.
