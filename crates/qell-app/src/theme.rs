@@ -5,6 +5,9 @@ use egui::{Color32, CornerRadius, FontFamily, FontId, Stroke, Visuals};
 use qell_core::{Theme, TokenKind};
 use qell_git::FileStatus;
 
+/// Half-width of the panel resize handles (see `apply`).
+pub const RESIZE_GRAB_RADIUS: f32 = 2.0;
+
 pub struct Palette {
     pub syntax: Theme,
     pub editor_bg: Color32,
@@ -136,6 +139,12 @@ impl Palette {
         // Interface text (tab titles, file names, status bar) is chrome, not
         // content: no text cursor on hover, no accidental selection.
         style.interaction.selectable_labels = false;
+        // Panel resize handles straddle the border by this much on each
+        // side. egui's 5 px reached into the terminal's padding, so a click
+        // near its left edge (to focus it, or start a selection) grabbed the
+        // file tree's handle and dragged the sidebar. 2 px each side keeps
+        // the handle on the border, like VS Code's 4 px sash.
+        style.interaction.resize_grab_radius_side = RESIZE_GRAB_RADIUS;
         ctx.set_style(style);
     }
 }
