@@ -287,6 +287,10 @@ const BRACKET_COLORS: [Color32; 3] =
 const BRACKET_UNMATCHED: Color32 = Color32::from_rgb(0xff, 0x12, 0x12);
 const BRACKET_MATCH_BG: Color32 = Color32::from_rgba_premultiplied(0, 0x64, 0, 0x1a);
 const BRACKET_MATCH_BORDER: Color32 = Color32::from_rgb(0x88, 0x88, 0x88);
+/// VS Code's gutter colours for lines changed since the last commit.
+const GUTTER_ADDED: Color32 = Color32::from_rgb(0x2e, 0xa0, 0x43);
+const GUTTER_MODIFIED: Color32 = Color32::from_rgb(0x00, 0x78, 0xd4);
+const GUTTER_DELETED: Color32 = Color32::from_rgb(0xf8, 0x51, 0x49);
 const GUIDE: Color32 = Color32::from_rgb(0x40, 0x40, 0x40);
 const GUIDE_ACTIVE: Color32 = Color32::from_rgb(0x70, 0x70, 0x70);
 
@@ -789,6 +793,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
         let head = cursor.head();
         let vim_block = if vim_on { app.vim.block_cursor(&doc.buffer) } else { None };
         doc.update_structure(&mut app.languages, tab_size);
+        doc.update_changes();
         let spans = doc.spans(&mut app.languages).to_vec();
         let rope = doc.buffer.rope();
 
@@ -876,6 +881,26 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                     let r = Rect::from_min_size(Pos2::new(x, y + 1.0), Vec2::new(char_width, row_height - 2.0));
                     painter.rect_filled(r, 1.0, BRACKET_MATCH_BG);
                     painter.rect_stroke(r, 1.0, Stroke::new(1.0_f32, BRACKET_MATCH_BORDER), egui::StrokeKind::Inside);
+                }
+            }
+
+            // Changed since git's version: a bar beside the line number
+            // (green: added, blue: modified), a red wedge where lines went.
+            if let Some(change) = doc.changes.get(row) {
+                let x = origin.x + gutter_w - 7.0;
+                if change.added || change.modified {
+                    let color = if change.added { GUTTER_ADDED } else { GUTTER_MODIFIED };
+                    painter.rect_filled(Rect::from_min_size(Pos2::new(x, y), Vec2::new(3.0, row_height)), 0.0, color);
+                }
+                let wedge = |y: f32| {
+                    let points = vec![Pos2::new(x, y - 4.0), Pos2::new(x + 5.0, y), Pos2::new(x, y + 4.0)];
+                    painter.add(egui::Shape::convex_polygon(points, GUTTER_DELETED, Stroke::NONE));
+                };
+                if change.deleted_above && vr.start == 0 {
+                    wedge(y);
+                }
+                if change.deleted_below && last_seg {
+                    wedge(y + row_height);
                 }
             }
 

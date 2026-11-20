@@ -348,6 +348,18 @@ pub fn commit(dir: &Path, message: &str) -> Result<String, String> {
     run(dir, &["commit", "--file", "-"], Some(message))
 }
 
+/// A file's text as git has it (the index: the last commit plus anything
+/// staged), to show what changed since. `None` when the file isn't in a
+/// repository, isn't tracked, or isn't text.
+pub fn index_text(path: &Path) -> Option<String> {
+    let (dir, name) = (path.parent()?, path.file_name()?.to_str()?);
+    let out = git(dir).args(["show", &format!(":./{name}")]).stderr(std::process::Stdio::null()).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8(out.stdout).ok()
+}
+
 fn git(root: &Path) -> Command {
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(root);
@@ -749,6 +761,24 @@ mod tests {
         assert_eq!(ws.status_of(&p("clones/tool/main.go")), None);
         assert_eq!(ws.status_of(&p("clones/other.txt")), Some(FileStatus::Ignored));
         assert_eq!(ws.status_of(&p("top.txt")), Some(FileStatus::Modified));
+    }
+
+    #[test]
+    fn index_text_is_the_committed_version() {
+        if !git_available() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("sub");
+        init_repo(tmp.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
+        commit_all(tmp.path());
+        std::fs::write(dir.join("a.txt"), "one\nchanged\n").unwrap();
+        std::fs::write(dir.join("new.txt"), "x").unwrap();
+        assert_eq!(index_text(&dir.join("a.txt")).as_deref(), Some("one\ntwo\n"));
+        assert_eq!(index_text(&dir.join("new.txt")), None); // untracked
+        assert_eq!(index_text(Path::new("/nonexistent/x")), None);
     }
 
     fn git_available() -> bool {
