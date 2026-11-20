@@ -39,6 +39,9 @@ pub struct History {
     redo: Vec<Vec<Edit>>,
     /// When true the next recorded edit starts a new group.
     boundary: bool,
+    /// An explicit group is open (Vim's insert sessions, `:s`): `Some(false)`
+    /// until its first edit, then `Some(true)`; every edit joins it.
+    grouping: Option<bool>,
 }
 
 impl History {
@@ -49,11 +52,40 @@ impl History {
     /// Force the next edit into a fresh undo group (called on cursor moves,
     /// whitespace, pastes, etc.).
     pub fn commit(&mut self) {
+        if self.grouping.is_none() {
+            self.boundary = true;
+        }
+    }
+
+    /// Start a group that every following edit joins, until `end_group`:
+    /// one undo step for the lot.
+    pub fn begin_group(&mut self) {
+        if self.grouping.is_none() {
+            self.grouping = Some(false);
+        }
+    }
+
+    pub fn end_group(&mut self) {
+        self.grouping = None;
         self.boundary = true;
     }
 
     pub fn record(&mut self, edit: Edit) {
         self.redo.clear();
+        match self.grouping {
+            Some(true) => {
+                if let Some(group) = self.undo.last_mut() {
+                    group.push(edit);
+                    return;
+                }
+            }
+            Some(false) => {
+                self.grouping = Some(true);
+                self.undo.push(vec![edit]);
+                return;
+            }
+            None => {}
+        }
         let mergeable =
             !self.boundary && edit.old.is_empty() && edit.new.chars().count() == 1 && !edit.new.chars().all(char::is_whitespace);
         match self.undo.last_mut() {

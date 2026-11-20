@@ -262,6 +262,15 @@ impl Buffer {
         self.cursor.selection.head = self.char_to_pos(self.rope.len_chars());
     }
 
+    /// Make the edits until `end_undo_group` a single undo step.
+    pub fn begin_undo_group(&mut self) {
+        self.history.begin_group();
+    }
+
+    pub fn end_undo_group(&mut self) {
+        self.history.end_group();
+    }
+
     pub fn undo(&mut self) -> bool {
         let Some(edits) = self.history.pop_undo() else { return false };
         for e in edits {
