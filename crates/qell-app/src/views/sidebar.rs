@@ -116,6 +116,12 @@ fn show_dir(app: &mut QellApp, ui: &mut egui::Ui, dir: &Path) {
                 state.toggle(ui);
                 state.store(ui.ctx());
             }
+            // Revealing the folder itself: show it and stop forcing it open,
+            // so it can be collapsed again.
+            if app.reveal.as_deref() == Some(e.path.as_path()) {
+                header.inner.scroll_to_me(Some(egui::Align::Center));
+                app.reveal = None;
+            }
             // The name takes the clicks (it sits above the row).
             header.inner.context_menu(|ui| entry_menu(app, ui, &e.path, Some(id)));
             if let Some(t) = tooltip {
@@ -146,15 +152,16 @@ fn show_dir(app: &mut QellApp, ui: &mut egui::Ui, dir: &Path) {
     }
 }
 
-/// The handful of files at the top of the tree: the ones you open most (or
-/// last), plus any you pinned. Clicking one opens it and reveals it below.
+/// The handful of entries at the top of the tree: the folders you work in
+/// most (the repositories, in a workspace of several), then the files you
+/// open most, plus anything you pinned.
 fn show_shortcuts(app: &mut QellApp, ui: &mut egui::Ui) {
     let limit = app.config.shortcuts;
     if limit == 0 {
         return;
     }
     let order = if app.config.shortcuts_recent { Order::Recent } else { Order::MostUsed };
-    let entries = app.recent.top(&app.root.clone(), order, limit);
+    let shortcuts = app.recent.shortcuts(&app.root.clone(), order, limit);
     let (dim, text) = (app.palette.text_dim, app.palette.text);
     let show_icons = app.config.file_icons;
 
@@ -163,26 +170,28 @@ fn show_shortcuts(app: &mut QellApp, ui: &mut egui::Ui) {
         if ui
             .add(egui::Label::new(RichText::new(title).size(11.0).color(dim)).sense(egui::Sense::click()))
             .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text("Show the files opened last instead")
+            .on_hover_text("Show what you opened last instead")
             .clicked()
         {
             app.config.shortcuts_recent = !app.config.shortcuts_recent;
             app.save_config();
         }
     });
-    if entries.is_empty() {
+    if shortcuts.folders.is_empty() && shortcuts.files.is_empty() {
         ui.label(RichText::new("Files you open show up here.").size(11.0).italics().color(dim));
     }
     let active = app.docs.get(app.active).and_then(|d| d.buffer.path().map(Path::to_path_buf));
     let root = app.root.clone();
-    for e in entries {
+    for e in shortcuts.folders.into_iter().chain(shortcuts.files) {
         let name = e.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let parent = e.path.parent().and_then(|p| p.strip_prefix(&root).ok()).map(|p| p.to_string_lossy().into_owned());
-        let icon = show_icons.then(|| icons::for_file(&e.path));
+        let icon = show_icons.then(|| if e.is_dir { (icons::FOLDER, dim) } else { icons::for_file(&e.path) });
         let label = icon_label(icon, &name, text);
-        let mut button = egui::Button::selectable(active.as_deref() == Some(e.path.as_path()), label)
+        let mut button = egui::Button::selectable(!e.is_dir && active.as_deref() == Some(e.path.as_path()), label)
             .min_size(egui::vec2(ui.available_width(), 0.0));
-        // Where it is, and a star when it's pinned.
+        // Where it is, and a star when it's pinned. A folder below the
+        // workspace needs no "where": its own name says it.
+        let parent = parent.filter(|_| !e.is_dir);
         let right = match (e.pinned, parent.as_deref()) {
             (true, Some(p)) if !p.is_empty() => format!("★ {p}"),
             (true, _) => "★".into(),
@@ -192,9 +201,13 @@ fn show_shortcuts(app: &mut QellApp, ui: &mut egui::Ui) {
         if !right.is_empty() {
             button = button.right_text(RichText::new(shorten_dir(&right)).size(11.0).color(dim));
         }
-        let resp = ui.add(button).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(e.path.display().to_string());
+        let hover = if e.is_dir { format!("{} — open it in the tree", e.path.display()) } else { e.path.display().to_string() };
+        let resp = ui.add(button).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(hover);
         if resp.clicked() {
-            app.open_file(e.path.clone());
+            // A folder opens in the tree; a file opens in the editor.
+            if !e.is_dir {
+                app.open_file(e.path.clone());
+            }
             app.reveal = Some(e.path.clone());
         }
         resp.context_menu(|ui| {
@@ -217,7 +230,7 @@ fn show_shortcuts(app: &mut QellApp, ui: &mut egui::Ui) {
                 ui.close();
             }
             ui.separator();
-            entry_menu(app, ui, &e.path.clone(), None);
+            entry_menu(app, ui, &e.path.clone(), e.is_dir.then(|| ui.id().with(&e.path)));
         });
     }
     ui.add_space(4.0);

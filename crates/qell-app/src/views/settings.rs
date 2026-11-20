@@ -103,7 +103,7 @@ fn defs() -> Vec<Def> {
             "shortcuts",
             "Layout",
             "File Tree Shortcuts",
-            "How many often-used files to list above the file tree. 0 hides the section.",
+            "How many rows of shortcuts to show above the file tree, half of them folders. 0 hides the section.",
         ),
         def("show_sidebar", "Layout", "Show File Tree", "Show the file tree (also on startup)."),
         def("show_terminal", "Layout", "Show Terminal", "Show the terminal panel (also on startup)."),
