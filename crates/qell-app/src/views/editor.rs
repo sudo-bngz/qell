@@ -853,6 +853,12 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                 }
             }
 
+            // Find in file: every match, the current one brighter.
+            if app.find.open {
+                let geom = super::find::RowGeom { line: row, y, height: row_height, line_len: line_chars };
+                super::find::paint_matches(&painter, &app.find, &geom, clip, xcol);
+            }
+
             // Vim: matches of the last search.
             if vim_on {
                 for (c0, c1) in app.vim.matches_in(&doc.buffer.line(row)) {
@@ -1043,6 +1049,8 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
     }
     outer.allocate_rect(full, Sense::hover());
 
+    // The find bar floats over the top-right of the editor.
+    super::find::show(app, outer, Rect::from_min_max(full.min, Pos2::new(full.right() - mm_w, full.bottom())));
     if go_to_definition {
         app.go_to_definition();
     }
