@@ -133,6 +133,8 @@ pub struct QellApp {
     /// The Settings window.
     pub settings: views::settings::SettingsState,
     pub sidebar_view: SidebarView,
+    /// The native menu bar, once installed (macOS only).
+    pub native_menu: Option<crate::native_menu::NativeMenu>,
     pub scm: views::scm::ScmState,
     /// The config as last applied to the running editor; `config` is what
     /// the Settings window edits.
@@ -183,6 +185,7 @@ impl QellApp {
             config_dirty_since: None,
             settings: Default::default(),
             sidebar_view: SidebarView::Explorer,
+            native_menu: None,
             scm: Default::default(),
             show_sidebar: config.show_sidebar,
             show_terminal: config.show_terminal,
@@ -305,6 +308,30 @@ impl QellApp {
         } else {
             self.sidebar_view = view;
             self.show_sidebar = true;
+        }
+    }
+
+    /// Install the native menu on the first frame (the application must be
+    /// running for AppKit to take it), then turn chosen items into actions.
+    fn handle_native_menu(&mut self, ctx: &Context) {
+        #[cfg(target_os = "macos")]
+        if self.native_menu.is_none() {
+            match crate::native_menu::NativeMenu::install(ctx) {
+                Ok(m) => self.native_menu = Some(m),
+                Err(e) => log::error!("native menu unavailable: {e}"),
+            }
+        }
+        let Some(menu) = &self.native_menu else { return };
+        for action in menu.poll() {
+            match action {
+                crate::native_menu::Action::Command(cmd) => self.pending_commands.push(cmd),
+                crate::native_menu::Action::Edit(e) => {
+                    // Replayed as input so it acts on whatever has focus.
+                    if let Some(ev) = crate::native_menu::NativeMenu::edit_event(e) {
+                        ctx.input_mut(|i| i.events.push(ev));
+                    }
+                }
+            }
         }
     }
 
@@ -775,6 +802,7 @@ impl QellApp {
 impl eframe::App for QellApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         self.notifications.retain(|n| n.at.elapsed() < Duration::from_secs(if n.is_error { 8 } else { 4 }));
+        self.handle_native_menu(ctx);
         self.handle_lsp_events();
         self.handle_git(ctx);
         self.handle_scm_jobs();

@@ -98,7 +98,9 @@ npm i -g typescript typescript-language-server
 | Zoom                  | `Ctrl+=` / `Ctrl+-` |
 | Settings              | `Ctrl+,`           |
 
-On macOS, `Ctrl` is `⌘` for the editor shortcuts.
+On macOS, `Ctrl` is `⌘` for the editor shortcuts, and Qell uses the native
+menu bar (Qell / File / Edit / View / Window, with About, Settings… `⌘,`,
+Hide and Quit in the app menu) instead of the in-window one.
 
 ## Configuration
 

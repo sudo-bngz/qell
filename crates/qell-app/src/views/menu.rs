@@ -16,6 +16,10 @@ fn item(ui: &mut egui::Ui, app: &mut QellApp, cmd: Command) {
 }
 
 pub fn show(app: &mut QellApp, ctx: &Context) {
+    // The native menu bar replaces this one (macOS).
+    if app.native_menu.is_some() {
+        return;
+    }
     egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {

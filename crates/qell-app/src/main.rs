@@ -10,6 +10,7 @@ mod commands;
 mod config;
 mod document;
 mod icons;
+mod native_menu;
 mod theme;
 mod views;
 
