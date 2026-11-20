@@ -6,7 +6,7 @@ use egui::text::{LayoutJob, TextFormat};
 use egui::{Color32, Context, FontId, RichText};
 use qell_git::FileStatus;
 
-use crate::app::QellApp;
+use crate::app::{QellApp, SidebarView};
 use crate::icons;
 
 #[derive(Debug, Clone)]
@@ -69,7 +69,12 @@ fn show_dir(app: &mut QellApp, ui: &mut egui::Ui, dir: &Path) {
             let label = icon_label(show_icons.then_some((icon, folder_color)), &e.name, name_color);
             let (_, header, _) = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
                 .show_header(ui, |ui| {
-                    let clicked = ui.add(egui::Label::new(label).sense(egui::Sense::click())).clicked();
+                    // Not selectable text: a folder name is a button, so the
+                    // pointer is a hand, not a text cursor.
+                    let clicked = ui
+                        .add(egui::Label::new(label).sense(egui::Sense::click()).selectable(false))
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked();
                     // Folders get a dot rather than a letter, like VS Code.
                     if let (Some(c), Some(_)) = (color, tooltip) {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -101,7 +106,7 @@ fn show_dir(app: &mut QellApp, ui: &mut egui::Ui, dir: &Path) {
                     button = button.right_text(RichText::new(s.badge()).size(12.0).color(c));
                 }
             }
-            let mut resp = ui.add(button);
+            let mut resp = ui.add(button).on_hover_cursor(egui::CursorIcon::PointingHand);
             if let Some(t) = tooltip {
                 resp = resp.on_hover_text(t);
             }
@@ -119,6 +124,10 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
         .width_range(160.0..=600.0)
         .frame(egui::Frame::new().fill(bg).inner_margin(egui::Margin::symmetric(4, 6)))
         .show(ctx, |ui| {
+            if app.sidebar_view == SidebarView::SourceControl {
+                super::scm::show_contents(app, ui);
+                return;
+            }
             ui.horizontal(|ui| {
                 let title = app.root.file_name().map(|n| n.to_string_lossy().to_uppercase()).unwrap_or_default();
                 ui.label(RichText::new(title).size(11.0).color(app.palette.text_dim));
@@ -135,6 +144,52 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                 ui.spacing_mut().item_spacing.y = 1.0;
                 let root = app.root.clone();
                 show_dir(app, ui, &root);
+            });
+        });
+}
+
+/// The thin bar on the far left: Explorer and Source Control, VS Code style.
+pub fn show_activity_bar(app: &mut QellApp, ctx: &Context) {
+    let changes = app.git_status.as_ref().filter(|_| app.config.git_status).map_or(0, |ws| ws.changed_files());
+    egui::SidePanel::left("activity_bar")
+        .exact_width(44.0)
+        .resizable(false)
+        .frame(egui::Frame::new().fill(app.palette.chrome_bg).inner_margin(egui::Margin::symmetric(0, 6)))
+        .show(ctx, |ui| {
+            ui.vertical_centered(|ui| {
+                for (view, icon, tip) in [
+                    (SidebarView::Explorer, icons::EXPLORER, "Explorer (Ctrl+Shift+E)"),
+                    (SidebarView::SourceControl, icons::SOURCE_CONTROL, "Source Control (Ctrl+Shift+G)"),
+                ] {
+                    let active = app.show_sidebar && app.sidebar_view == view;
+                    let color = if active { app.palette.text } else { app.palette.text_dim };
+                    let button = egui::Button::new(RichText::new(icon.to_string()).font(icons::font(22.0)).color(color))
+                        .frame(false)
+                        .min_size(egui::vec2(44.0, 44.0));
+                    let resp = ui.add(button).on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand);
+                    if active {
+                        // Accent bar on the left edge of the active view.
+                        let r = resp.rect;
+                        ui.painter().vline(
+                            r.left() + 1.0,
+                            r.y_range().shrink(6.0),
+                            egui::Stroke::new(2.0_f32, app.palette.accent),
+                        );
+                    }
+                    if view == SidebarView::SourceControl && changes > 0 {
+                        // Badge with the number of changed files.
+                        let text = if changes > 99 { "99+".to_string() } else { changes.to_string() };
+                        let center = resp.rect.center() + egui::vec2(10.0, 9.0);
+                        let galley = ui.painter().layout_no_wrap(text, FontId::proportional(9.0), Color32::WHITE);
+                        let w = (galley.size().x + 7.0).max(15.0);
+                        let rect = egui::Rect::from_center_size(center, egui::vec2(w, 15.0));
+                        ui.painter().rect_filled(rect, 7.5, app.palette.accent);
+                        ui.painter().galley(rect.center() - galley.size() / 2.0, galley, Color32::WHITE);
+                    }
+                    if resp.clicked() {
+                        app.show_sidebar_view(view);
+                    }
+                }
             });
         });
 }

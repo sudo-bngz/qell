@@ -70,7 +70,7 @@ fn show_tabs(app: &mut QellApp, ui: &mut egui::Ui) {
                     // The whole tab is the click target; it sits above the ×,
                     // so tell the two apart by where the click landed.
                     let close_rect = inner.inner;
-                    let resp = inner.response.interact(Sense::click());
+                    let resp = inner.response.interact(Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
                     if resp.clicked() {
                         if resp.interact_pointer_pos().is_some_and(|p| close_rect.contains(p)) {
                             close = Some(i);

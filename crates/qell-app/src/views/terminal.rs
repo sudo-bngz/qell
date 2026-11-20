@@ -64,7 +64,11 @@ fn show_header(app: &mut QellApp, ui: &mut egui::Ui) {
                             });
                             // The tab sits above its ×: decide by click position.
                             let close_rect = inner.inner;
-                            let resp = inner.response.interact(Sense::click()).on_hover_text(full);
+                            let resp = inner
+                                .response
+                                .interact(Sense::click())
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                .on_hover_text(full);
                             if resp.clicked() {
                                 let on_close = resp.interact_pointer_pos().zip(close_rect).is_some_and(|(p, r)| r.contains(p));
                                 if on_close {

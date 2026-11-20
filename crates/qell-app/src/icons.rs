@@ -17,6 +17,14 @@ const FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/qell-icons.ttf");
 
 pub const FOLDER: char = '\u{e5ff}';
 pub const FOLDER_OPEN: char = '\u{e5fe}';
+/// Codicons, for the activity bar and Source Control.
+pub const EXPLORER: char = '\u{eaf0}';
+pub const SOURCE_CONTROL: char = '\u{ea68}';
+pub const ADD: char = '\u{ea60}';
+pub const REMOVE: char = '\u{eb3b}';
+pub const CHECK: char = '\u{eab2}';
+pub const REFRESH: char = '\u{eb37}';
+
 /// Unknown file types (devicons' own fallback is a plain `*`).
 const DEFAULT_FILE: (char, Color32) = ('\u{e64e}', Color32::from_rgb(0x7e, 0x8e, 0xa8));
 

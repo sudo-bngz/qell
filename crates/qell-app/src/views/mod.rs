@@ -5,6 +5,7 @@
 pub mod editor;
 pub mod menu;
 pub mod palette;
+pub mod scm;
 pub mod settings;
 pub mod sidebar;
 pub mod status;

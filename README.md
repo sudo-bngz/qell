@@ -40,6 +40,11 @@ bottom, and language-server completion for the languages you actually use.
   Works when the folder you open holds several repositories (found up to
   3 levels deep by default, `git_scan_depth`), or repositories nested in
   another one: each file is coloured by its own repository.
+- **Source Control** (`Ctrl+Shift+G`) — VS Code-style panel: per
+  repository, staged changes and changes with stage / unstage buttons and
+  a commit box (`Ctrl+Enter`). Commits run your hooks and signing in the
+  background; a failing hook shows its message. The activity bar badge
+  counts changed files.
 - **Integrated terminals** — the Alacritty terminal core in a panel
   (`` Ctrl+` ``), with 256/true colour, scrollback and application-cursor mode.
   Run several shells as tabs: `` Ctrl+Shift+` `` opens a new one,
@@ -86,6 +91,7 @@ npm i -g typescript typescript-language-server
 | Undo / redo           | `Ctrl+Z` / `Ctrl+Y` |
 | Trigger completion    | `Ctrl+Space`       |
 | Toggle sidebar        | `Ctrl+B`           |
+| Explorer / Source Control | `Ctrl+Shift+E` / `Ctrl+Shift+G` |
 | Toggle terminal       | `` Ctrl+` ``       |
 | New terminal          | `` Ctrl+Shift+` `` |
 | Next / prev terminal  | `Ctrl+PageDown/Up` |

@@ -81,6 +81,37 @@ fn classify(x: u8, y: u8) -> Option<FileStatus> {
     })
 }
 
+/// A changed file as the Source Control view shows it: its state in the
+/// index (staged) and in the working tree (not staged yet).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Change {
+    /// Relative to where `git status` was run (see [`RepoStatus::parse`]).
+    pub path: PathBuf,
+    pub staged: Option<FileStatus>,
+    pub unstaged: Option<FileStatus>,
+}
+
+/// Index (`X`) side of a porcelain code.
+fn staged_status(x: u8) -> Option<FileStatus> {
+    Some(match x {
+        b'M' | b'T' => FileStatus::Modified,
+        b'A' => FileStatus::Added,
+        b'D' => FileStatus::Deleted,
+        b'R' | b'C' => FileStatus::Renamed,
+        _ => return None,
+    })
+}
+
+/// Working-tree (`Y`) side of a porcelain code.
+fn unstaged_status(y: u8) -> Option<FileStatus> {
+    Some(match y {
+        b'M' | b'T' => FileStatus::Modified,
+        b'D' => FileStatus::Deleted,
+        b'A' => FileStatus::Added,
+        _ => return None,
+    })
+}
+
 /// One repository's `git status`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RepoStatus {
@@ -91,9 +122,20 @@ pub struct RepoStatus {
     pub behind: u32,
     /// Changed files, relative to where `git status` was asked from.
     files: Vec<(PathBuf, FileStatus)>,
+    /// The same files split into staged / unstaged, for Source Control
+    /// (ignored files left out).
+    pub changes: Vec<Change>,
 }
 
 impl RepoStatus {
+    pub fn staged(&self) -> impl Iterator<Item = (&Path, FileStatus)> {
+        self.changes.iter().filter_map(|c| c.staged.map(|s| (c.path.as_path(), s)))
+    }
+
+    pub fn unstaged(&self) -> impl Iterator<Item = (&Path, FileStatus)> {
+        self.changes.iter().filter_map(|c| c.unstaged.map(|s| (c.path.as_path(), s)))
+    }
+
     /// Number of changed files (excluding ignored ones).
     pub fn changed_files(&self) -> usize {
         self.files.iter().filter(|(_, s)| *s != FileStatus::Ignored).count()
@@ -131,6 +173,15 @@ impl RepoStatus {
                 continue;
             }
             status.files.push((rel.to_path_buf(), st));
+            let change = match st {
+                FileStatus::Ignored => None,
+                FileStatus::Untracked => Some((None, Some(FileStatus::Untracked))),
+                FileStatus::Conflict => Some((None, Some(FileStatus::Conflict))),
+                _ => Some((staged_status(x), unstaged_status(y))),
+            };
+            if let Some((staged, unstaged)) = change {
+                status.changes.push(Change { path: rel.to_path_buf(), staged, unstaged });
+            }
         }
         status
     }
@@ -249,6 +300,50 @@ impl WorkspaceStatus {
     pub fn changed_files(&self) -> usize {
         self.repos.iter().map(|(_, s)| s.changed_files()).sum()
     }
+}
+
+/// Run a git command in `dir` (stdin from `input` when given). Returns
+/// stdout, or git's own error message.
+pub fn run(dir: &Path, args: &[&str], input: Option<&str>) -> Result<String, String> {
+    use std::io::Write;
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(dir).args(args);
+    cmd.stdin(if input.is_some() { std::process::Stdio::piped() } else { std::process::Stdio::null() });
+    cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| format!("cannot run git: {e}"))?;
+    if let (Some(text), Some(mut stdin)) = (input, child.stdin.take()) {
+        let _ = stdin.write_all(text.as_bytes());
+    }
+    let out = child.wait_with_output().map_err(|e| format!("git: {e}"))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let err = if err.trim().is_empty() { String::from_utf8_lossy(&out.stdout) } else { err };
+        Err(err.trim().to_string())
+    }
+}
+
+/// `git add` these paths (relative to `dir`).
+pub fn stage(dir: &Path, paths: &[&Path]) -> Result<(), String> {
+    let mut args = vec!["add", "--all", "--"];
+    let paths: Vec<String> = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    args.extend(paths.iter().map(String::as_str));
+    run(dir, &args, None).map(drop)
+}
+
+/// Take these paths back out of the index, keeping the working tree.
+/// `git reset` works before the first commit too, unlike `restore --staged`.
+pub fn unstage(dir: &Path, paths: &[&Path]) -> Result<(), String> {
+    let mut args = vec!["reset", "-q", "--"];
+    let paths: Vec<String> = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    args.extend(paths.iter().map(String::as_str));
+    run(dir, &args, None).map(drop)
+}
+
+/// Commit what is staged, with the user's hooks and signing config.
+pub fn commit(dir: &Path, message: &str) -> Result<String, String> {
+    run(dir, &["commit", "--file", "-"], Some(message))
 }
 
 fn git(root: &Path) -> Command {
@@ -551,6 +646,53 @@ mod tests {
         let ws = single(b"!! src/gen.rs\0", "");
         assert_eq!(ws.status_of(&p("src/gen.rs")), Some(FileStatus::Ignored));
         assert_eq!(ws.status_of(&p("src")), None);
+    }
+
+    #[test]
+    fn staged_and_unstaged_are_split() {
+        let st = RepoStatus::parse(b"## main\0MM both.rs\0M  staged.rs\0 M work.rs\0A  new.rs\0?? untracked.rs\0UU conflict.rs\0!! ignored.rs\0 D gone.rs\0", "");
+        let staged: Vec<_> = st.staged().map(|(p, s)| (p.to_str().unwrap(), s)).collect();
+        let unstaged: Vec<_> = st.unstaged().map(|(p, s)| (p.to_str().unwrap(), s)).collect();
+        use FileStatus::*;
+        assert_eq!(staged, vec![("both.rs", Modified), ("staged.rs", Modified), ("new.rs", Added)]);
+        assert_eq!(
+            unstaged,
+            vec![
+                ("both.rs", Modified),
+                ("work.rs", Modified),
+                ("untracked.rs", Untracked),
+                ("conflict.rs", Conflict),
+                ("gone.rs", Deleted)
+            ]
+        );
+    }
+
+    #[test]
+    fn real_stage_unstage_commit() {
+        if !git_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        init_repo(root);
+        std::fs::write(root.join("a.txt"), "a").unwrap();
+        // Before the first commit: stage, unstage, stage again.
+        stage(root, &[Path::new("a.txt")]).unwrap();
+        assert_eq!(status(root).unwrap().staged().count(), 1);
+        unstage(root, &[Path::new("a.txt")]).unwrap();
+        assert_eq!(status(root).unwrap().staged().count(), 0);
+        stage(root, &[Path::new("a.txt")]).unwrap();
+        commit(root, "first\n\nwith a body").unwrap();
+        let st = status(root).unwrap();
+        assert!(st.changes.is_empty());
+        let log = run(root, &["log", "--format=%B", "-1"], None).unwrap();
+        assert_eq!(log.trim(), "first\n\nwith a body");
+        // A deleted file stages as a deletion.
+        std::fs::remove_file(root.join("a.txt")).unwrap();
+        stage(root, &[Path::new("a.txt")]).unwrap();
+        assert_eq!(status(root).unwrap().staged().next().map(|(_, s)| s), Some(FileStatus::Deleted));
+        // Errors come back as git's message.
+        assert!(commit(root, "").unwrap_err().to_lowercase().contains("message"));
     }
 
     #[test]

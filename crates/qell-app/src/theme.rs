@@ -133,6 +133,9 @@ impl Palette {
         style.spacing.window_margin = egui::Margin::same(6);
         style.spacing.menu_margin = egui::Margin::same(4);
         style.spacing.scroll = egui::style::ScrollStyle::thin();
+        // Interface text (tab titles, file names, status bar) is chrome, not
+        // content: no text cursor on hover, no accidental selection.
+        style.interaction.selectable_labels = false;
         ctx.set_style(style);
     }
 }

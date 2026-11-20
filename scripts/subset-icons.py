@@ -29,6 +29,13 @@ EXTRA = [
     0xE5FE,  # nf-custom-folder_open
     0xE64E,  # nf-seti-default (unknown files)
     0xE615,  # nf-seti-config (VCL, which devicons doesn't know)
+    # Codicons (VS Code's own icon set) for the activity bar and Source Control.
+    0xEAF0,  # cod-files
+    0xEA68,  # cod-source_control
+    0xEA60,  # cod-add
+    0xEB3B,  # cod-remove
+    0xEAB2,  # cod-check
+    0xEB37,  # cod-refresh
 ]
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

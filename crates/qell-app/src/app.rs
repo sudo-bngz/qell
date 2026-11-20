@@ -18,6 +18,13 @@ use crate::document::Document;
 use crate::theme::Palette;
 use crate::views;
 
+/// What the left sidebar shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidebarView {
+    Explorer,
+    SourceControl,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Editor,
@@ -125,6 +132,8 @@ pub struct QellApp {
     was_focused: bool,
     /// The Settings window.
     pub settings: views::settings::SettingsState,
+    pub sidebar_view: SidebarView,
+    pub scm: views::scm::ScmState,
     /// The config as last applied to the running editor; `config` is what
     /// the Settings window edits.
     applied_config: Config,
@@ -173,6 +182,8 @@ impl QellApp {
             applied_config: config.clone(),
             config_dirty_since: None,
             settings: Default::default(),
+            sidebar_view: SidebarView::Explorer,
+            scm: Default::default(),
             show_sidebar: config.show_sidebar,
             show_terminal: config.show_terminal,
             font_size: config.font_size,
@@ -286,11 +297,48 @@ impl QellApp {
         self.completion.open = false;
     }
 
+    /// Show a sidebar view; asking for the one already shown hides the
+    /// sidebar, like clicking its icon in VS Code.
+    pub fn show_sidebar_view(&mut self, view: SidebarView) {
+        if self.show_sidebar && self.sidebar_view == view {
+            self.show_sidebar = false;
+        } else {
+            self.sidebar_view = view;
+            self.show_sidebar = true;
+        }
+    }
+
+    fn handle_scm_jobs(&mut self) {
+        for job in self.scm.poll() {
+            self.git.refresh();
+            match (job.kind, job.result) {
+                (views::scm::JobKind::Commit, Ok(out)) => {
+                    self.scm.messages.remove(&job.repo);
+                    // "[main 1a2b3c4] subject" → "1a2b3c4 subject"
+                    let first = out.lines().next().unwrap_or("").trim();
+                    let summary = first
+                        .split_once("] ")
+                        .map(|(h, s)| format!("{} {s}", h.rsplit(' ').next().unwrap_or("")))
+                        .unwrap_or(first.to_string());
+                    self.notify(format!("Committed {summary}"));
+                }
+                (_, Ok(_)) => {}
+                (kind, Err(e)) => {
+                    log::error!("git {kind:?} failed: {e}");
+                    // Hooks can print a lot: show the last lines, which say why.
+                    let tail: Vec<&str> = e.lines().filter(|l| !l.trim().is_empty()).collect();
+                    let msg = tail[tail.len().saturating_sub(2)..].join(" — ");
+                    self.notify_error(format!("git {} failed: {msg}", format!("{kind:?}").to_lowercase()));
+                }
+            }
+        }
+    }
+
     // ---- settings --------------------------------------------------------
 
     /// The Settings window or the palette has the keyboard.
     pub fn modal_open(&self) -> bool {
-        self.command_palette.open || self.settings.open
+        self.command_palette.open || self.settings.open || self.scm.typing
     }
 
     /// Re-read config.toml after the user edited it by hand.
@@ -459,6 +507,8 @@ impl QellApp {
             }
             Command::TriggerCompletion => self.request_completion(),
             Command::ToggleSidebar => self.show_sidebar = !self.show_sidebar,
+            Command::ShowExplorer => self.show_sidebar_view(SidebarView::Explorer),
+            Command::ShowSourceControl => self.show_sidebar_view(SidebarView::SourceControl),
             Command::ToggleTerminal => {
                 self.show_terminal = !self.show_terminal;
                 self.focus = if self.show_terminal { Focus::Terminal } else { Focus::Editor };
@@ -677,10 +727,10 @@ impl QellApp {
             }
             return;
         }
-        // In Settings, text fields own the keyboard: only Escape, the
-        // settings shortcut itself and Quit go through.
-        if self.settings.open {
-            if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+        // In Settings or the commit box, text fields own the keyboard: only
+        // Escape, the settings shortcut itself and Quit go through.
+        if self.settings.open || self.scm.typing {
+            if self.settings.open && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
                 self.settings.open = false;
             }
             for cmd in [Command::OpenSettings, Command::Quit] {
@@ -727,11 +777,13 @@ impl eframe::App for QellApp {
         self.notifications.retain(|n| n.at.elapsed() < Duration::from_secs(if n.is_error { 8 } else { 4 }));
         self.handle_lsp_events();
         self.handle_git(ctx);
+        self.handle_scm_jobs();
         self.poll_terminals();
         self.handle_shortcuts(ctx);
 
         views::menu::show(self, ctx);
         views::status::show(self, ctx);
+        views::sidebar::show_activity_bar(self, ctx);
         if self.show_sidebar {
             views::sidebar::show(self, ctx);
         }

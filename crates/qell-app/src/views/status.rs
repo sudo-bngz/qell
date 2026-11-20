@@ -104,6 +104,7 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                             }
                             let resp = ui
                                 .add(egui::Label::new(small("LSP not installed".into()).color(palette_text_dim)).sense(egui::Sense::click()))
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
                                 .on_hover_text(tip);
                             if let (true, Some(h)) = (resp.clicked(), hint) {
                                 ui.ctx().copy_text(h.command.to_string());

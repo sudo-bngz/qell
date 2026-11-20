@@ -7,5 +7,7 @@ Qell draws in the file tree and tabs. Regenerate with
 
 Nerd Fonts is MIT licensed (`LICENSE-nerd-fonts.txt`). The glyphs come from
 the icon sets Nerd Fonts aggregates, chiefly Seti UI (MIT), Devicons (MIT),
-Material Design Icons (Apache 2.0) and Font Awesome (OFL 1.1 / CC BY 4.0);
+Material Design Icons (Apache 2.0), Font Awesome (OFL 1.1 / CC BY 4.0)
+and, for the activity bar and Source Control, Microsoft's Codicons
+(CC BY 4.0);
 see the Nerd Fonts README for the full table.
