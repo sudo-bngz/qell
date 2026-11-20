@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 
+use qell_core::structure::{detect_indent_unit, Brackets};
 use qell_core::{Buffer, HighlightSpan, LanguageRegistry};
 use qell_lsp::lsp_types::Diagnostic;
 
@@ -20,6 +21,12 @@ pub struct Document {
     pub line_marks: Vec<LineMark>,
     /// Tab title instead of the file name (diffs: "main.tf (f71c98)").
     pub label: Option<String>,
+    /// Bracket pairs, for colours and matching.
+    pub brackets: Brackets,
+    /// Indentation step of the file (guides), e.g. 2 or 4; 1 for tabs.
+    pub indent_unit: usize,
+    /// (buffer version, tab size) the two above were computed for.
+    structure_key: Option<(i32, usize)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +51,9 @@ impl Document {
             read_only: false,
             line_marks: Vec::new(),
             label: None,
+            brackets: Brackets::default(),
+            indent_unit: 4,
+            structure_key: None,
         }
     }
 
@@ -94,5 +104,21 @@ impl Document {
             };
         }
         &self.spans
+    }
+
+    /// Recompute brackets and the indentation step if the text changed.
+    pub fn update_structure(&mut self, languages: &mut LanguageRegistry, tab_size: usize) {
+        let key = (self.buffer.version(), tab_size);
+        if self.structure_key == Some(key) {
+            return;
+        }
+        self.spans(languages);
+        self.structure_key = Some(key);
+        let text = self.buffer.text();
+        // Prose has brackets too, but colouring them only adds noise.
+        let code = !matches!(self.buffer.language(), None | Some("markdown"));
+        self.brackets =
+            if code && text.len() <= HIGHLIGHT_LIMIT_BYTES { Brackets::compute(&text, &self.spans) } else { Brackets::default() };
+        self.indent_unit = detect_indent_unit(text.lines(), tab_size);
     }
 }

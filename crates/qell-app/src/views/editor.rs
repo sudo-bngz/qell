@@ -7,6 +7,7 @@
 
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Align2, Color32, Context, Event, Key, Pos2, Rect, Sense, Stroke, Vec2};
+use qell_core::structure::{active_guide, guide_indent, indent_of};
 use qell_core::{Buffer, HighlightSpan, Position};
 use qell_lsp::convert::from_lsp_position;
 use qell_lsp::lsp_types::{CompletionItem, CompletionItemKind, CompletionTextEdit, DiagnosticSeverity, Documentation};
@@ -155,6 +156,35 @@ pub fn word_range(line: &str, col: usize, terraform: bool) -> Option<(usize, usi
     (e > s).then_some((s, e))
 }
 
+/// VS Code's bracket pair colours (dark themes), by nesting depth.
+const BRACKET_COLORS: [Color32; 3] =
+    [Color32::from_rgb(0xff, 0xd7, 0x00), Color32::from_rgb(0xda, 0x70, 0xd6), Color32::from_rgb(0x17, 0x9f, 0xff)];
+const BRACKET_UNMATCHED: Color32 = Color32::from_rgb(0xff, 0x12, 0x12);
+const BRACKET_MATCH_BG: Color32 = Color32::from_rgba_premultiplied(0, 0x64, 0, 0x1a);
+const BRACKET_MATCH_BORDER: Color32 = Color32::from_rgb(0x88, 0x88, 0x88);
+const GUIDE: Color32 = Color32::from_rgb(0x40, 0x40, 0x40);
+const GUIDE_ACTIVE: Color32 = Color32::from_rgb(0x70, 0x70, 0x70);
+
+/// Append `text[s..e]` with `fmt`, except the bytes listed in `recolor`
+/// (sorted), which keep the format but take their own colour.
+fn append_recolored(job: &mut LayoutJob, text: &str, s: usize, e: usize, fmt: &TextFormat, recolor: &[(usize, Color32)]) {
+    let mut at = s;
+    for &(b, color) in recolor.iter().filter(|(b, _)| *b >= s && *b < e) {
+        // Brackets are one byte (ASCII).
+        if !text.is_char_boundary(b) || !text.is_char_boundary(b + 1) {
+            continue;
+        }
+        if b > at {
+            job.append(&text[at..b], 0.0, fmt.clone());
+        }
+        job.append(&text[b..b + 1], 0.0, TextFormat { color, ..fmt.clone() });
+        at = b + 1;
+    }
+    if e > at {
+        job.append(&text[at..e], 0.0, fmt.clone());
+    }
+}
+
 /// Per-line view of the highlight spans: binary search for the first span
 /// that could overlap a byte range.
 fn spans_in(spans: &[HighlightSpan], start: usize, end: usize) -> &[HighlightSpan] {
@@ -170,6 +200,8 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
     let (row_height, char_width) = ui.fonts_mut(|f| (f.row_height(&font).ceil() + 2.0, f.glyph_width(&font, 'M')));
     let tab_size = app.config.tab_size;
     let auto_complete = app.config.auto_complete;
+    let bracket_colors = app.config.bracket_pair_colors;
+    let indent_guides = app.config.indent_guides;
 
     let has_focus_before = app.focus == Focus::Editor && !app.modal_open();
     let id = ui.id().with("editor").with(doc_idx);
@@ -527,8 +559,16 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
             let cursor = doc.buffer.cursor;
             let (sel_start, sel_end) = cursor.selection.ordered();
             let head = cursor.head();
+            doc.update_structure(&mut app.languages, tab_size);
             let spans = doc.spans(&mut app.languages).to_vec();
             let rope = doc.buffer.rope();
+
+            // Bracket pair at the cursor, highlighted with a box.
+            let cursor_pair = if cursor.selection.is_empty() { doc.brackets.pair_at(head.line, head.col) } else { None };
+            // Indent guides: the block around the cursor gets the bright one.
+            let line_indent = |r: usize| indent_of(&doc.buffer.line(r));
+            let unit = doc.indent_unit.max(1);
+            let active = if indent_guides { active_guide(&line_indent, line_count, head.line, unit) } else { None };
 
             for row in range.clone() {
                 let y = content_top + row as f32 * row_height;
@@ -564,6 +604,27 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                     painter.rect_filled(Rect::from_min_max(Pos2::new(x0, y), Pos2::new(x1, y + row_height)), 0.0, palette_sel);
                 }
 
+                // Indent guides.
+                if indent_guides {
+                    let level = guide_indent(&line_indent, line_count, row);
+                    for c in (0..level).step_by(unit) {
+                        let on = active.is_some_and(|(ac, s, e)| ac == c && (s..=e).contains(&row));
+                        let x = (origin.x + text_x0 + c as f32 * char_width).round() + 0.5;
+                        let color = if on { GUIDE_ACTIVE } else { GUIDE };
+                        painter.vline(x, y..=y + row_height, Stroke::new(1.0_f32, color));
+                    }
+                }
+
+                // Matching bracket: a box around each of the pair.
+                if let Some((o, c)) = cursor_pair {
+                    for b in [o, c].iter().filter(|b| b.line == row) {
+                        let x = origin.x + text_x0 + b.col as f32 * char_width;
+                        let r = Rect::from_min_size(Pos2::new(x, y + 1.0), Vec2::new(char_width, row_height - 2.0));
+                        painter.rect_filled(r, 1.0, BRACKET_MATCH_BG);
+                        painter.rect_stroke(r, 1.0, Stroke::new(1.0_f32, BRACKET_MATCH_BORDER), egui::StrokeKind::Inside);
+                    }
+                }
+
                 // Gutter.
                 let num_color = if row == head.line { palette_text } else { palette_gutter };
                 painter.text(
@@ -578,29 +639,36 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                 let line_start_byte = rope.line_to_byte(row);
                 let line_text = doc.buffer.line(row);
                 let line_end_byte = line_start_byte + line_text.len();
+                // Brackets recoloured by depth: (byte in line, colour).
+                let recolor: Vec<(usize, Color32)> = if bracket_colors {
+                    doc.brackets
+                        .on_line(row)
+                        .iter()
+                        .map(|b| {
+                            let color = if b.partner.is_some() { BRACKET_COLORS[b.depth % 3] } else { BRACKET_UNMATCHED };
+                            (b.byte - line_start_byte, color)
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
                 let mut job = LayoutJob::default();
                 let mut at = 0usize;
+                let plain = TextFormat { font_id: font.clone(), color: palette_text, ..Default::default() };
                 for s in spans_in(&spans, line_start_byte, line_end_byte) {
                     let s0 = s.start.max(line_start_byte) - line_start_byte;
                     let s1 = s.end.min(line_end_byte) - line_start_byte;
                     if s0 > at && line_text.is_char_boundary(at) && line_text.is_char_boundary(s0) {
-                        job.append(
-                            &line_text[at..s0],
-                            0.0,
-                            TextFormat { font_id: font.clone(), color: palette_text, ..Default::default() },
-                        );
+                        append_recolored(&mut job, &line_text, at, s0, &plain, &recolor);
                     }
                     if s1 > s0 && line_text.is_char_boundary(s0) && line_text.is_char_boundary(s1) {
-                        job.append(&line_text[s0..s1], 0.0, token_format(s.kind, font.clone(), color_of(s.kind)));
+                        let fmt = token_format(s.kind, font.clone(), color_of(s.kind));
+                        append_recolored(&mut job, &line_text, s0, s1, &fmt, &recolor);
                         at = s1;
                     }
                 }
                 if at < line_text.len() {
-                    job.append(
-                        &line_text[at..],
-                        0.0,
-                        TextFormat { font_id: font.clone(), color: palette_text, ..Default::default() },
-                    );
+                    append_recolored(&mut job, &line_text, at, line_text.len(), &plain, &recolor);
                 }
                 let galley = ui.fonts_mut(|f| f.layout_job(job));
                 painter.galley(Pos2::new(origin.x + text_x0, y + 1.0), galley, palette_text);
