@@ -372,7 +372,10 @@ mod tests {
         }
     }
 
+    // AppKit only creates menus on the main thread, and tests run on worker
+    // threads; on macOS the app itself builds the menu at startup.
     #[test]
+    #[cfg(not(target_os = "macos"))]
     fn whole_menu_builds() {
         // Every item, accelerator and predefined entry is accepted by muda.
         let menu = NativeMenu::build(&egui::Context::default()).expect("menu builds");
