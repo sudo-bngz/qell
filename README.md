@@ -94,6 +94,10 @@ bottom, and language-server completion for the languages you actually use.
   the pair at the cursor is boxed, and vertical guides mark each indentation
   level, with the block around the cursor highlighted. The indentation step
   (2, 4, tabs…) is detected per file. Both can be turned off in Settings.
+- **Find and replace in the file** (`Ctrl/⌘+F`, `Ctrl+H` / `⌥⌘F`) — a bar
+  over the editor with case, whole-word and regex toggles, every match
+  highlighted, `Enter` / `Shift+Enter` (or `F3` / `Shift+F3`) to step
+  through them, and Replace / Replace All (`$1` groups in regex mode).
 - **Search in files** (`Ctrl+Shift+F`) — the workspace is indexed in memory
   in the background (respecting `.gitignore`), so results appear as you
   type, even in large trees. Case, whole-word and regex toggles; click a
@@ -137,6 +141,8 @@ npm i -g typescript typescript-language-server
 | Command palette       | `Ctrl+Shift+P`     |
 | Go to file            | `Ctrl+P`           |
 | Go to line            | `Ctrl+G`           |
+| Find / Replace in file | `Ctrl+F` / `Ctrl+H` |
+| Find next / previous  | `F3` / `Shift+F3`  |
 | Search in files       | `Ctrl+Shift+F`     |
 | Go to definition      | `F12` / `Ctrl+click` |
 | Find all references   | `Shift+F12`        |

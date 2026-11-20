@@ -3,6 +3,7 @@
 //! state of its own beyond what egui remembers between frames.
 
 pub mod editor;
+pub mod find;
 pub mod menu;
 pub mod minimap;
 pub mod palette;

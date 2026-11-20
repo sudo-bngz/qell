@@ -27,6 +27,10 @@ pub enum Command {
     ToggleVimMode,
     ShowExplorer,
     ShowSearch,
+    FindInFile,
+    ReplaceInFile,
+    FindNext,
+    FindPrevious,
     ShowSourceControl,
     GoToDefinition,
     FindReferences,
@@ -69,6 +73,10 @@ impl Command {
         Command::ToggleVimMode,
         Command::ShowExplorer,
         Command::ShowSearch,
+        Command::FindInFile,
+        Command::ReplaceInFile,
+        Command::FindNext,
+        Command::FindPrevious,
         Command::ShowSourceControl,
         Command::GoToDefinition,
         Command::FindReferences,
@@ -111,6 +119,10 @@ impl Command {
             Command::ToggleVimMode => "View: Toggle Vim Mode",
             Command::ShowExplorer => "View: Show Explorer",
             Command::ShowSearch => "View: Search in Files",
+            Command::FindInFile => "Find",
+            Command::ReplaceInFile => "Replace",
+            Command::FindNext => "Find Next",
+            Command::FindPrevious => "Find Previous",
             Command::GoToDefinition => "Go: Go to Definition",
             Command::FindReferences => "Go: Find All References",
             Command::GoBack => "Go: Back",
@@ -163,6 +175,17 @@ impl Command {
             Command::ToggleVimMode => None,
             Command::ShowExplorer => s(Modifiers::CTRL | Modifiers::SHIFT, Key::E),
             Command::ShowSearch => s(cmd_shift, Key::F),
+            Command::FindInFile => s(cmd, Key::F),
+            // VS Code: ⌥⌘F on macOS, Ctrl+H elsewhere.
+            Command::ReplaceInFile => {
+                if cfg!(target_os = "macos") {
+                    s(Modifiers::COMMAND | Modifiers::ALT, Key::F)
+                } else {
+                    s(cmd, Key::H)
+                }
+            }
+            Command::FindNext => s(Modifiers::NONE, Key::F3),
+            Command::FindPrevious => s(Modifiers::SHIFT, Key::F3),
             Command::GoToDefinition => s(Modifiers::NONE, Key::F12),
             Command::FindReferences => s(Modifiers::SHIFT, Key::F12),
             // VS Code: ⌃- / ⌃⇧- on macOS, Alt+Left / Alt+Right elsewhere.

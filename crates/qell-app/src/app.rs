@@ -207,6 +207,8 @@ pub struct QellApp {
     /// gutter's change marks.
     git_base_tx: std::sync::mpsc::Sender<(PathBuf, Option<String>)>,
     git_base_rx: std::sync::mpsc::Receiver<(PathBuf, Option<String>)>,
+    /// Find and replace in the open file.
+    pub find: views::find::FindState,
     /// Vim mode state, and what its commands asked the app to do.
     pub vim: crate::vim::Vim,
     pub pending_vim: Vec<crate::vim::Action>,
@@ -282,6 +284,7 @@ impl QellApp {
             pending_nav: None,
             git_base_tx,
             git_base_rx,
+            find: Default::default(),
             vim: crate::vim::Vim::new(),
             pending_vim: Vec::new(),
             tree_edit: None,
@@ -700,6 +703,7 @@ impl QellApp {
             || self.settings.open
             || self.scm.typing
             || self.search.typing
+            || self.find.typing
             || self.tree_edit.is_some()
             || self.confirm_delete.is_some()
     }
@@ -1201,6 +1205,13 @@ impl QellApp {
                 self.show_sidebar = true;
                 self.search.start(selection);
             }
+            Command::FindInFile | Command::ReplaceInFile => {
+                let selection = self.docs.get(self.active).map(|d| d.buffer.selected_text());
+                self.find.start(selection, cmd == Command::ReplaceInFile);
+                self.focus = Focus::Editor;
+            }
+            Command::FindNext => views::find::go(self, true),
+            Command::FindPrevious => views::find::go(self, false),
             Command::GoToDefinition => self.go_to_definition(),
             Command::FindReferences => self.find_references(),
             Command::GoBack => self.navigate(true),
@@ -1560,13 +1571,19 @@ impl QellApp {
         if self.settings.open
             || self.scm.typing
             || self.search.typing
+            || self.find.typing
             || self.tree_edit.is_some()
             || self.confirm_delete.is_some()
         {
             if self.settings.open && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
                 self.settings.open = false;
             }
-            for cmd in [Command::OpenSettings, Command::Quit] {
+            // ⌘A, ⌘C, ⌘V… must edit the text being typed, not the document.
+            let mut allowed = vec![Command::OpenSettings, Command::Quit];
+            if self.find.typing {
+                allowed.extend([Command::FindInFile, Command::ReplaceInFile, Command::FindNext, Command::FindPrevious]);
+            }
+            for cmd in allowed {
                 if let Some(sc) = cmd.shortcut() {
                     if ctx.input_mut(|i| i.consume_shortcut(&sc)) {
                         self.pending_commands.push(cmd);
@@ -1618,6 +1635,7 @@ impl eframe::App for QellApp {
         self.handle_git(ctx);
         self.handle_scm_jobs();
         views::search::update(self, ctx);
+        views::find::handle_keys(self, ctx);
         self.poll_terminals();
         self.handle_shortcuts(ctx);
 
