@@ -541,6 +541,9 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
             let origin = ui.cursor().min;
             let rows_h = (range.end - range.start) as f32 * row_height;
             let (rect, resp) = ui.allocate_exact_size(Vec2::new(content_w, rows_h), Sense::click_and_drag());
+            if has_focus_before {
+                super::hold_keyboard(ui, id.with("keyboard"), ui.clip_rect().min);
+            }
             let painter = ui.painter_at(rect.union(ui.clip_rect()));
             let content_top = origin.y - range.start as f32 * row_height;
 
