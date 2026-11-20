@@ -74,6 +74,13 @@ impl Buffer {
         Ok(())
     }
 
+    /// Point the buffer at another file (after a rename on disk), keeping
+    /// its text; the language follows the new name.
+    pub fn set_path(&mut self, path: PathBuf) {
+        self.language = crate::syntax::language_for_path(&path);
+        self.path = Some(path);
+    }
+
     pub fn save_as(&mut self, path: PathBuf) -> std::io::Result<()> {
         self.language = crate::syntax::language_for_path(&path);
         self.path = Some(path);
