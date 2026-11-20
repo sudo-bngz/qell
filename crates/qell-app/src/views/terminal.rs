@@ -154,6 +154,9 @@ fn show_grid(app: &mut QellApp, ui: &mut egui::Ui) {
         app.focus = Focus::Terminal;
     }
     let focused = app.focus == Focus::Terminal && !modal;
+    if focused {
+        super::hold_keyboard(ui, ui.id().with("terminal_keyboard"), rect.min);
+    }
 
     // ---- input ----
     if focused {
