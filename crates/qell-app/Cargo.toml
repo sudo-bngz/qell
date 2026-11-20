@@ -34,6 +34,8 @@ qell-index.workspace = true
 muda = { version = "0.21", default-features = false }
 # Delete in the file tree moves to the Trash / Recycle Bin, never erases.
 trash = "5"
+# Vim mode: `/` search and `:s`.
+regex = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Reads the clipboard for Edit → Paste in the native menu.

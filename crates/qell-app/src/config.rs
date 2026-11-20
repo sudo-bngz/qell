@@ -20,6 +20,8 @@ pub struct Config {
     pub tab_size: usize,
     /// Ask language servers for completions while typing (not only on Ctrl+Space).
     pub auto_complete: bool,
+    /// Vim keys: Normal / Insert / Visual modes and the `:` command line.
+    pub vim_mode: bool,
     /// Wrap long lines at the window's width instead of scrolling sideways.
     pub word_wrap: bool,
     /// Show the whole file in miniature on the right of the editor.
@@ -60,6 +62,7 @@ impl Default for Config {
             font_size: 14.0,
             tab_size: 4,
             auto_complete: true,
+            vim_mode: false,
             word_wrap: false,
             minimap: true,
             bracket_pair_colors: true,

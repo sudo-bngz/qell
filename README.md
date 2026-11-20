@@ -64,6 +64,18 @@ bottom, and language-server completion for the languages you actually use.
 - **Plugins** — WebAssembly modules loaded from `~/.config/qell/plugins`,
   sandboxed by Wasmtime, exposing commands to the palette. See
   [`plugins/hello`](plugins/hello).
+- **Vim mode** (Settings → Editor, or "View: Toggle Vim Mode") — Normal,
+  Insert and Visual modes in the editor, with a command line under the code;
+  the file tree, tabs, terminal and minimap stay as they are.
+  - Motions: `h j k l`, `w b e`, `0 ^ $`, `gg G`, `{ }`, `%`, `f t F T ; ,`,
+    `Ctrl-D`/`Ctrl-U`, counts.
+  - Operators `d c y > <` with motions, lines (`dd`, `3yy`) and text objects
+    (`ciw`, `di(`, `ca"`); `x D C s S J r ~ p P u Ctrl-R .`
+  - `v` / `V` selections, `/` `?` `n` `N` `*` search (regex, highlighted).
+  - `:w`, `:q`, `:wq`, `:x`, `:wa`, `:qa`, `:e file`, `:42`, `:bn`/`:bp`,
+    `:s/a/b/g` and `:%s/…` (also on a selection), `:d`, `:noh`,
+    `:set wrap`, `:term`, `:Ex`; `gd` goes to the definition, `gt`/`gT`
+    switch tabs.
 - **Right-click menus** — in the file tree (New File/Folder, Rename and
   Delete inline, Reveal in Finder, Open in Integrated Terminal, Copy Path),
   the editor (Go to Definition, References, Cut/Copy/Paste…) and the tabs
