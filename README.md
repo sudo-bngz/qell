@@ -83,10 +83,11 @@ bottom, and language-server completion for the languages you actually use.
   the editor (Go to Definition, References, Cut/Copy/Paste…) and the tabs
   (Close Others, Close to the Right, Close All…). Delete moves to the Trash
   after asking.
-- **File tree shortcuts** — the files you open most (or last) sit above the
-  tree, each with the folder it's in, so a workspace holding many
-  repositories stays one click away. Pin the ones you always want there;
-  clicking one opens it and expands the tree down to it.
+- **File tree shortcuts** — above the tree sit the folders you work in most
+  (the repositories, in a workspace holding several), then the files you
+  open most, each with the folder it's in. Clicking a folder expands it in
+  the tree; clicking a file opens it and reveals it. Pin the ones you always
+  want there. "MOST USED" can be switched to "RECENT".
 - **Minimap** — the whole file in miniature on the right of the editor, in
   its syntax colours, with the visible part shaded: click to jump, drag to
   scroll. *View → Minimap* or Settings to hide it.
