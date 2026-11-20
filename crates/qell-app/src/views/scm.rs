@@ -37,12 +37,30 @@ pub struct ScmState {
     pub typing: bool,
     tx: Sender<JobResult>,
     rx: Receiver<JobResult>,
+    /// Repository whose history the Graph shows (picked by the user).
+    pub graph_repo: Option<PathBuf>,
+    graphs: HashMap<PathBuf, GraphState>,
+    #[allow(clippy::type_complexity)]
+    graph_tx: Sender<(PathBuf, String, Result<Vec<qell_git::graph::Commit>, String>)>,
+    #[allow(clippy::type_complexity)]
+    graph_rx: Receiver<(PathBuf, String, Result<Vec<qell_git::graph::Commit>, String>)>,
 }
 
 impl Default for ScmState {
     fn default() -> Self {
         let (tx, rx) = mpsc::channel();
-        Self { messages: HashMap::new(), busy: HashSet::new(), typing: false, tx, rx }
+        let (graph_tx, graph_rx) = mpsc::channel();
+        Self {
+            messages: HashMap::new(),
+            busy: HashSet::new(),
+            typing: false,
+            tx,
+            rx,
+            graph_repo: None,
+            graphs: HashMap::new(),
+            graph_tx,
+            graph_rx,
+        }
     }
 }
 
@@ -175,6 +193,7 @@ fn file_row(
 pub fn show_contents(app: &mut QellApp, ui: &mut egui::Ui) {
     let dim = app.palette.text_dim;
     app.scm.typing = false;
+    app.scm.poll_graphs();
 
     ui.horizontal(|ui| {
         ui.label(RichText::new("SOURCE CONTROL").size(11.0).color(dim));
@@ -182,6 +201,7 @@ pub fn show_contents(app: &mut QellApp, ui: &mut egui::Ui) {
             let b = egui::Button::new(RichText::new(icons::REFRESH.to_string()).font(icons::font(13.0)).color(dim)).frame(false);
             if ui.add(b).on_hover_text("Refresh").on_hover_cursor(CursorIcon::PointingHand).clicked() {
                 app.git.refresh();
+                app.scm.graphs.clear();
             }
         });
     });
@@ -209,6 +229,7 @@ pub fn show_contents(app: &mut QellApp, ui: &mut egui::Ui) {
             show_repo(app, ui, rel, st);
             ui.add_space(10.0);
         }
+        show_graph(app, ui, &ws.repos);
     });
 }
 
@@ -322,5 +343,274 @@ fn show_repo(app: &mut QellApp, ui: &mut egui::Ui, rel: &Path, st: &RepoStatus) 
         } else {
             app.open_file(app.root.join(rel).join(p));
         }
+    }
+}
+
+// ---- graph -------------------------------------------------------------
+
+/// A repository's loaded history.
+pub struct GraphState {
+    /// What the history was loaded for (branch, position, changes); a
+    /// different key means it is stale.
+    key: String,
+    commits: Vec<qell_git::graph::Commit>,
+    rows: Vec<qell_git::graph::Row>,
+    error: Option<String>,
+    loading: bool,
+}
+
+/// VS Code's graph lane colours (scmGraph.foreground1-5).
+const LANE_COLORS: [Color32; 5] = [
+    Color32::from_rgb(0xff, 0xb0, 0x00),
+    Color32::from_rgb(0xdc, 0x26, 0x7f),
+    Color32::from_rgb(0x99, 0x4f, 0x00),
+    Color32::from_rgb(0x40, 0xb0, 0xa6),
+    Color32::from_rgb(0xb6, 0x6d, 0xff),
+];
+const GRAPH_ROW: f32 = 22.0;
+const LANE_W: f32 = 11.0;
+const MAX_LANES: usize = 12;
+const HISTORY: usize = 300;
+
+fn graph_key(st: &RepoStatus) -> String {
+    format!("{:?}/{}/{}/{}", st.branch, st.ahead, st.behind, st.changes.len())
+}
+
+fn time_ago(t: i64) -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(t);
+    let s = (now - t).max(0);
+    let (n, unit) = match s {
+        0..60 => return "just now".into(),
+        60..3600 => (s / 60, "minute"),
+        3600..86_400 => (s / 3600, "hour"),
+        86_400..2_592_000 => (s / 86_400, "day"),
+        2_592_000..31_536_000 => (s / 2_592_000, "month"),
+        _ => (s / 31_536_000, "year"),
+    };
+    format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
+}
+
+impl ScmState {
+    /// Take finished history loads.
+    fn poll_graphs(&mut self) {
+        for (repo, key, result) in self.graph_rx.try_iter() {
+            let g = self.graphs.entry(repo).or_insert_with(|| GraphState {
+                key: String::new(),
+                commits: Vec::new(),
+                rows: Vec::new(),
+                error: None,
+                loading: false,
+            });
+            g.loading = false;
+            g.key = key;
+            match result {
+                Ok(commits) => {
+                    g.rows = qell_git::graph::layout(&commits);
+                    g.commits = commits;
+                    g.error = None;
+                }
+                Err(e) => {
+                    g.commits.clear();
+                    g.rows.clear();
+                    g.error = Some(e);
+                }
+            }
+        }
+    }
+
+    /// Load the history of `repo` in the background if it is missing or stale.
+    fn ensure_graph(&mut self, root: &Path, repo: &Path, key: String, ctx: &egui::Context) {
+        let g = self.graphs.get(repo);
+        if g.is_some_and(|g| g.loading || g.key == key) {
+            return;
+        }
+        let entry = self.graphs.entry(repo.to_path_buf()).or_insert_with(|| GraphState {
+            key: String::new(),
+            commits: Vec::new(),
+            rows: Vec::new(),
+            error: None,
+            loading: false,
+        });
+        entry.loading = true;
+        let (tx, dir, repo, ctx) = (self.graph_tx.clone(), root.join(repo), repo.to_path_buf(), ctx.clone());
+        std::thread::spawn(move || {
+            let result = qell_git::graph::log(&dir, HISTORY);
+            let _ = tx.send((repo, key, result));
+            ctx.request_repaint();
+        });
+    }
+}
+
+/// Paint one row of the graph: its lines and the commit's dot.
+fn paint_graph_row(p: &egui::Painter, rect: egui::Rect, row: &qell_git::graph::Row, merge: bool, head: bool, bg: Color32) {
+    use qell_git::graph::Half;
+    let x = |lane: usize| rect.left() + 7.0 + lane.min(MAX_LANES) as f32 * LANE_W;
+    let (top, mid, bottom) = (rect.top(), rect.center().y, rect.bottom());
+    for s in &row.segments {
+        let color = LANE_COLORS[s.color % LANE_COLORS.len()];
+        let stroke = egui::Stroke::new(1.6_f32, color);
+        let (y0, y1) = if s.half == Half::Top { (top, mid) } else { (mid, bottom) };
+        let (x0, x1) = (x(s.from), x(s.to));
+        if s.from == s.to {
+            p.line_segment([egui::pos2(x0, y0), egui::pos2(x1, y1)], stroke);
+        } else {
+            // A smooth curve between lanes.
+            let ym = (y0 + y1) / 2.0;
+            let curve = egui::epaint::CubicBezierShape::from_points_stroke(
+                [egui::pos2(x0, y0), egui::pos2(x0, ym), egui::pos2(x1, ym), egui::pos2(x1, y1)],
+                false,
+                Color32::TRANSPARENT,
+                stroke,
+            );
+            p.add(curve);
+        }
+    }
+    let color = LANE_COLORS[row.lane % LANE_COLORS.len()];
+    let c = egui::pos2(x(row.lane), mid);
+    if head {
+        // The checked-out commit: a ring.
+        p.circle_filled(c, 5.0, bg);
+        p.circle_stroke(c, 4.5, egui::Stroke::new(2.0_f32, color));
+    } else if merge {
+        p.circle_filled(c, 4.0, bg);
+        p.circle_stroke(c, 3.5, egui::Stroke::new(1.6_f32, color));
+    } else {
+        p.circle_filled(c, 3.8, color);
+    }
+}
+
+/// Branch / tag badges before a commit's subject.
+fn ref_badges(job: &mut egui::text::LayoutJob, refs: &[String], accent: Color32, dim: Color32) {
+    for r in refs {
+        let (icon, name, color) = if let Some(b) = r.strip_prefix("HEAD -> ") {
+            (icons::SOURCE_CONTROL, b, accent)
+        } else if let Some(t) = r.strip_prefix("tag: ") {
+            ('\u{ea66}', t, dim)
+        } else if r == "HEAD" {
+            (icons::SOURCE_CONTROL, "HEAD", accent)
+        } else if r.contains('/') {
+            ('\u{ebaa}', r.as_str(), dim) // remote branch
+        } else {
+            (icons::SOURCE_CONTROL, r.as_str(), dim)
+        };
+        job.append(&icon.to_string(), 0.0, egui::TextFormat { font_id: icons::font(11.0), color, ..Default::default() });
+        job.append(
+            name,
+            2.0,
+            egui::TextFormat {
+                font_id: egui::FontId::proportional(11.0),
+                color,
+                background: Color32::TRANSPARENT,
+                ..Default::default()
+            },
+        );
+        job.append(" ", 0.0, egui::TextFormat { font_id: egui::FontId::proportional(11.0), ..Default::default() });
+    }
+}
+
+fn show_graph(app: &mut QellApp, ui: &mut egui::Ui, repos: &[(PathBuf, RepoStatus)]) {
+    let dim = app.palette.text_dim;
+    if repos.is_empty() {
+        return;
+    }
+    // Which repository: the one picked, else the active file's, else the first.
+    let picked = app.scm.graph_repo.clone().filter(|r| repos.iter().any(|(p, _)| p == r));
+    let repo = picked.or_else(|| app.active_repo().map(|(r, _)| r.to_path_buf())).unwrap_or_else(|| repos[0].0.clone());
+    let Some(st) = repos.iter().find(|(p, _)| *p == repo).map(|(_, s)| s) else { return };
+
+    ui.add_space(6.0);
+    let mut refresh = false;
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("GRAPH").size(11.0).strong().color(dim));
+        if repos.len() > 1 {
+            egui::ComboBox::from_id_salt("graph_repo").selected_text(RichText::new(repo_name(app, &repo)).size(11.0)).show_ui(
+                ui,
+                |ui| {
+                    for (r, _) in repos {
+                        let name = repo_name(app, r);
+                        if ui.selectable_label(*r == repo, name).clicked() {
+                            app.scm.graph_repo = Some(r.clone());
+                        }
+                    }
+                },
+            );
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let b = egui::Button::new(RichText::new(icons::REFRESH.to_string()).font(icons::font(12.0)).color(dim)).frame(false);
+            refresh = ui.add(b).on_hover_text("Reload history").on_hover_cursor(CursorIcon::PointingHand).clicked();
+        });
+    });
+    if refresh {
+        app.scm.graphs.remove(&repo);
+    }
+    let root = app.root.clone();
+    let ctx = ui.ctx().clone();
+    app.scm.ensure_graph(&root, &repo, graph_key(st), &ctx);
+
+    let Some(g) = app.scm.graphs.get(&repo) else { return };
+    if let Some(e) = &g.error {
+        let msg = if e.contains("does not have any commits") || e.contains("unknown revision") {
+            "No commits yet."
+        } else {
+            e.as_str()
+        };
+        ui.label(RichText::new(msg).size(12.0).color(dim));
+        return;
+    }
+    if g.commits.is_empty() {
+        if g.loading {
+            ui.add(egui::Spinner::new().size(14.0));
+        }
+        return;
+    }
+
+    let accent = app.palette.accent;
+    let text = app.palette.text;
+    let bg = app.palette.panel_bg;
+    let hover_bg = app.palette.hover;
+    let head_hash =
+        g.commits.iter().find(|c| c.refs.iter().any(|r| r == "HEAD" || r.starts_with("HEAD -> "))).map(|c| c.hash.clone());
+    let lanes = g.rows.iter().map(|r| r.width).max().unwrap_or(1).min(MAX_LANES + 1);
+    let graph_w = 10.0 + lanes as f32 * LANE_W;
+    let mut copied = None;
+    ui.spacing_mut().item_spacing.y = 0.0;
+    for (c, row) in g.commits.iter().zip(&g.rows) {
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), GRAPH_ROW), egui::Sense::click());
+        if !ui.is_rect_visible(rect) {
+            continue;
+        }
+        let p = ui.painter_at(rect);
+        if resp.hovered() {
+            p.rect_filled(rect, 0.0, hover_bg);
+        }
+        let is_head = head_hash.as_deref() == Some(c.hash.as_str());
+        paint_graph_row(&p, rect, row, c.parents.len() > 1, is_head, if resp.hovered() { hover_bg } else { bg });
+
+        let mut job = egui::text::LayoutJob::default();
+        ref_badges(&mut job, &c.refs, accent, dim);
+        job.append(
+            &c.subject,
+            0.0,
+            egui::TextFormat { font_id: egui::FontId::proportional(12.5), color: text, ..Default::default() },
+        );
+        job.wrap = egui::text::TextWrapping::truncate_at_width(rect.width() - graph_w - 4.0);
+        let galley = ui.fonts_mut(|f| f.layout_job(job));
+        p.galley(egui::pos2(rect.left() + graph_w, rect.center().y - galley.size().y / 2.0), galley, text);
+
+        let resp = resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_ui(|ui| {
+            ui.label(RichText::new(&c.subject).strong());
+            ui.label(RichText::new(format!("{} · {} · {}", c.short_hash(), c.author, time_ago(c.time))).color(dim));
+            if !c.refs.is_empty() {
+                ui.label(RichText::new(c.refs.join(", ")).size(11.0).color(dim));
+            }
+            ui.label(RichText::new("Click to copy the commit hash").size(11.0).color(dim));
+        });
+        if resp.clicked() {
+            copied = Some(c.short_hash().to_string());
+        }
+    }
+    if let Some(h) = copied {
+        ui.ctx().copy_text(h.clone());
+        app.notify(format!("Copied {h}"));
     }
 }

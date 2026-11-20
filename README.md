@@ -49,7 +49,9 @@ bottom, and language-server completion for the languages you actually use.
   repository, staged changes and changes with stage / unstage buttons and
   a commit box (`Ctrl+Enter`). Commits run your hooks and signing in the
   background; a failing hook shows its message. The activity bar badge
-  counts changed files.
+  counts changed files. A **Graph** section draws the history of HEAD and
+  its upstream (branches, merges, tags; hover for details, click to copy
+  a hash).
 - **Integrated terminals** — the Alacritty terminal core in a panel
   (`` Ctrl+` ``), with 256/true colour, scrollback and application-cursor mode.
   Run several shells as tabs: `` Ctrl+Shift+` `` opens a new one,

@@ -12,6 +12,8 @@
 //! path takes its state from the repository it belongs to. All paths are
 //! relative to the *workspace* root.
 
+pub mod graph;
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
