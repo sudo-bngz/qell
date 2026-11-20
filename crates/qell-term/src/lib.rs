@@ -171,9 +171,10 @@ pub struct Terminal {
 }
 
 impl Terminal {
-    /// Start the user's default shell (`$SHELL`) in `cwd` with a grid of
-    /// `cols`×`rows` cells.
-    pub fn new(cols: usize, rows: usize, cwd: Option<PathBuf>) -> Result<Self> {
+    /// Start a shell in `cwd` with a grid of `cols`×`rows` cells. `shell`
+    /// is a command line such as `zsh -l`, split on whitespace (no quoting);
+    /// `None` or empty uses `$SHELL`.
+    pub fn new(cols: usize, rows: usize, cwd: Option<PathBuf>, shell: Option<&str>) -> Result<Self> {
         let (tx, events) = unbounded();
         let listener = Listener(tx);
 
@@ -182,7 +183,11 @@ impl Terminal {
         let term = Term::new(config, &size, listener.clone());
         let term = Arc::new(FairMutex::new(term));
 
-        let mut options = tty::Options { working_directory: cwd, ..Default::default() };
+        let shell = shell.map(str::split_whitespace).and_then(|mut words| {
+            let program = words.next()?.to_string();
+            Some(tty::Shell::new(program, words.map(String::from).collect()))
+        });
+        let mut options = tty::Options { working_directory: cwd, shell, ..Default::default() };
         options.env.insert("TERM".into(), "xterm-256color".into());
         options.env.insert("COLORTERM".into(), "truecolor".into());
         options.env.insert("TERM_PROGRAM".into(), "qell".into());
@@ -431,7 +436,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn echo_round_trip() {
-        let Ok(mut t) = Terminal::new(40, 5, None) else {
+        let Ok(mut t) = Terminal::new(40, 5, None, None) else {
             eprintln!("no pty available in this environment; skipping");
             return;
         };
@@ -445,6 +450,19 @@ mod tests {
                 break;
             }
             assert!(std::time::Instant::now() < deadline, "shell never echoed: {text:?}");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn custom_shell_command() {
+        let Ok(mut t) = Terminal::new(40, 5, None, Some("/bin/sh -i")) else { return };
+        t.send_text("echo qell_sh_ok\n");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while t.screen_text().matches("qell_sh_ok").count() < 2 {
+            t.poll();
+            assert!(std::time::Instant::now() < deadline, "custom shell never echoed");
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
     }

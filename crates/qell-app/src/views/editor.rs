@@ -56,8 +56,8 @@ fn show_tabs(app: &mut QellApp, ui: &mut egui::Ui) {
                             ui.spacing_mut().item_spacing.x = 8.0;
                             match doc.buffer.path() {
                                 Some(p) => {
-                                    let (icon, icon_color) = crate::icons::for_file(p);
-                                    ui.label(crate::views::sidebar::icon_label(icon, icon_color, &title, color));
+                                    let icon = app.config.file_icons.then(|| crate::icons::for_file(p));
+                                    ui.label(crate::views::sidebar::icon_label(icon, &title, color));
                                 }
                                 None => {
                                     ui.label(egui::RichText::new(title).size(13.0).color(color));
@@ -129,7 +129,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
     let tab_size = app.config.tab_size;
     let auto_complete = app.config.auto_complete;
 
-    let has_focus_before = app.focus == Focus::Editor && !app.command_palette.open;
+    let has_focus_before = app.focus == Focus::Editor && !app.modal_open();
     let id = ui.id().with("editor").with(doc_idx);
 
     // ---- input ----------------------------------------------------------

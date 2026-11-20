@@ -123,11 +123,13 @@ fn to_color(c: [u8; 3]) -> Color32 {
 
 fn show_grid(app: &mut QellApp, ui: &mut egui::Ui) {
     let active = app.active_terminal;
+    let modal = app.modal_open();
     let Some(term) = app.terminals.get_mut(active).map(|t| &mut t.term) else {
         ui.label("Starting shell…");
         return;
     };
-    let font = app.palette.mono(app.font_size);
+    let size = if app.config.terminal_font_size > 0.0 { app.config.terminal_font_size } else { app.font_size };
+    let font = app.palette.mono(size);
     let (row_height, char_width) = ui.fonts_mut(|f| (f.row_height(&font).ceil(), f.glyph_width(&font, 'M')));
 
     let avail = ui.available_size();
@@ -139,7 +141,7 @@ fn show_grid(app: &mut QellApp, ui: &mut egui::Ui) {
     if resp.clicked() || resp.drag_started() {
         app.focus = Focus::Terminal;
     }
-    let focused = app.focus == Focus::Terminal && !app.command_palette.open;
+    let focused = app.focus == Focus::Terminal && !modal;
 
     // ---- input ----
     if focused {

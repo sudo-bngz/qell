@@ -1,0 +1,404 @@
+//! The Settings window (Ctrl+, / ⌘,).
+//!
+//! A searchable list of every option in `config.toml`, grouped by section,
+//! in the spirit of VS Code's settings editor. Checkboxes, sliders and
+//! pickers apply as you change them; text fields apply on Enter or when
+//! they lose focus. The app notices the config changed, applies it to the
+//! running editor and saves `config.toml` (see `QellApp::apply_config`).
+
+use std::collections::HashMap;
+
+use egui::{Color32, Context, Id, RichText, Stroke};
+
+use crate::app::QellApp;
+use crate::commands::Command;
+use crate::config::{self, Config};
+
+#[derive(Default)]
+pub struct SettingsState {
+    pub open: bool,
+    pub query: String,
+    focus_search: bool,
+    /// Text being typed in a list / command field, keyed by setting.
+    /// Committed on Enter or focus loss so half-typed values never apply.
+    drafts: HashMap<String, String>,
+}
+
+impl SettingsState {
+    pub fn toggle(&mut self, _config: &Config) {
+        self.open = !self.open;
+        if self.open {
+            self.query.clear();
+            self.drafts.clear();
+            self.focus_search = true;
+        }
+    }
+}
+
+/// One row of the settings list.
+struct Def {
+    key: String,
+    section: &'static str,
+    title: String,
+    desc: String,
+}
+
+fn def(key: &str, section: &'static str, title: &str, desc: &str) -> Def {
+    Def { key: key.into(), section, title: title.into(), desc: desc.into() }
+}
+
+const SECTIONS: &[&str] = &["Editor", "Appearance", "Layout", "Terminal", "Files", "Language Servers"];
+
+fn defs() -> Vec<Def> {
+    let mut v = vec![
+        def("font_size", "Editor", "Font Size", "Editor font size in points."),
+        def("tab_size", "Editor", "Tab Size", "Spaces inserted by the Tab key."),
+        def("auto_complete", "Editor", "Auto Complete", "Suggest completions while typing, not only on Ctrl+Space."),
+        def("ui_scale", "Appearance", "UI Scale", "Size of the whole interface."),
+        def("file_icons", "Appearance", "File Icons", "Show file-type icons in the file tree and tabs."),
+        def(
+            "git_status",
+            "Appearance",
+            "Git Status Colours",
+            "Colour files by git status (modified, untracked…) and show the branch.",
+        ),
+        def("show_sidebar", "Layout", "Show File Tree", "Show the file tree (also on startup)."),
+        def("show_terminal", "Layout", "Show Terminal", "Show the terminal panel (also on startup)."),
+        def(
+            "shell",
+            "Terminal",
+            "Shell",
+            "Command for new terminals, e.g. zsh -l. Empty uses $SHELL. Restart a terminal to apply.",
+        ),
+        def("terminal_font_size", "Terminal", "Font Size", "Terminal font size in points. 0 follows the editor."),
+        def("tree_hidden", "Files", "Hidden in File Tree", "Comma-separated names the file tree doesn't show."),
+        def("ignore", "Files", "Quick Open Ignore", "Comma-separated directory and file names Go to File skips."),
+    ];
+    for lang in qell_core::syntax::builtin_languages() {
+        let Some(cmd) = lang.lsp else { continue };
+        v.push(Def {
+            key: format!("lsp.{}", lang.id),
+            section: "Language Servers",
+            title: lang.name.to_string(),
+            desc: format!("Server command for {}. Empty uses the default: {}", lang.name, cmd.join(" ")),
+        });
+    }
+    v
+}
+
+fn matches(d: &Def, query: &str) -> bool {
+    let hay = format!("{} {} {} {}", d.section, d.title, d.desc, d.key).to_lowercase();
+    query.to_lowercase().split_whitespace().all(|w| hay.contains(w))
+}
+
+fn split_list(s: &str) -> Vec<String> {
+    s.split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect()
+}
+
+/// Whether a setting differs from its default.
+fn is_modified(key: &str, c: &Config) -> bool {
+    let d = Config::default();
+    match key {
+        "font_size" => c.font_size != d.font_size,
+        "tab_size" => c.tab_size != d.tab_size,
+        "auto_complete" => c.auto_complete != d.auto_complete,
+        "ui_scale" => c.ui_scale != d.ui_scale,
+        "file_icons" => c.file_icons != d.file_icons,
+        "git_status" => c.git_status != d.git_status,
+        "show_sidebar" => c.show_sidebar != d.show_sidebar,
+        "show_terminal" => c.show_terminal != d.show_terminal,
+        "shell" => c.shell != d.shell,
+        "terminal_font_size" => c.terminal_font_size != d.terminal_font_size,
+        "tree_hidden" => c.tree_hidden != d.tree_hidden,
+        "ignore" => c.ignore != d.ignore,
+        k => k.strip_prefix("lsp.").is_some_and(|lang| c.lsp.contains_key(lang)),
+    }
+}
+
+fn reset(key: &str, c: &mut Config) {
+    let d = Config::default();
+    match key {
+        "font_size" => c.font_size = d.font_size,
+        "tab_size" => c.tab_size = d.tab_size,
+        "auto_complete" => c.auto_complete = d.auto_complete,
+        "ui_scale" => c.ui_scale = d.ui_scale,
+        "file_icons" => c.file_icons = d.file_icons,
+        "git_status" => c.git_status = d.git_status,
+        "show_sidebar" => c.show_sidebar = d.show_sidebar,
+        "show_terminal" => c.show_terminal = d.show_terminal,
+        "shell" => c.shell = d.shell,
+        "terminal_font_size" => c.terminal_font_size = d.terminal_font_size,
+        "tree_hidden" => c.tree_hidden = d.tree_hidden,
+        "ignore" => c.ignore = d.ignore,
+        k => {
+            if let Some(lang) = k.strip_prefix("lsp.") {
+                c.lsp.remove(lang);
+            }
+        }
+    }
+}
+
+/// A text field that commits on Enter / focus loss. Returns the new text
+/// when committed and different from `current`.
+fn text_field(ui: &mut egui::Ui, drafts: &mut HashMap<String, String>, key: &str, current: &str, hint: &str) -> Option<String> {
+    let id = Id::new(("qell-setting", key));
+    let focused = ui.memory(|m| m.has_focus(id));
+    let mut text = if focused {
+        drafts.entry(key.to_string()).or_insert_with(|| current.to_string()).clone()
+    } else {
+        drafts.remove(key);
+        current.to_string()
+    };
+    let resp = egui::TextEdit::singleline(&mut text)
+        .id(id)
+        .hint_text(hint)
+        .desired_width(f32::INFINITY)
+        .margin(egui::vec2(6.0, 4.0))
+        .show(ui)
+        .response;
+    // The theme draws unfocused fields without a border; settings need to
+    // look editable, and a value must not look like the default hint.
+    if !resp.has_focus() {
+        let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
+        ui.painter().rect_stroke(resp.rect, 0.0, stroke, egui::StrokeKind::Inside);
+    }
+    if resp.has_focus() {
+        drafts.insert(key.to_string(), text.clone());
+    }
+    (resp.lost_focus() && text.trim() != current).then(|| text.trim().to_string())
+}
+
+/// Draw the control for one setting, editing `c` in place.
+fn control(ui: &mut egui::Ui, key: &str, c: &mut Config, drafts: &mut HashMap<String, String>) {
+    match key {
+        "font_size" => {
+            ui.add(egui::Slider::new(&mut c.font_size, 8.0..=32.0).step_by(1.0).suffix(" pt"));
+        }
+        "tab_size" => {
+            ui.add(egui::Slider::new(&mut c.tab_size, 1..=8));
+        }
+        "terminal_font_size" => {
+            ui.add(egui::Slider::new(&mut c.terminal_font_size, 0.0..=32.0).step_by(1.0).custom_formatter(|v, _| {
+                if v == 0.0 {
+                    "editor".into()
+                } else {
+                    format!("{v} pt")
+                }
+            }));
+        }
+        "ui_scale" => {
+            // A picker rather than a slider: rescaling while dragging moves
+            // the slider out from under the pointer.
+            let label = |v: f32| format!("{:.0}%", v * 100.0);
+            egui::ComboBox::from_id_salt("ui_scale").selected_text(label(c.ui_scale)).show_ui(ui, |ui| {
+                for v in [0.75, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0] {
+                    ui.selectable_value(&mut c.ui_scale, v, label(v));
+                }
+            });
+        }
+        "auto_complete" => {
+            ui.checkbox(&mut c.auto_complete, "Enabled");
+        }
+        "file_icons" => {
+            ui.checkbox(&mut c.file_icons, "Enabled");
+        }
+        "git_status" => {
+            ui.checkbox(&mut c.git_status, "Enabled");
+        }
+        "show_sidebar" => {
+            ui.checkbox(&mut c.show_sidebar, "Visible");
+        }
+        "show_terminal" => {
+            ui.checkbox(&mut c.show_terminal, "Visible");
+        }
+        "shell" => {
+            let shell_env = std::env::var("SHELL").unwrap_or_else(|_| "sh".into());
+            if let Some(v) = text_field(ui, drafts, key, &c.shell, &shell_env) {
+                c.shell = v;
+            }
+        }
+        "tree_hidden" => {
+            if let Some(v) = text_field(ui, drafts, key, &c.tree_hidden.join(", "), "e.g. .git, .DS_Store") {
+                c.tree_hidden = split_list(&v);
+            }
+        }
+        "ignore" => {
+            if let Some(v) = text_field(ui, drafts, key, &c.ignore.join(", "), "e.g. target, node_modules") {
+                c.ignore = split_list(&v);
+            }
+        }
+        k => {
+            let Some(lang) = k.strip_prefix("lsp.") else { return };
+            let current = c.lsp.get(lang).map(|v| v.join(" ")).unwrap_or_default();
+            let default = qell_core::syntax::builtin_languages()
+                .into_iter()
+                .find(|l| l.id == lang)
+                .and_then(|l| l.lsp)
+                .map(|cmd| cmd.join(" "))
+                .unwrap_or_default();
+            if let Some(v) = text_field(ui, drafts, k, &current, &default) {
+                let words: Vec<String> = v.split_whitespace().map(String::from).collect();
+                if words.is_empty() {
+                    c.lsp.remove(lang);
+                } else {
+                    c.lsp.insert(lang.to_string(), words);
+                }
+            }
+        }
+    }
+}
+
+pub fn show(app: &mut QellApp, ctx: &Context) {
+    if !app.settings.open {
+        return;
+    }
+    app.command_palette.open = false;
+    let accent = app.palette.accent;
+    let text_dim = app.palette.text_dim;
+    let border = app.palette.border;
+    let screen = ctx.content_rect();
+    let width = 640.0_f32.min(screen.width() - 40.0);
+    let height = 560.0_f32.min(screen.height() - 80.0);
+
+    let mut open = true;
+    let mut open_file = false;
+    egui::Window::new("Settings")
+        .id(Id::new("qell-settings"))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .fixed_size([width, height])
+        .anchor(egui::Align2::CENTER_TOP, [0.0, 50.0])
+        .frame(egui::Frame::window(&ctx.style()).fill(app.palette.editor_bg).stroke(Stroke::new(1.0_f32, border)))
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                let search = egui::TextEdit::singleline(&mut app.settings.query)
+                    .hint_text("Search settings")
+                    .desired_width(width - 150.0)
+                    .show(ui)
+                    .response;
+                if app.settings.focus_search {
+                    search.request_focus();
+                    app.settings.focus_search = false;
+                }
+                open_file = ui
+                    .link(RichText::new("Edit config.toml").size(12.0))
+                    .on_hover_text(config::config_path().display().to_string())
+                    .clicked();
+            });
+            ui.add_space(6.0);
+            ui.separator();
+
+            let query = app.settings.query.clone();
+            let defs = defs();
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                ui.set_width(width - 16.0);
+                let mut shown = 0;
+                for section in SECTIONS {
+                    let rows: Vec<&Def> = defs.iter().filter(|d| d.section == *section && matches(d, &query)).collect();
+                    if rows.is_empty() {
+                        continue;
+                    }
+                    ui.add_space(10.0);
+                    ui.label(RichText::new(*section).size(16.0).strong());
+                    ui.add_space(4.0);
+                    for d in rows {
+                        shown += 1;
+                        show_row(ui, d, &mut app.config, &mut app.settings.drafts, accent, text_dim);
+                    }
+                }
+                if shown == 0 {
+                    ui.add_space(20.0);
+                    ui.label(RichText::new("No settings found.").color(text_dim));
+                }
+                ui.add_space(12.0);
+            });
+        });
+    if !open {
+        app.settings.open = false;
+    }
+    if open_file {
+        app.pending_commands.push(Command::OpenSettingsFile);
+    }
+}
+
+fn show_row(
+    ui: &mut egui::Ui,
+    d: &Def,
+    config: &mut Config,
+    drafts: &mut HashMap<String, String>,
+    accent: Color32,
+    text_dim: Color32,
+) {
+    let modified = is_modified(&d.key, config);
+    let resp = egui::Frame::new().inner_margin(egui::Margin { left: 10, right: 4, top: 6, bottom: 8 }).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(&d.title).size(13.0).strong());
+            if modified
+                && ui
+                    .add(egui::Button::new(RichText::new("↺").size(12.0).color(text_dim)).frame(false))
+                    .on_hover_text("Reset to default")
+                    .clicked()
+            {
+                reset(&d.key, config);
+            }
+        });
+        ui.label(RichText::new(&d.desc).size(12.0).color(text_dim));
+        ui.add_space(2.0);
+        control(ui, &d.key, config, drafts);
+    });
+    // A bar on the left marks settings changed from the default, like VS Code.
+    if modified {
+        let r = resp.response.rect;
+        ui.painter().vline(r.left() + 2.0, r.y_range(), Stroke::new(2.0_f32, accent));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_setting_has_a_control_and_reset() {
+        // Changing then resetting each key must return to the default, and
+        // the key must be recognised by is_modified (no silent typos).
+        for d in defs() {
+            let mut c = Config::default();
+            assert!(!is_modified(&d.key, &c), "{} modified by default", d.key);
+            match d.key.as_str() {
+                "font_size" => c.font_size = 20.0,
+                "tab_size" => c.tab_size = 2,
+                "auto_complete" => c.auto_complete = false,
+                "ui_scale" => c.ui_scale = 1.5,
+                "file_icons" => c.file_icons = false,
+                "git_status" => c.git_status = false,
+                "show_sidebar" => c.show_sidebar = false,
+                "show_terminal" => c.show_terminal = false,
+                "shell" => c.shell = "zsh".into(),
+                "terminal_font_size" => c.terminal_font_size = 12.0,
+                "tree_hidden" => c.tree_hidden.clear(),
+                "ignore" => c.ignore.clear(),
+                k => {
+                    let lang = k.strip_prefix("lsp.").expect("unknown setting key");
+                    c.lsp.insert(lang.into(), vec!["x".into()]);
+                }
+            }
+            assert!(is_modified(&d.key, &c), "{} change not detected", d.key);
+            reset(&d.key, &mut c);
+            assert_eq!(c, Config::default(), "{} reset", d.key);
+        }
+    }
+
+    #[test]
+    fn search_matches_all_words_anywhere() {
+        let d = def("shell", "Terminal", "Shell", "Command for new terminals");
+        assert!(matches(&d, "terminal shell"));
+        assert!(matches(&d, "COMMAND"));
+        assert!(!matches(&d, "font"));
+    }
+
+    #[test]
+    fn lists_are_comma_separated() {
+        assert_eq!(split_list(" .git, target,, node_modules "), vec![".git", "target", "node_modules"]);
+    }
+}

@@ -27,6 +27,9 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                 item(ui, app, Command::SaveAs);
                 ui.separator();
                 item(ui, app, Command::CloseTab);
+                ui.separator();
+                item(ui, app, Command::OpenSettings);
+                ui.separator();
                 item(ui, app, Command::Quit);
             });
             ui.menu_button("Edit", |ui| {

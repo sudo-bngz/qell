@@ -82,19 +82,34 @@ npm i -g typescript typescript-language-server
 | New terminal          | `` Ctrl+Shift+` `` |
 | Next / prev terminal  | `Ctrl+PageDown/Up` |
 | Zoom                  | `Ctrl+=` / `Ctrl+-` |
+| Settings              | `Ctrl+,`           |
 
 On macOS, `Ctrl` is `⌘` for the editor shortcuts.
 
 ## Configuration
 
-`~/.config/qell/config.toml` is written with defaults on first run:
+Open **Settings** with `Ctrl+,` (`⌘,` on macOS) or *File → Open Settings*: a
+searchable list of every option, applied as you change it. Changed
+settings are marked with a bar and can be reset with ↺.
+
+Settings live in `~/.config/qell/config.toml` (written with defaults on
+first run). The Settings window saves into it in place, so your own
+comments and layout are kept. You can also edit the file directly ("Edit
+config.toml" in Settings): saving it in Qell applies it immediately, and a
+file with a syntax error is reported and left untouched.
 
 ```toml
 font_size = 14.0
 tab_size = 4
+auto_complete = true
+ui_scale = 1.0              # whole interface, 0.75–2.0
+file_icons = true
+git_status = true           # colour files by git status, show the branch
 show_sidebar = true
 show_terminal = true
-auto_complete = true
+shell = ""                  # e.g. "zsh -l"; empty uses $SHELL
+terminal_font_size = 0.0    # 0 follows font_size
+tree_hidden = [".git", ".DS_Store"]
 ignore = [".git", "target", "node_modules", ".terraform", "dist"]
 
 [lsp]

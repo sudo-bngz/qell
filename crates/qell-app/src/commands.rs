@@ -34,6 +34,8 @@ pub enum Command {
     GoToLine,
     ZoomIn,
     ZoomOut,
+    OpenSettings,
+    OpenSettingsFile,
     Quit,
 }
 
@@ -64,6 +66,8 @@ impl Command {
         Command::GoToLine,
         Command::ZoomIn,
         Command::ZoomOut,
+        Command::OpenSettings,
+        Command::OpenSettingsFile,
         Command::Quit,
     ];
 
@@ -94,6 +98,8 @@ impl Command {
             Command::GoToLine => "Go to Line…",
             Command::ZoomIn => "View: Zoom In",
             Command::ZoomOut => "View: Zoom Out",
+            Command::OpenSettings => "Preferences: Open Settings",
+            Command::OpenSettingsFile => "Preferences: Open Settings File (TOML)",
             Command::Quit => "Quit",
         }
     }
@@ -130,6 +136,8 @@ impl Command {
             Command::GoToLine => s(cmd, Key::G),
             Command::ZoomIn => s(cmd, Key::Equals),
             Command::ZoomOut => s(cmd, Key::Minus),
+            Command::OpenSettings => s(cmd, Key::Comma),
+            Command::OpenSettingsFile => None,
             Command::Quit => s(cmd, Key::Q),
         }
     }

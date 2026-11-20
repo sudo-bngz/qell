@@ -20,7 +20,7 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
             let root = app.root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             ui.label(small(root).color(palette_text_dim));
 
-            if let Some(git) = &app.git_status {
+            if let Some(git) = app.git_status.as_ref().filter(|_| app.config.git_status) {
                 // The Powerline branch glyph lives in the bundled monospace font.
                 ui.add_space(-8.0);
                 ui.label(RichText::new("\u{e0a0}").monospace().size(12.0).color(palette_text_dim));

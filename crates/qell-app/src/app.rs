@@ -122,6 +122,13 @@ pub struct QellApp {
     pub git: GitWatcher,
     pub git_status: Option<RepoStatus>,
     was_focused: bool,
+    /// The Settings window.
+    pub settings: views::settings::SettingsState,
+    /// The config as last applied to the running editor; `config` is what
+    /// the Settings window edits.
+    applied_config: Config,
+    /// Unsaved settings changes, saved shortly after the last edit.
+    config_dirty_since: Option<Instant>,
 }
 
 impl QellApp {
@@ -130,6 +137,7 @@ impl QellApp {
         let palette = Palette::dark();
         palette.apply(&cc.egui_ctx);
         crate::icons::install(&cc.egui_ctx);
+        cc.egui_ctx.set_zoom_factor(config.ui_scale);
 
         let mut plugins = match PluginHost::new() {
             Ok(h) => Some(h),
@@ -156,6 +164,9 @@ impl QellApp {
 
         let git = GitWatcher::new(root.clone());
         let mut app = Self {
+            applied_config: config.clone(),
+            config_dirty_since: None,
+            settings: Default::default(),
             show_sidebar: config.show_sidebar,
             show_terminal: config.show_terminal,
             font_size: config.font_size,
@@ -249,7 +260,11 @@ impl QellApp {
         self.lsp.did_save(&doc.buffer);
         self.git.refresh();
         let name = doc.buffer.file_name();
+        let saved_config = doc.buffer.path().is_some_and(|p| same_file(p, &config::config_path()));
         self.notify(format!("Saved {name}"));
+        if saved_config {
+            self.reload_config_file();
+        }
     }
 
     fn close_active(&mut self) {
@@ -265,10 +280,85 @@ impl QellApp {
         self.completion.open = false;
     }
 
+    // ---- settings --------------------------------------------------------
+
+    /// The Settings window or the palette has the keyboard.
+    pub fn modal_open(&self) -> bool {
+        self.command_palette.open || self.settings.open
+    }
+
+    /// Re-read config.toml after the user edited it by hand.
+    fn reload_config_file(&mut self) {
+        let path = config::config_path();
+        match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|s| Config::parse(&s).map_err(|e| e.to_string()))
+        {
+            Ok(c) => {
+                self.config = c;
+                self.notify("Settings reloaded");
+            }
+            Err(e) => self.notify_error(format!("Settings not applied, {}: {e}", path.display())),
+        }
+    }
+
+    /// Bring the running editor in line with `config` after it changed
+    /// (Settings window or config.toml), and schedule a save.
+    fn apply_config(&mut self, ctx: &Context) {
+        let old = std::mem::replace(&mut self.applied_config, self.config.clone());
+        let new = &self.config;
+        if new.font_size != old.font_size {
+            self.font_size = new.font_size;
+        }
+        if new.ui_scale != old.ui_scale {
+            ctx.set_zoom_factor(new.ui_scale);
+        }
+        if new.show_sidebar != old.show_sidebar {
+            self.show_sidebar = new.show_sidebar;
+        }
+        if new.show_terminal != old.show_terminal {
+            self.show_terminal = new.show_terminal;
+        }
+        if new.tree_hidden != old.tree_hidden {
+            self.tree_cache.clear();
+        }
+        if new.ignore != old.ignore {
+            self.command_palette.files.clear();
+        }
+        if new.lsp != old.lsp {
+            // Restart servers so the new commands are used; documents are
+            // re-opened with them on the next sync.
+            self.lsp.shutdown_all();
+            self.lsp = LspRegistry::new(self.root.clone());
+            for (lang, cmd) in &self.config.lsp {
+                self.lsp.set_override(lang.clone(), cmd.clone());
+            }
+        }
+        self.config_dirty_since = Some(Instant::now());
+    }
+
+    fn save_config(&mut self) {
+        self.config_dirty_since = None;
+        if let Err(e) = self.config.save() {
+            self.notify_error(format!("Cannot save settings to {}: {e}", config::config_path().display()));
+        }
+    }
+
+    fn handle_config(&mut self, ctx: &Context) {
+        if self.config != self.applied_config {
+            self.apply_config(ctx);
+        }
+        // Debounce: sliders and typing change the config many times a second.
+        if self.config_dirty_since.is_some_and(|t| t.elapsed() > Duration::from_millis(400)) {
+            self.save_config();
+        }
+    }
+
     // ---- git -------------------------------------------------------------
 
     /// Git status of a path, if it is inside the workspace and has one.
     pub fn git_status_of(&self, path: &Path) -> Option<qell_git::FileStatus> {
+        if !self.config.git_status {
+            return None;
+        }
         let st = self.git_status.as_ref()?;
         st.status_of(path.strip_prefix(&self.root).ok()?)
     }
@@ -381,6 +471,13 @@ impl QellApp {
             Command::GoToLine => self.open_palette(PaletteMode::GoToLine),
             Command::ZoomIn => self.font_size = (self.font_size + 1.0).min(40.0),
             Command::ZoomOut => self.font_size = (self.font_size - 1.0).max(6.0),
+            Command::OpenSettings => self.settings.toggle(&self.config),
+            Command::OpenSettingsFile => {
+                // Make sure the file exists (and holds the current values).
+                self.save_config();
+                self.settings.open = false;
+                self.open_file(config::config_path());
+            }
             Command::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
         }
     }
@@ -484,7 +581,7 @@ impl QellApp {
 
     /// Open a new shell in the workspace root and make it active.
     pub fn new_terminal(&mut self) {
-        match Terminal::new(80, 24, Some(self.root.clone())) {
+        match Terminal::new(80, 24, Some(self.root.clone()), Some(self.config.shell.as_str())) {
             Ok(term) => {
                 let number = self.next_terminal_number;
                 self.next_terminal_number += 1;
@@ -512,7 +609,7 @@ impl QellApp {
     /// Replace a shell with a fresh one in the same tab.
     pub fn restart_terminal(&mut self, index: usize) {
         let Some(tab) = self.terminals.get_mut(index) else { return };
-        match Terminal::new(80, 24, Some(self.root.clone())) {
+        match Terminal::new(80, 24, Some(self.root.clone()), Some(self.config.shell.as_str())) {
             Ok(term) => tab.term = term,
             Err(e) => self.notify_error(format!("Terminal unavailable: {e:#}")),
         }
@@ -554,6 +651,21 @@ impl QellApp {
         if self.command_palette.open {
             if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
                 self.command_palette.open = false;
+            }
+            return;
+        }
+        // In Settings, text fields own the keyboard: only Escape, the
+        // settings shortcut itself and Quit go through.
+        if self.settings.open {
+            if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+                self.settings.open = false;
+            }
+            for cmd in [Command::OpenSettings, Command::Quit] {
+                if let Some(sc) = cmd.shortcut() {
+                    if ctx.input_mut(|i| i.consume_shortcut(&sc)) {
+                        self.pending_commands.push(cmd);
+                    }
+                }
             }
             return;
         }
@@ -605,6 +717,7 @@ impl eframe::App for QellApp {
         }
         views::editor::show_central(self, ctx);
         views::palette::show(self, ctx);
+        views::settings::show(self, ctx);
 
         for cmd in std::mem::take(&mut self.pending_commands) {
             self.execute(cmd, ctx);
@@ -612,6 +725,7 @@ impl eframe::App for QellApp {
         for name in std::mem::take(&mut self.pending_plugin_commands) {
             self.run_plugin_command(&name);
         }
+        self.handle_config(ctx);
 
         // Language servers and the shell produce output without user input,
         // so keep polling at a modest rate.
@@ -619,6 +733,17 @@ impl eframe::App for QellApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if self.config_dirty_since.is_some() {
+            self.save_config();
+        }
         self.lsp.shutdown_all();
+    }
+}
+
+/// Whether two paths name the same file (resolving symlinks and `..`).
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
     }
 }
