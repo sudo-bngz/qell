@@ -857,6 +857,10 @@ impl QellApp {
                 self.request_completion(None);
             }
             Command::ToggleSidebar => self.show_sidebar = !self.show_sidebar,
+            Command::ToggleMinimap => {
+                self.config.minimap = !self.config.minimap;
+                self.save_config();
+            }
             Command::ToggleWordWrap => {
                 self.config.word_wrap = !self.config.word_wrap;
                 self.save_config();

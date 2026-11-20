@@ -515,6 +515,16 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
     let color_of =
         |k: qell_core::TokenKind| token_colors.iter().find(|(kk, _)| *kk == k).map(|(_, c)| *c).unwrap_or(palette_text);
 
+    // Minimap on the right, when on and there's room; the editor (and its
+    // word wrap) gets the rest.
+    let full = ui.available_rect_before_wrap();
+    let mm_w = if app.config.minimap && full.width() > 480.0 { super::minimap::WIDTH } else { 0.0 };
+    let mm_rect = Rect::from_min_max(Pos2::new(full.right() - mm_w, full.top()), full.max);
+    let outer = ui;
+    let mut editor_ui = outer
+        .new_child(egui::UiBuilder::new().max_rect(Rect::from_min_max(full.min, Pos2::new(full.right() - mm_w, full.bottom()))));
+    let ui = &mut editor_ui;
+
     // Word wrap: as many columns as fit beside the gutter (minus the
     // vertical scroll bar).
     let wrap_cols = if word_wrap { ((ui.available_width() - text_x0 - 14.0) / char_width).floor().max(1.0) as usize } else { 0 };
@@ -526,290 +536,304 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
     let mut go_to_definition = false;
     let mut cursor_screen: Option<Pos2> = None;
 
-    let scroll =
-        egui::ScrollArea::both().id_salt(id).auto_shrink([false, false]).show_rows(ui, row_height, row_total, |ui, range| {
-            let doc = &mut app.docs[doc_idx];
-            // Taken out for the frame (restored at the end) so it can be read
-            // while the buffer is changed by clicks.
-            let wl = std::mem::take(&mut doc.wrap);
-            let content_w = if wl.is_wrapped() {
-                ui.available_width()
-            } else {
-                let max_cols = doc.buffer.rope().lines().map(|l| l.len_chars()).max().unwrap_or(0) as f32;
-                (text_x0 + (max_cols + 4.0) * char_width).max(ui.available_width())
-            };
-            let origin = ui.cursor().min;
-            let rows_h = (range.end - range.start) as f32 * row_height;
-            let (rect, resp) = ui.allocate_exact_size(Vec2::new(content_w, rows_h), Sense::click_and_drag());
-            if has_focus_before {
-                super::hold_keyboard(ui, id.with("keyboard"), ui.clip_rect().min);
-            }
-            let painter = ui.painter_at(rect.union(ui.clip_rect()));
-            let content_top = origin.y - range.start as f32 * row_height;
+    // Clicks and drags on the minimap scroll the editor this frame.
+    let mut area = egui::ScrollArea::both().id_salt(id).auto_shrink([false, false]);
+    if mm_w > 0.0 {
+        let mm = &mut app.docs[doc_idx].minimap;
+        if let Some(y) = super::minimap::input(outer, mm_rect, id.with("minimap"), mm, row_total, row_height) {
+            area = area.vertical_scroll_offset(y);
+        }
+    }
+    let scroll = area.show_rows(ui, row_height, row_total, |ui, range| {
+        let doc = &mut app.docs[doc_idx];
+        // Taken out for the frame (restored at the end) so it can be read
+        // while the buffer is changed by clicks.
+        let wl = std::mem::take(&mut doc.wrap);
+        let content_w = if wl.is_wrapped() {
+            ui.available_width()
+        } else {
+            let max_cols = doc.buffer.rope().lines().map(|l| l.len_chars()).max().unwrap_or(0) as f32;
+            (text_x0 + (max_cols + 4.0) * char_width).max(ui.available_width())
+        };
+        let origin = ui.cursor().min;
+        let rows_h = (range.end - range.start) as f32 * row_height;
+        let (rect, resp) = ui.allocate_exact_size(Vec2::new(content_w, rows_h), Sense::click_and_drag());
+        if has_focus_before {
+            super::hold_keyboard(ui, id.with("keyboard"), ui.clip_rect().min);
+        }
+        let painter = ui.painter_at(rect.union(ui.clip_rect()));
+        let content_top = origin.y - range.start as f32 * row_height;
 
-            // Mouse → cursor.
-            let pos_at = |b: &Buffer, p: Pos2| -> Position {
-                let row = ((p.y - content_top) / row_height).floor().max(0.0) as usize;
-                let x = ((p.x - (origin.x + text_x0)) / char_width + 0.5).floor().max(0.0) as usize;
-                wl.position_at(row.min(row_total.saturating_sub(1)), x, |l| b.line_len(l))
-            };
-            if resp.clicked() || resp.drag_started() {
-                clicked_editor = true;
-                if let Some(p) = resp.interact_pointer_pos() {
-                    let shift = ui.input(|i| i.modifiers.shift);
-                    doc.goal_col = None;
-                    if resp.double_clicked() {
-                        let at = pos_at(&doc.buffer, p);
-                        doc.buffer.set_cursor(at, false);
-                        doc.buffer.move_word(false, false);
-                        doc.buffer.move_word(true, true);
-                    } else {
-                        let at = pos_at(&doc.buffer, p);
-                        doc.buffer.set_cursor(at, shift);
-                    }
-                    app.completion.open = false;
-                    // ⌘-click / Ctrl-click: go to definition.
-                    if resp.clicked() && ui.input(|i| i.modifiers.command) {
-                        go_to_definition = true;
-                    }
-                }
-            } else if resp.dragged() {
-                if let Some(p) = resp.interact_pointer_pos() {
+        // Mouse → cursor.
+        let pos_at = |b: &Buffer, p: Pos2| -> Position {
+            let row = ((p.y - content_top) / row_height).floor().max(0.0) as usize;
+            let x = ((p.x - (origin.x + text_x0)) / char_width + 0.5).floor().max(0.0) as usize;
+            wl.position_at(row.min(row_total.saturating_sub(1)), x, |l| b.line_len(l))
+        };
+        if resp.clicked() || resp.drag_started() {
+            clicked_editor = true;
+            if let Some(p) = resp.interact_pointer_pos() {
+                let shift = ui.input(|i| i.modifiers.shift);
+                doc.goal_col = None;
+                if resp.double_clicked() {
                     let at = pos_at(&doc.buffer, p);
-                    doc.buffer.set_cursor(at, true);
-                }
-            }
-            if resp.hovered() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
-            }
-            // Holding ⌘ / Ctrl: underline the symbol under the mouse, like a
-            // link, since clicking it goes to its definition.
-            let link = resp.hover_pos().filter(|_| ui.input(|i| i.modifiers.command)).and_then(|p| {
-                let vrow = ((p.y - content_top) / row_height).floor().max(0.0) as usize;
-                let x = ((p.x - (origin.x + text_x0)) / char_width).floor().max(0.0) as usize;
-                if vrow >= row_total {
-                    return None;
-                }
-                let Position { line: row, col } = wl.position_at(vrow, x, |l| doc.buffer.line_len(l));
-                let line = doc.buffer.line(row);
-                let terraform = doc.buffer.language() == Some("terraform");
-                // Only when the mouse is on the word itself, not after it.
-                word_range(&line, col + 1, terraform).filter(|(s, e)| col >= *s && col < *e).map(|(s, e)| (row, s, e))
-            });
-            if link.is_some() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-            }
-
-            let cursor = doc.buffer.cursor;
-            let (sel_start, sel_end) = cursor.selection.ordered();
-            let head = cursor.head();
-            doc.update_structure(&mut app.languages, tab_size);
-            let spans = doc.spans(&mut app.languages).to_vec();
-            let rope = doc.buffer.rope();
-
-            // Bracket pair at the cursor, highlighted with a box.
-            let cursor_pair = if cursor.selection.is_empty() { doc.brackets.pair_at(head.line, head.col) } else { None };
-            // Indent guides: the block around the cursor gets the bright one.
-            let line_indent = |r: usize| indent_of(&doc.buffer.line(r));
-            let unit = doc.indent_unit.max(1);
-            let active = if indent_guides { active_guide(&line_indent, line_count, head.line, unit) } else { None };
-
-            for vrow in range.clone() {
-                // A row on screen: all of a line, or a piece of a wrapped one.
-                let vr = wl.row(vrow);
-                let row = vr.line;
-                let y = content_top + vrow as f32 * row_height;
-                let line_chars = doc.buffer.line_len(row);
-                let seg_end = vr.end.min(line_chars);
-                let last_seg = vr.end >= line_chars;
-                let in_seg = |c: usize| c >= vr.start && (c < seg_end || last_seg);
-                let xcol = |c: usize| origin.x + text_x0 + (vr.indent + c.saturating_sub(vr.start)) as f32 * char_width;
-                // Clip a column range of the line to this row ([s, e), the
-                // last row keeping anything past the end).
-                let clip = |c0: usize, c1: usize| {
-                    let (s, e) = (c0.max(vr.start), if last_seg { c1 } else { c1.min(seg_end) });
-                    (e > s).then_some((s, e))
-                };
-                let row_rect = Rect::from_min_size(Pos2::new(rect.left(), y), Vec2::new(rect.width(), row_height));
-
-                // Current line background.
-                if row == head.line && cursor.selection.is_empty() {
-                    painter.rect_filled(row_rect, 0.0, palette_cur_line);
-                }
-
-                // Inline diff: added / removed line backgrounds (VS Code's
-                // diffEditor colours) and a bar in the gutter.
-                let mark = doc.line_marks.get(row).copied().unwrap_or(LineMark::Context);
-                if mark != LineMark::Context {
-                    let (bg, bar) = match mark {
-                        LineMark::Added => {
-                            (Color32::from_rgba_unmultiplied(0x9b, 0xb9, 0x55, 0x33), Color32::from_rgb(0x48, 0x7e, 0x02))
-                        }
-                        _ => (Color32::from_rgba_unmultiplied(0xff, 0x00, 0x00, 0x33), Color32::from_rgb(0xf8, 0x51, 0x49)),
-                    };
-                    painter.rect_filled(row_rect, 0.0, bg);
-                    let bar_rect = Rect::from_min_size(Pos2::new(origin.x + 2.0, y), Vec2::new(3.0, row_height));
-                    painter.rect_filled(bar_rect, 0.0, bar);
-                }
-
-                // Selection.
-                if !cursor.selection.is_empty() && row >= sel_start.line && row <= sel_end.line {
-                    let line_len = doc.buffer.line_len(row);
-                    let c0 = if row == sel_start.line { sel_start.col } else { 0 };
-                    let c1 = if row == sel_end.line { sel_end.col } else { line_len + 1 };
-                    if let Some((c0, c1)) = clip(c0, c1) {
-                        let (x0, x1) = (xcol(c0), xcol(c1));
-                        painter.rect_filled(
-                            Rect::from_min_max(Pos2::new(x0, y), Pos2::new(x1, y + row_height)),
-                            0.0,
-                            palette_sel,
-                        );
-                    }
-                }
-
-                // Indent guides.
-                if indent_guides {
-                    let level = guide_indent(&line_indent, line_count, row);
-                    for c in (0..level).step_by(unit) {
-                        let on = active.is_some_and(|(ac, s, e)| ac == c && (s..=e).contains(&row));
-                        let x = (origin.x + text_x0 + c as f32 * char_width).round() + 0.5;
-                        let color = if on { GUIDE_ACTIVE } else { GUIDE };
-                        painter.vline(x, y..=y + row_height, Stroke::new(1.0_f32, color));
-                    }
-                }
-
-                // Matching bracket: a box around each of the pair.
-                if let Some((o, c)) = cursor_pair {
-                    for b in [o, c].iter().filter(|b| b.line == row && in_seg(b.col)) {
-                        let x = xcol(b.col);
-                        let r = Rect::from_min_size(Pos2::new(x, y + 1.0), Vec2::new(char_width, row_height - 2.0));
-                        painter.rect_filled(r, 1.0, BRACKET_MATCH_BG);
-                        painter.rect_stroke(r, 1.0, Stroke::new(1.0_f32, BRACKET_MATCH_BORDER), egui::StrokeKind::Inside);
-                    }
-                }
-
-                // Gutter: the number on a line's first row only.
-                if vr.start == 0 {
-                    let num_color = if row == head.line { palette_text } else { palette_gutter };
-                    painter.text(
-                        Pos2::new(origin.x + gutter_w - GUTTER_PAD, y + row_height / 2.0),
-                        Align2::RIGHT_CENTER,
-                        row + 1,
-                        font_small.clone(),
-                        num_color,
-                    );
-                }
-
-                // Text with highlighting.
-                let line_start_byte = rope.line_to_byte(row);
-                let line_text = doc.buffer.line(row);
-                // This row's bytes of the line.
-                let byte_of = |c: usize| line_text.char_indices().nth(c).map_or(line_text.len(), |(b, _)| b);
-                let (bs, be) = (byte_of(vr.start), byte_of(seg_end));
-                // Brackets recoloured by depth: (byte in line, colour).
-                let recolor: Vec<(usize, Color32)> = if bracket_colors {
-                    doc.brackets
-                        .on_line(row)
-                        .iter()
-                        .map(|b| {
-                            let color = if b.partner.is_some() { BRACKET_COLORS[b.depth % 3] } else { BRACKET_UNMATCHED };
-                            (b.byte - line_start_byte, color)
-                        })
-                        .collect()
+                    doc.buffer.set_cursor(at, false);
+                    doc.buffer.move_word(false, false);
+                    doc.buffer.move_word(true, true);
                 } else {
-                    Vec::new()
-                };
-                let mut job = LayoutJob::default();
-                let mut at = bs;
-                let plain = TextFormat { font_id: font.clone(), color: palette_text, ..Default::default() };
-                for s in spans_in(&spans, line_start_byte + bs, line_start_byte + be) {
-                    let s0 = s.start.max(line_start_byte + bs) - line_start_byte;
-                    let s1 = s.end.min(line_start_byte + be) - line_start_byte;
-                    if s0 > at && line_text.is_char_boundary(at) && line_text.is_char_boundary(s0) {
-                        append_recolored(&mut job, &line_text, at, s0, &plain, &recolor);
-                    }
-                    if s1 > s0 && line_text.is_char_boundary(s0) && line_text.is_char_boundary(s1) {
-                        let fmt = token_format(s.kind, font.clone(), color_of(s.kind));
-                        append_recolored(&mut job, &line_text, s0, s1, &fmt, &recolor);
-                        at = s1;
-                    }
+                    let at = pos_at(&doc.buffer, p);
+                    doc.buffer.set_cursor(at, shift);
                 }
-                if at < be {
-                    append_recolored(&mut job, &line_text, at, be, &plain, &recolor);
-                }
-                let galley = ui.fonts_mut(|f| f.layout_job(job));
-                painter.galley(Pos2::new(xcol(vr.start), y + 1.0), galley, palette_text);
-
-                // ⌘ / Ctrl held over a symbol: underline it as a link.
-                if let Some((lrow, ls, le)) = link {
-                    if let Some((ls, le)) = clip(ls, le).filter(|_| lrow == row) {
-                        let (x0, x1) = (xcol(ls), xcol(le));
-                        painter.hline(x0..=x1, y + row_height - 2.0, Stroke::new(1.0_f32, Color32::from_rgb(0x4d, 0xaa, 0xfc)));
-                    }
-                }
-
-                // Diagnostics underline.
-                for d in &doc.diagnostics {
-                    let (ds, de) = (d.range.start.line as usize, d.range.end.line as usize);
-                    if row < ds || row > de {
-                        continue;
-                    }
-                    let c0 = if row == ds { from_lsp_position(&line_text, d.range.start).col } else { 0 };
-                    let c1 = if row == de { from_lsp_position(&line_text, d.range.end).col } else { line_text.chars().count() };
-                    let Some((c0, c1)) = clip(c0, c1.max(c0 + 1)) else { continue };
-                    let color = match d.severity {
-                        Some(DiagnosticSeverity::ERROR) => palette_err,
-                        Some(DiagnosticSeverity::WARNING) => palette_warn,
-                        _ => palette_gutter,
-                    };
-                    let (x0, x1) = (xcol(c0), xcol(c1));
-                    let yy = y + row_height - 2.0;
-                    painter.line_segment([Pos2::new(x0, yy), Pos2::new(x1, yy)], Stroke::new(1.0_f32, color));
-                }
-
-                // Cursor.
-                if row == head.line && has_focus_before && wl.row_of(head) == vrow {
-                    let x = xcol(head.col);
-                    painter.rect_filled(
-                        Rect::from_min_size(Pos2::new(x - 0.5, y + 1.0), Vec2::new(2.0, row_height - 2.0)),
-                        0.0,
-                        palette_cursor,
-                    );
-                    cursor_screen = Some(Pos2::new(x, y + row_height));
+                app.completion.open = false;
+                // ⌘-click / Ctrl-click: go to definition.
+                if resp.clicked() && ui.input(|i| i.modifiers.command) {
+                    go_to_definition = true;
                 }
             }
-
-            // Hover tooltip for diagnostics on the hovered line.
-            if let Some(p) = resp.hover_pos() {
+        } else if resp.dragged() {
+            if let Some(p) = resp.interact_pointer_pos() {
                 let at = pos_at(&doc.buffer, p);
-                let msgs: Vec<String> = doc
-                    .diagnostics
-                    .iter()
-                    .filter(|d| {
-                        let (ds, de) = (d.range.start.line as usize, d.range.end.line as usize);
-                        at.line >= ds && at.line <= de
-                    })
-                    .map(|d| d.message.clone())
-                    .collect();
-                if !msgs.is_empty() {
-                    resp.clone().on_hover_text(msgs.join("\n\n"));
+                doc.buffer.set_cursor(at, true);
+            }
+        }
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
+        }
+        // Holding ⌘ / Ctrl: underline the symbol under the mouse, like a
+        // link, since clicking it goes to its definition.
+        let link = resp.hover_pos().filter(|_| ui.input(|i| i.modifiers.command)).and_then(|p| {
+            let vrow = ((p.y - content_top) / row_height).floor().max(0.0) as usize;
+            let x = ((p.x - (origin.x + text_x0)) / char_width).floor().max(0.0) as usize;
+            if vrow >= row_total {
+                return None;
+            }
+            let Position { line: row, col } = wl.position_at(vrow, x, |l| doc.buffer.line_len(l));
+            let line = doc.buffer.line(row);
+            let terraform = doc.buffer.language() == Some("terraform");
+            // Only when the mouse is on the word itself, not after it.
+            word_range(&line, col + 1, terraform).filter(|(s, e)| col >= *s && col < *e).map(|(s, e)| (row, s, e))
+        });
+        if link.is_some() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+
+        let cursor = doc.buffer.cursor;
+        let (sel_start, sel_end) = cursor.selection.ordered();
+        let head = cursor.head();
+        doc.update_structure(&mut app.languages, tab_size);
+        let spans = doc.spans(&mut app.languages).to_vec();
+        let rope = doc.buffer.rope();
+
+        // Bracket pair at the cursor, highlighted with a box.
+        let cursor_pair = if cursor.selection.is_empty() { doc.brackets.pair_at(head.line, head.col) } else { None };
+        // Indent guides: the block around the cursor gets the bright one.
+        let line_indent = |r: usize| indent_of(&doc.buffer.line(r));
+        let unit = doc.indent_unit.max(1);
+        let active = if indent_guides { active_guide(&line_indent, line_count, head.line, unit) } else { None };
+
+        for vrow in range.clone() {
+            // A row on screen: all of a line, or a piece of a wrapped one.
+            let vr = wl.row(vrow);
+            let row = vr.line;
+            let y = content_top + vrow as f32 * row_height;
+            let line_chars = doc.buffer.line_len(row);
+            let seg_end = vr.end.min(line_chars);
+            let last_seg = vr.end >= line_chars;
+            let in_seg = |c: usize| c >= vr.start && (c < seg_end || last_seg);
+            let xcol = |c: usize| origin.x + text_x0 + (vr.indent + c.saturating_sub(vr.start)) as f32 * char_width;
+            // Clip a column range of the line to this row ([s, e), the
+            // last row keeping anything past the end).
+            let clip = |c0: usize, c1: usize| {
+                let (s, e) = (c0.max(vr.start), if last_seg { c1 } else { c1.min(seg_end) });
+                (e > s).then_some((s, e))
+            };
+            let row_rect = Rect::from_min_size(Pos2::new(rect.left(), y), Vec2::new(rect.width(), row_height));
+
+            // Current line background.
+            if row == head.line && cursor.selection.is_empty() {
+                painter.rect_filled(row_rect, 0.0, palette_cur_line);
+            }
+
+            // Inline diff: added / removed line backgrounds (VS Code's
+            // diffEditor colours) and a bar in the gutter.
+            let mark = doc.line_marks.get(row).copied().unwrap_or(LineMark::Context);
+            if mark != LineMark::Context {
+                let (bg, bar) = match mark {
+                    LineMark::Added => {
+                        (Color32::from_rgba_unmultiplied(0x9b, 0xb9, 0x55, 0x33), Color32::from_rgb(0x48, 0x7e, 0x02))
+                    }
+                    _ => (Color32::from_rgba_unmultiplied(0xff, 0x00, 0x00, 0x33), Color32::from_rgb(0xf8, 0x51, 0x49)),
+                };
+                painter.rect_filled(row_rect, 0.0, bg);
+                let bar_rect = Rect::from_min_size(Pos2::new(origin.x + 2.0, y), Vec2::new(3.0, row_height));
+                painter.rect_filled(bar_rect, 0.0, bar);
+            }
+
+            // Selection.
+            if !cursor.selection.is_empty() && row >= sel_start.line && row <= sel_end.line {
+                let line_len = doc.buffer.line_len(row);
+                let c0 = if row == sel_start.line { sel_start.col } else { 0 };
+                let c1 = if row == sel_end.line { sel_end.col } else { line_len + 1 };
+                if let Some((c0, c1)) = clip(c0, c1) {
+                    let (x0, x1) = (xcol(c0), xcol(c1));
+                    painter.rect_filled(Rect::from_min_max(Pos2::new(x0, y), Pos2::new(x1, y + row_height)), 0.0, palette_sel);
                 }
             }
 
-            // Keep the cursor in view.
-            if doc.scroll_to_cursor {
-                doc.scroll_to_cursor = false;
-                let hrow = wl.row_of(head);
-                let x = origin.x + text_x0 + wl.screen_col(hrow, head.col) as f32 * char_width;
-                let y = content_top + hrow as f32 * row_height;
-                let target = Rect::from_min_size(
-                    Pos2::new(x - char_width * 2.0, y - row_height),
-                    Vec2::new(char_width * 6.0, row_height * 3.0),
-                );
-                ui.scroll_to_rect(target, None);
+            // Indent guides.
+            if indent_guides {
+                let level = guide_indent(&line_indent, line_count, row);
+                for c in (0..level).step_by(unit) {
+                    let on = active.is_some_and(|(ac, s, e)| ac == c && (s..=e).contains(&row));
+                    let x = (origin.x + text_x0 + c as f32 * char_width).round() + 0.5;
+                    let color = if on { GUIDE_ACTIVE } else { GUIDE };
+                    painter.vline(x, y..=y + row_height, Stroke::new(1.0_f32, color));
+                }
             }
-            doc.wrap = wl;
-        });
+
+            // Matching bracket: a box around each of the pair.
+            if let Some((o, c)) = cursor_pair {
+                for b in [o, c].iter().filter(|b| b.line == row && in_seg(b.col)) {
+                    let x = xcol(b.col);
+                    let r = Rect::from_min_size(Pos2::new(x, y + 1.0), Vec2::new(char_width, row_height - 2.0));
+                    painter.rect_filled(r, 1.0, BRACKET_MATCH_BG);
+                    painter.rect_stroke(r, 1.0, Stroke::new(1.0_f32, BRACKET_MATCH_BORDER), egui::StrokeKind::Inside);
+                }
+            }
+
+            // Gutter: the number on a line's first row only.
+            if vr.start == 0 {
+                let num_color = if row == head.line { palette_text } else { palette_gutter };
+                painter.text(
+                    Pos2::new(origin.x + gutter_w - GUTTER_PAD, y + row_height / 2.0),
+                    Align2::RIGHT_CENTER,
+                    row + 1,
+                    font_small.clone(),
+                    num_color,
+                );
+            }
+
+            // Text with highlighting.
+            let line_start_byte = rope.line_to_byte(row);
+            let line_text = doc.buffer.line(row);
+            // This row's bytes of the line.
+            let byte_of = |c: usize| line_text.char_indices().nth(c).map_or(line_text.len(), |(b, _)| b);
+            let (bs, be) = (byte_of(vr.start), byte_of(seg_end));
+            // Brackets recoloured by depth: (byte in line, colour).
+            let recolor: Vec<(usize, Color32)> = if bracket_colors {
+                doc.brackets
+                    .on_line(row)
+                    .iter()
+                    .map(|b| {
+                        let color = if b.partner.is_some() { BRACKET_COLORS[b.depth % 3] } else { BRACKET_UNMATCHED };
+                        (b.byte - line_start_byte, color)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let mut job = LayoutJob::default();
+            let mut at = bs;
+            let plain = TextFormat { font_id: font.clone(), color: palette_text, ..Default::default() };
+            for s in spans_in(&spans, line_start_byte + bs, line_start_byte + be) {
+                let s0 = s.start.max(line_start_byte + bs) - line_start_byte;
+                let s1 = s.end.min(line_start_byte + be) - line_start_byte;
+                if s0 > at && line_text.is_char_boundary(at) && line_text.is_char_boundary(s0) {
+                    append_recolored(&mut job, &line_text, at, s0, &plain, &recolor);
+                }
+                if s1 > s0 && line_text.is_char_boundary(s0) && line_text.is_char_boundary(s1) {
+                    let fmt = token_format(s.kind, font.clone(), color_of(s.kind));
+                    append_recolored(&mut job, &line_text, s0, s1, &fmt, &recolor);
+                    at = s1;
+                }
+            }
+            if at < be {
+                append_recolored(&mut job, &line_text, at, be, &plain, &recolor);
+            }
+            let galley = ui.fonts_mut(|f| f.layout_job(job));
+            painter.galley(Pos2::new(xcol(vr.start), y + 1.0), galley, palette_text);
+
+            // ⌘ / Ctrl held over a symbol: underline it as a link.
+            if let Some((lrow, ls, le)) = link {
+                if let Some((ls, le)) = clip(ls, le).filter(|_| lrow == row) {
+                    let (x0, x1) = (xcol(ls), xcol(le));
+                    painter.hline(x0..=x1, y + row_height - 2.0, Stroke::new(1.0_f32, Color32::from_rgb(0x4d, 0xaa, 0xfc)));
+                }
+            }
+
+            // Diagnostics underline.
+            for d in &doc.diagnostics {
+                let (ds, de) = (d.range.start.line as usize, d.range.end.line as usize);
+                if row < ds || row > de {
+                    continue;
+                }
+                let c0 = if row == ds { from_lsp_position(&line_text, d.range.start).col } else { 0 };
+                let c1 = if row == de { from_lsp_position(&line_text, d.range.end).col } else { line_text.chars().count() };
+                let Some((c0, c1)) = clip(c0, c1.max(c0 + 1)) else { continue };
+                let color = match d.severity {
+                    Some(DiagnosticSeverity::ERROR) => palette_err,
+                    Some(DiagnosticSeverity::WARNING) => palette_warn,
+                    _ => palette_gutter,
+                };
+                let (x0, x1) = (xcol(c0), xcol(c1));
+                let yy = y + row_height - 2.0;
+                painter.line_segment([Pos2::new(x0, yy), Pos2::new(x1, yy)], Stroke::new(1.0_f32, color));
+            }
+
+            // Cursor.
+            if row == head.line && has_focus_before && wl.row_of(head) == vrow {
+                let x = xcol(head.col);
+                painter.rect_filled(
+                    Rect::from_min_size(Pos2::new(x - 0.5, y + 1.0), Vec2::new(2.0, row_height - 2.0)),
+                    0.0,
+                    palette_cursor,
+                );
+                cursor_screen = Some(Pos2::new(x, y + row_height));
+            }
+        }
+
+        // Hover tooltip for diagnostics on the hovered line.
+        if let Some(p) = resp.hover_pos() {
+            let at = pos_at(&doc.buffer, p);
+            let msgs: Vec<String> = doc
+                .diagnostics
+                .iter()
+                .filter(|d| {
+                    let (ds, de) = (d.range.start.line as usize, d.range.end.line as usize);
+                    at.line >= ds && at.line <= de
+                })
+                .map(|d| d.message.clone())
+                .collect();
+            if !msgs.is_empty() {
+                resp.clone().on_hover_text(msgs.join("\n\n"));
+            }
+        }
+
+        // Keep the cursor in view.
+        if doc.scroll_to_cursor {
+            doc.scroll_to_cursor = false;
+            let hrow = wl.row_of(head);
+            let x = origin.x + text_x0 + wl.screen_col(hrow, head.col) as f32 * char_width;
+            let y = content_top + hrow as f32 * row_height;
+            let target = Rect::from_min_size(
+                Pos2::new(x - char_width * 2.0, y - row_height),
+                Vec2::new(char_width * 6.0, row_height * 3.0),
+            );
+            ui.scroll_to_rect(target, None);
+        }
+        doc.wrap = wl;
+    });
+
+    if mm_w > 0.0 {
+        let doc = &mut app.docs[doc_idx];
+        doc.minimap.scroll_y = scroll.state.offset.y;
+        doc.minimap.view_h = scroll.inner_rect.height();
+        let spans = doc.spans(&mut app.languages).to_vec();
+        super::minimap::update(outer.ctx(), doc, &spans, &color_of, palette_text);
+        let cursor_row = doc.wrap.row_of(doc.buffer.cursor.head());
+        super::minimap::paint(outer, mm_rect, &doc.minimap, row_total, row_height, cursor_row, app.palette.border);
+    }
+    outer.allocate_rect(full, Sense::hover());
 
     if go_to_definition {
         app.go_to_definition();

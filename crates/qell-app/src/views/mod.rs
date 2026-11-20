@@ -4,6 +4,7 @@
 
 pub mod editor;
 pub mod menu;
+pub mod minimap;
 pub mod palette;
 pub mod scm;
 pub mod search;

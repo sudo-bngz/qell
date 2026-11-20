@@ -62,6 +62,9 @@ bottom, and language-server completion for the languages you actually use.
 - **Plugins** — WebAssembly modules loaded from `~/.config/qell/plugins`,
   sandboxed by Wasmtime, exposing commands to the palette. See
   [`plugins/hello`](plugins/hello).
+- **Minimap** — the whole file in miniature on the right of the editor, in
+  its syntax colours, with the visible part shaded: click to jump, drag to
+  scroll. *View → Minimap* or Settings to hide it.
 - **Word wrap** (`Alt+Z`, `⌥Z` on macOS, or Settings) — long lines wrap at
   word boundaries to the window's width, continuation rows keep the line's
   indentation, and Up/Down, the mouse and selections follow the wrapped rows.

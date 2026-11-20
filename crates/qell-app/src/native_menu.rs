@@ -174,6 +174,7 @@ pub fn layout() -> Vec<(&'static str, Vec<Entry>)> {
                 Cmd(C::ShowSourceControl, Some("Source Control")),
                 Cmd(C::ToggleSidebar, Some("Toggle Sidebar")),
                 Cmd(C::ToggleWordWrap, Some("Word Wrap")),
+                Cmd(C::ToggleMinimap, Some("Minimap")),
                 Separator,
                 Cmd(C::ToggleTerminal, Some("Toggle Terminal")),
                 Cmd(C::NewTerminal, Some("New Terminal")),
