@@ -50,6 +50,7 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                 item(ui, app, Command::ShowSearch);
                 item(ui, app, Command::ShowSourceControl);
                 item(ui, app, Command::ToggleSidebar);
+                item(ui, app, Command::ToggleWordWrap);
                 item(ui, app, Command::ToggleTerminal);
                 item(ui, app, Command::NewTerminal);
                 ui.separator();

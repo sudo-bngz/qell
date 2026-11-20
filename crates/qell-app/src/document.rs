@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 
 use qell_core::structure::{detect_indent_unit, Brackets};
+use qell_core::wrap::WrapLayout;
 use qell_core::{Buffer, HighlightSpan, LanguageRegistry};
 use qell_lsp::lsp_types::Diagnostic;
 
@@ -27,6 +28,13 @@ pub struct Document {
     pub indent_unit: usize,
     /// (buffer version, tab size) the two above were computed for.
     structure_key: Option<(i32, usize)>,
+    /// Rows on screen (word wrap), for the width last drawn at.
+    pub wrap: WrapLayout,
+    /// (buffer version, wrap width) `wrap` was computed for.
+    wrap_key: Option<(i32, usize)>,
+    /// Screen column Up/Down aim for across wrapped rows of different
+    /// lengths; reset by any other move.
+    pub goal_col: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +62,9 @@ impl Document {
             brackets: Brackets::default(),
             indent_unit: 4,
             structure_key: None,
+            wrap: WrapLayout::plain(1),
+            wrap_key: None,
+            goal_col: None,
         }
     }
 
@@ -104,6 +115,40 @@ impl Document {
             };
         }
         &self.spans
+    }
+
+    /// Lay the text out in rows of `width` columns (0: no wrapping), if the
+    /// text or the width changed.
+    pub fn update_wrap(&mut self, width: usize) {
+        let key = (self.buffer.version(), width);
+        if self.wrap_key == Some(key) {
+            return;
+        }
+        self.wrap_key = Some(key);
+        self.wrap = if width == 0 {
+            WrapLayout::plain(self.buffer.line_count())
+        } else {
+            WrapLayout::wrapped(self.buffer.rope().lines().map(|l| l.to_string()), width)
+        };
+    }
+
+    /// Whether `wrap` matches the current text (it is computed when drawing,
+    /// so edits earlier in the frame make it stale).
+    pub fn wrap_is_current(&self) -> bool {
+        self.wrap_key.is_some_and(|(v, _)| v == self.buffer.version())
+    }
+
+    /// Up/Down over wrapped rows: `delta` rows, keeping the screen column.
+    pub fn move_rows(&mut self, delta: isize, extend: bool) {
+        let w = &self.wrap;
+        let head = self.buffer.cursor.head();
+        let row = w.row_of(head);
+        let x = self.goal_col.unwrap_or_else(|| w.screen_col(row, head.col));
+        let target = (row as isize + delta).clamp(0, w.row_count() as isize - 1) as usize;
+        let b = &self.buffer;
+        let pos = w.position_at(target, x, |l| b.line_len(l));
+        self.buffer.set_cursor(pos, extend);
+        self.goal_col = Some(x);
     }
 
     /// Recompute brackets and the indentation step if the text changed.

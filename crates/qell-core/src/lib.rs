@@ -12,6 +12,7 @@ pub mod history;
 pub mod position;
 pub mod structure;
 pub mod syntax;
+pub mod wrap;
 
 pub use buffer::Buffer;
 pub use position::{Cursor, Position, Selection};

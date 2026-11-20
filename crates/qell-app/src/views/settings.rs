@@ -55,6 +55,12 @@ fn defs() -> Vec<Def> {
         def("tab_size", "Editor", "Tab Size", "Spaces inserted by the Tab key."),
         def("auto_complete", "Editor", "Auto Complete", "Suggest completions while typing, not only on Ctrl+Space."),
         def(
+            "word_wrap",
+            "Editor",
+            "Word Wrap",
+            "Wrap long lines at the window's width instead of scrolling sideways. Toggle with Alt+Z.",
+        ),
+        def(
             "bracket_pair_colors",
             "Editor",
             "Bracket Pair Colours",
@@ -120,6 +126,7 @@ fn is_modified(key: &str, c: &Config) -> bool {
         "font_size" => c.font_size != d.font_size,
         "tab_size" => c.tab_size != d.tab_size,
         "auto_complete" => c.auto_complete != d.auto_complete,
+        "word_wrap" => c.word_wrap != d.word_wrap,
         "bracket_pair_colors" => c.bracket_pair_colors != d.bracket_pair_colors,
         "indent_guides" => c.indent_guides != d.indent_guides,
         "ui_scale" => c.ui_scale != d.ui_scale,
@@ -142,6 +149,7 @@ fn reset(key: &str, c: &mut Config) {
         "font_size" => c.font_size = d.font_size,
         "tab_size" => c.tab_size = d.tab_size,
         "auto_complete" => c.auto_complete = d.auto_complete,
+        "word_wrap" => c.word_wrap = d.word_wrap,
         "bracket_pair_colors" => c.bracket_pair_colors = d.bracket_pair_colors,
         "indent_guides" => c.indent_guides = d.indent_guides,
         "ui_scale" => c.ui_scale = d.ui_scale,
@@ -222,6 +230,9 @@ fn control(ui: &mut egui::Ui, key: &str, c: &mut Config, drafts: &mut HashMap<St
         }
         "auto_complete" => {
             ui.checkbox(&mut c.auto_complete, "Enabled");
+        }
+        "word_wrap" => {
+            ui.checkbox(&mut c.word_wrap, "Enabled");
         }
         "bracket_pair_colors" => {
             ui.checkbox(&mut c.bracket_pair_colors, "Enabled");
@@ -402,6 +413,7 @@ mod tests {
                 "font_size" => c.font_size = 20.0,
                 "tab_size" => c.tab_size = 2,
                 "auto_complete" => c.auto_complete = false,
+                "word_wrap" => c.word_wrap = true,
                 "bracket_pair_colors" => c.bracket_pair_colors = false,
                 "indent_guides" => c.indent_guides = false,
                 "ui_scale" => c.ui_scale = 1.5,
