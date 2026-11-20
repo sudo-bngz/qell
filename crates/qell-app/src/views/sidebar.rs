@@ -8,6 +8,7 @@ use qell_git::FileStatus;
 
 use crate::app::{Focus, QellApp, SidebarView, TreeEditKind};
 use crate::icons;
+use crate::recent::Order;
 
 #[derive(Debug, Clone)]
 pub struct Entry {
@@ -80,6 +81,12 @@ fn show_dir(app: &mut QellApp, ui: &mut egui::Ui, dir: &Path) {
 
         if e.is_dir {
             let id = ui.make_persistent_id(&e.path);
+            // Revealing a file opens every folder on the way to it.
+            if app.reveal.as_ref().is_some_and(|r| r.starts_with(&e.path)) {
+                let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+                state.set_open(true);
+                state.store(ui.ctx());
+            }
             let is_open = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false).is_open();
             let icon = if is_open { icons::FOLDER_OPEN } else { icons::FOLDER };
             let label = icon_label(show_icons.then_some((icon, folder_color)), &e.name, name_color);
@@ -130,8 +137,104 @@ fn show_dir(app: &mut QellApp, ui: &mut egui::Ui, dir: &Path) {
             if resp.clicked() {
                 app.open_file(e.path.clone());
             }
+            if app.reveal.as_deref() == Some(e.path.as_path()) {
+                resp.scroll_to_me(Some(egui::Align::Center));
+                app.reveal = None;
+            }
             resp.context_menu(|ui| entry_menu(app, ui, &e.path, None));
         }
+    }
+}
+
+/// The handful of files at the top of the tree: the ones you open most (or
+/// last), plus any you pinned. Clicking one opens it and reveals it below.
+fn show_shortcuts(app: &mut QellApp, ui: &mut egui::Ui) {
+    let limit = app.config.shortcuts;
+    if limit == 0 {
+        return;
+    }
+    let order = if app.config.shortcuts_recent { Order::Recent } else { Order::MostUsed };
+    let entries = app.recent.top(&app.root.clone(), order, limit);
+    let (dim, text) = (app.palette.text_dim, app.palette.text);
+    let show_icons = app.config.file_icons;
+
+    ui.horizontal(|ui| {
+        let title = if app.config.shortcuts_recent { "RECENT" } else { "MOST USED" };
+        if ui
+            .add(egui::Label::new(RichText::new(title).size(11.0).color(dim)).sense(egui::Sense::click()))
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text("Show the files opened last instead")
+            .clicked()
+        {
+            app.config.shortcuts_recent = !app.config.shortcuts_recent;
+            app.save_config();
+        }
+    });
+    if entries.is_empty() {
+        ui.label(RichText::new("Files you open show up here.").size(11.0).italics().color(dim));
+    }
+    let active = app.docs.get(app.active).and_then(|d| d.buffer.path().map(Path::to_path_buf));
+    let root = app.root.clone();
+    for e in entries {
+        let name = e.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let parent = e.path.parent().and_then(|p| p.strip_prefix(&root).ok()).map(|p| p.to_string_lossy().into_owned());
+        let icon = show_icons.then(|| icons::for_file(&e.path));
+        let label = icon_label(icon, &name, text);
+        let mut button = egui::Button::selectable(active.as_deref() == Some(e.path.as_path()), label)
+            .min_size(egui::vec2(ui.available_width(), 0.0));
+        // Where it is, and a star when it's pinned.
+        let right = match (e.pinned, parent.as_deref()) {
+            (true, Some(p)) if !p.is_empty() => format!("★ {p}"),
+            (true, _) => "★".into(),
+            (false, Some(p)) => p.to_string(),
+            (false, None) => String::new(),
+        };
+        if !right.is_empty() {
+            button = button.right_text(RichText::new(shorten_dir(&right)).size(11.0).color(dim));
+        }
+        let resp = ui.add(button).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(e.path.display().to_string());
+        if resp.clicked() {
+            app.open_file(e.path.clone());
+            app.reveal = Some(e.path.clone());
+        }
+        resp.context_menu(|ui| {
+            let pinned = app.recent.is_pinned(&root, &e.path);
+            if ui.button(if pinned { "Unpin" } else { "Pin to top" }).clicked() {
+                app.recent.toggle_pin(&root, &e.path);
+                ui.close();
+            }
+            if ui.button("Reveal in File Tree").clicked() {
+                app.reveal = Some(e.path.clone());
+                ui.close();
+            }
+            ui.separator();
+            if ui.button("Remove from list").clicked() {
+                app.recent.forget(&root, &e.path);
+                ui.close();
+            }
+            if ui.button("Clear the list").clicked() {
+                app.recent.clear(&root);
+                ui.close();
+            }
+            ui.separator();
+            entry_menu(app, ui, &e.path.clone(), None);
+        });
+    }
+    ui.add_space(4.0);
+    ui.separator();
+    ui.add_space(2.0);
+}
+
+/// Keep a folder path short enough for the narrow column ("…/deep/dir").
+fn shorten_dir(path: &str) -> String {
+    const MAX: usize = 22;
+    if path.chars().count() <= MAX {
+        return path.to_string();
+    }
+    let tail: String = path.chars().skip(path.chars().count() - (MAX - 1)).collect();
+    match tail.split_once('/') {
+        Some((_, rest)) => format!("…/{rest}"),
+        None => format!("…{tail}"),
     }
 }
 
@@ -310,6 +413,7 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
             ui.add_space(4.0);
             egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 1.0;
+                show_shortcuts(app, ui);
                 let root = app.root.clone();
                 show_dir(app, ui, &root);
                 // The empty space below the tree: menu for the workspace root.

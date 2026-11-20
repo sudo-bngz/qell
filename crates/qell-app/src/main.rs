@@ -11,6 +11,7 @@ mod config;
 mod document;
 mod icons;
 mod native_menu;
+mod recent;
 mod session;
 mod snippet;
 mod theme;
