@@ -63,10 +63,19 @@ impl Registry {
     pub fn poll(&mut self) -> Vec<Event> {
         let mut out: Vec<Event> = self.events_rx.try_iter().collect();
         for ev in &out {
-            if let Event::Exited { language, reason } = ev {
-                log::warn!("language server for {language} exited: {reason}");
-                self.clients.remove(language);
-                self.failed.insert(language.clone());
+            match ev {
+                Event::Exited { language, reason } => {
+                    log::warn!("language server for {language} exited: {reason}");
+                    self.clients.remove(language);
+                    self.failed.insert(language.clone());
+                }
+                // A proxy (rustup) started but the real server isn't there.
+                Event::NotInstalled { language, program } => {
+                    self.clients.remove(language);
+                    self.failed.insert(language.clone());
+                    self.missing.insert(language.clone(), program.clone());
+                }
+                _ => {}
             }
         }
         out.retain(|e| !matches!(e, Event::Error { id: None, .. }));
@@ -175,6 +184,31 @@ impl Registry {
         Some(client.resolve_completion(item))
     }
 
+    /// Ask where the symbol at the cursor is defined. `None` when no ready
+    /// server for the language can answer.
+    pub fn request_definition(&mut self, languages: &LanguageRegistry, buffer: &mut Buffer) -> Option<RequestId> {
+        self.request_locations(languages, buffer, false)
+    }
+
+    /// Ask for every reference to the symbol at the cursor.
+    pub fn request_references(&mut self, languages: &LanguageRegistry, buffer: &mut Buffer) -> Option<RequestId> {
+        self.request_locations(languages, buffer, true)
+    }
+
+    fn request_locations(&mut self, languages: &LanguageRegistry, buffer: &mut Buffer, references: bool) -> Option<RequestId> {
+        self.sync(languages, buffer);
+        let lang = buffer.language()?;
+        let uri = buffer.path().and_then(path_to_uri)?;
+        let client = self.clients.get(lang).filter(|c| c.is_ready())?;
+        let p = buffer.cursor.head();
+        let pos = to_lsp_position(&buffer.line(p.line), p);
+        if references {
+            client.supports_references().then(|| client.references(uri, pos))
+        } else {
+            client.supports_definition().then(|| client.definition(uri, pos))
+        }
+    }
+
     /// Characters that open the completion list for a language.
     pub fn completion_triggers(&self, lang_id: &str) -> Vec<String> {
         self.clients.get(lang_id).map(|c| c.completion_triggers()).unwrap_or_default()
@@ -247,7 +281,7 @@ pub fn install_hint(program: &str) -> Option<InstallHint> {
     let mac = cfg!(target_os = "macos");
     let hint = |command, note| Some(InstallHint { command, note });
     match program {
-        "rust-analyzer" => hint("rustup component add rust-analyzer", None),
+        "rust-analyzer" => hint("rustup component add rust-analyzer rust-src", None),
         "gopls" => hint("go install golang.org/x/tools/gopls@latest", Some("Make sure $(go env GOPATH)/bin is on your PATH.")),
         "typescript-language-server" => hint("npm install -g typescript-language-server typescript", None),
         "terraform-ls" if mac => hint("brew install terraform-ls", None),
@@ -276,6 +310,38 @@ mod tests {
         let events = reg.poll();
         assert!(events.iter().any(|e| matches!(e, Event::NotInstalled { language, .. } if language == "go")));
         assert!(!events.iter().any(|e| matches!(e, Event::Exited { .. })));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rustup_proxy_without_component_is_not_installed() {
+        // A stand-in for rustup's proxy: prints its error and exits.
+        let dir = tempfile_dir();
+        let fake = dir.join("fake-ra");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\necho \"error: Unknown binary 'rust-analyzer' in official toolchain 'stable'\" >&2\nexit 1\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let langs = qell_core::LanguageRegistry::new();
+        let mut reg = Registry::new(dir.clone());
+        reg.set_override("rust", vec![fake.to_string_lossy().into_owned()]);
+        let _ = reg.client_for(&langs, "rust");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while reg.status("rust") != "not installed" {
+            let _ = reg.poll();
+            assert!(std::time::Instant::now() < deadline, "status {}", reg.status("rust"));
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn tempfile_dir() -> PathBuf {
+        let d = std::env::temp_dir().join(format!("qell-lsp-test-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
     }
 
     #[test]

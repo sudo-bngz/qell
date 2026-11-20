@@ -40,6 +40,11 @@ pub enum Event {
         id: RequestId,
         item: Box<CompletionItem>,
     },
+    /// Answer to a definition or references request (empty: none found).
+    Locations {
+        id: RequestId,
+        locations: Vec<Location>,
+    },
     Hover {
         id: RequestId,
         hover: Option<Hover>,
@@ -71,6 +76,7 @@ pub enum Event {
 enum Pending {
     Completion,
     Resolve,
+    Locations,
     Hover,
     Other,
 }
@@ -97,12 +103,28 @@ impl Client {
             .current_dir(root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .with_context(|| format!("starting language server `{program}` for {language}"))?;
 
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
+        // Keep the start of stderr: when a server dies before answering,
+        // it usually says why there (and a rustup proxy says the component
+        // isn't installed). The rest is drained so the pipe never blocks.
+        let stderr_head = Arc::new(Mutex::new(String::new()));
+        if let Some(stderr) = child.stderr.take() {
+            let head = stderr_head.clone();
+            thread::Builder::new().name(format!("lsp-stderr-{language}")).spawn(move || {
+                for line in BufReader::new(stderr).lines().map_while(std::result::Result::ok) {
+                    let mut h = head.lock().unwrap();
+                    if h.len() < 4096 {
+                        h.push_str(&line);
+                        h.push('\n');
+                    }
+                }
+            })?;
+        }
 
         let (outgoing, outgoing_rx) = unbounded::<Value>();
         let pending: Arc<Mutex<HashMap<RequestId, Pending>>> = Arc::default();
@@ -131,13 +153,25 @@ impl Client {
             let capabilities = capabilities.clone();
             let ready = ready.clone();
             let outgoing = outgoing.clone();
+            let program = program.to_string();
             thread::Builder::new().name(format!("lsp-reader-{lang}")).spawn(move || {
                 let mut reader = BufReader::new(stdout);
                 loop {
                     match read_message(&mut reader) {
                         Ok(msg) => dispatch(&lang, msg, &pending, &capabilities, &ready, &outgoing, &events),
                         Err(e) => {
-                            let _ = events.send(Event::Exited { language: lang.clone(), reason: e.to_string() });
+                            // Give the stderr thread a moment to read the last words.
+                            thread::sleep(std::time::Duration::from_millis(50));
+                            let said = stderr_head.lock().unwrap().clone();
+                            let never_started = !*ready.lock().unwrap();
+                            let event = if never_started && is_missing_component(&said) {
+                                Event::NotInstalled { language: lang.clone(), program: program.clone() }
+                            } else {
+                                let why = said.lines().find(|l| !l.trim().is_empty()).map(str::trim).unwrap_or("");
+                                let reason = if why.is_empty() { e.to_string() } else { format!("{e}: {why}") };
+                                Event::Exited { language: lang.clone(), reason }
+                            };
+                            let _ = events.send(event);
                             if let Some(w) = &waker {
                                 w();
                             }
@@ -194,6 +228,8 @@ impl Client {
                         context_support: Some(true),
                         ..Default::default()
                     }),
+                    definition: Some(GotoCapability { dynamic_registration: None, link_support: Some(true) }),
+                    references: Some(DynamicRegistrationClientCapabilities { dynamic_registration: None }),
                     hover: Some(HoverClientCapabilities {
                         content_format: Some(vec![MarkupKind::PlainText, MarkupKind::Markdown]),
                         ..Default::default()
@@ -302,6 +338,45 @@ impl Client {
             .unwrap_or_default()
     }
 
+    /// Whether the server answers go-to-definition / find-references.
+    pub fn supports_definition(&self) -> bool {
+        let caps = self.capabilities.lock().unwrap();
+        caps.as_ref().and_then(|c| c.definition_provider.as_ref()).is_some_and(|p| !matches!(p, OneOf::Left(false)))
+    }
+
+    pub fn supports_references(&self) -> bool {
+        let caps = self.capabilities.lock().unwrap();
+        caps.as_ref().and_then(|c| c.references_provider.as_ref()).is_some_and(|p| !matches!(p, OneOf::Left(false)))
+    }
+
+    pub fn definition(&self, uri: Uri, position: Position) -> RequestId {
+        self.request(
+            "textDocument/definition",
+            GotoDefinitionParams {
+                text_document_position_params: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri },
+                    position,
+                },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            },
+            Pending::Locations,
+        )
+    }
+
+    pub fn references(&self, uri: Uri, position: Position) -> RequestId {
+        self.request(
+            "textDocument/references",
+            ReferenceParams {
+                text_document_position: TextDocumentPositionParams { text_document: TextDocumentIdentifier { uri }, position },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+                context: ReferenceContext { include_declaration: true },
+            },
+            Pending::Locations,
+        )
+    }
+
     pub fn resolve_completion(&self, item: &CompletionItem) -> RequestId {
         self.request("completionItem/resolve", item, Pending::Resolve)
     }
@@ -354,6 +429,12 @@ fn read_message<R: BufRead>(reader: &mut R) -> Result<Value> {
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf)?;
     Ok(serde_json::from_slice(&buf)?)
+}
+
+/// What a rustup proxy prints when the component behind it isn't
+/// installed (`rust-analyzer` without `rustup component add`).
+fn is_missing_component(stderr: &str) -> bool {
+    stderr.contains("Unknown binary") || stderr.contains("is not installed") || stderr.contains("not applicable")
 }
 
 fn parse<T: DeserializeOwned>(v: Value) -> Option<T> {
@@ -412,6 +493,18 @@ fn dispatch(
                 None => (Vec::new(), false),
             };
             let _ = events.send(Event::Completion { id, items, incomplete });
+        }
+        Some(Pending::Locations) => {
+            // Location | Location[] | LocationLink[] | null
+            let locations = match parse::<GotoDefinitionResponse>(result) {
+                Some(GotoDefinitionResponse::Scalar(l)) => vec![l],
+                Some(GotoDefinitionResponse::Array(ls)) => ls,
+                Some(GotoDefinitionResponse::Link(links)) => {
+                    links.into_iter().map(|l| Location { uri: l.target_uri, range: l.target_selection_range }).collect()
+                }
+                None => Vec::new(),
+            };
+            let _ = events.send(Event::Locations { id, locations });
         }
         Some(Pending::Resolve) => {
             if let Some(item) = parse::<CompletionItem>(result) {
