@@ -54,6 +54,18 @@ fn defs() -> Vec<Def> {
         def("font_size", "Editor", "Font Size", "Editor font size in points."),
         def("tab_size", "Editor", "Tab Size", "Spaces inserted by the Tab key."),
         def("auto_complete", "Editor", "Auto Complete", "Suggest completions while typing, not only on Ctrl+Space."),
+        def(
+            "bracket_pair_colors",
+            "Editor",
+            "Bracket Pair Colours",
+            "Colour matching brackets by nesting depth; unmatched brackets show in red.",
+        ),
+        def(
+            "indent_guides",
+            "Editor",
+            "Indent Guides",
+            "Vertical lines at each indentation level; the block around the cursor is highlighted.",
+        ),
         def("ui_scale", "Appearance", "UI Scale", "Size of the whole interface."),
         def("file_icons", "Appearance", "File Icons", "Show file-type icons in the file tree and tabs."),
         def(
@@ -108,6 +120,8 @@ fn is_modified(key: &str, c: &Config) -> bool {
         "font_size" => c.font_size != d.font_size,
         "tab_size" => c.tab_size != d.tab_size,
         "auto_complete" => c.auto_complete != d.auto_complete,
+        "bracket_pair_colors" => c.bracket_pair_colors != d.bracket_pair_colors,
+        "indent_guides" => c.indent_guides != d.indent_guides,
         "ui_scale" => c.ui_scale != d.ui_scale,
         "file_icons" => c.file_icons != d.file_icons,
         "git_status" => c.git_status != d.git_status,
@@ -128,6 +142,8 @@ fn reset(key: &str, c: &mut Config) {
         "font_size" => c.font_size = d.font_size,
         "tab_size" => c.tab_size = d.tab_size,
         "auto_complete" => c.auto_complete = d.auto_complete,
+        "bracket_pair_colors" => c.bracket_pair_colors = d.bracket_pair_colors,
+        "indent_guides" => c.indent_guides = d.indent_guides,
         "ui_scale" => c.ui_scale = d.ui_scale,
         "file_icons" => c.file_icons = d.file_icons,
         "git_status" => c.git_status = d.git_status,
@@ -206,6 +222,12 @@ fn control(ui: &mut egui::Ui, key: &str, c: &mut Config, drafts: &mut HashMap<St
         }
         "auto_complete" => {
             ui.checkbox(&mut c.auto_complete, "Enabled");
+        }
+        "bracket_pair_colors" => {
+            ui.checkbox(&mut c.bracket_pair_colors, "Enabled");
+        }
+        "indent_guides" => {
+            ui.checkbox(&mut c.indent_guides, "Enabled");
         }
         "file_icons" => {
             ui.checkbox(&mut c.file_icons, "Enabled");
@@ -380,6 +402,8 @@ mod tests {
                 "font_size" => c.font_size = 20.0,
                 "tab_size" => c.tab_size = 2,
                 "auto_complete" => c.auto_complete = false,
+                "bracket_pair_colors" => c.bracket_pair_colors = false,
+                "indent_guides" => c.indent_guides = false,
                 "ui_scale" => c.ui_scale = 1.5,
                 "file_icons" => c.file_icons = false,
                 "git_status" => c.git_status = false,

@@ -62,6 +62,11 @@ bottom, and language-server completion for the languages you actually use.
 - **Plugins** — WebAssembly modules loaded from `~/.config/qell/plugins`,
   sandboxed by Wasmtime, exposing commands to the palette. See
   [`plugins/hello`](plugins/hello).
+- **Bracket pairs and indent guides** — brackets are coloured by nesting
+  depth (unmatched ones in red, brackets in strings and comments ignored),
+  the pair at the cursor is boxed, and vertical guides mark each indentation
+  level, with the block around the cursor highlighted. The indentation step
+  (2, 4, tabs…) is detected per file. Both can be turned off in Settings.
 - **Search in files** (`Ctrl+Shift+F`) — the workspace is indexed in memory
   in the background (respecting `.gitignore`), so results appear as you
   type, even in large trees. Case, whole-word and regex toggles; click a

@@ -20,6 +20,10 @@ pub struct Config {
     pub tab_size: usize,
     /// Ask language servers for completions while typing (not only on Ctrl+Space).
     pub auto_complete: bool,
+    /// Colour bracket pairs by nesting depth, unmatched ones in red.
+    pub bracket_pair_colors: bool,
+    /// Vertical lines at each indentation level, the current block's brighter.
+    pub indent_guides: bool,
     /// Scale of the whole interface (1.0 = 100%).
     pub ui_scale: f32,
     /// Show file-type icons in the file tree and tabs.
@@ -52,6 +56,8 @@ impl Default for Config {
             font_size: 14.0,
             tab_size: 4,
             auto_complete: true,
+            bracket_pair_colors: true,
+            indent_guides: true,
             ui_scale: 1.0,
             file_icons: true,
             git_status: true,
