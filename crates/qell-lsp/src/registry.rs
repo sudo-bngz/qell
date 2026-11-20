@@ -18,6 +18,8 @@ pub struct Registry {
     clients: HashMap<String, Client>,
     /// Languages whose server failed to start; we don't retry every keystroke.
     failed: HashSet<String>,
+    /// Languages whose server program isn't installed, with that program.
+    missing: HashMap<String, String>,
     /// Documents already sent with `didOpen`, keyed by uri.
     open: HashSet<Uri>,
     events_tx: Sender<Event>,
@@ -32,6 +34,7 @@ impl Registry {
             overrides: HashMap::new(),
             clients: HashMap::new(),
             failed: HashSet::new(),
+            missing: HashMap::new(),
             open: HashSet::new(),
             events_tx,
             events_rx,
@@ -72,6 +75,14 @@ impl Registry {
             match Client::start(lang_id, &cmd, &self.root, self.events_tx.clone()) {
                 Ok(c) => {
                     self.clients.insert(lang_id.to_string(), c);
+                }
+                Err(e) if is_not_found(&e) => {
+                    let program = cmd.first().copied().unwrap_or_default().to_string();
+                    log::debug!("{program} not installed: no language server for {lang_id}");
+                    self.failed.insert(lang_id.to_string());
+                    self.missing.insert(lang_id.to_string(), program.clone());
+                    let _ = self.events_tx.send(Event::NotInstalled { language: lang_id.to_string(), program });
+                    return None;
                 }
                 Err(e) => {
                     log::warn!("{e:#}");
@@ -150,9 +161,15 @@ impl Registry {
         match self.clients.get(lang_id) {
             Some(c) if c.is_ready() => "ready",
             Some(_) => "starting",
+            None if self.missing.contains_key(lang_id) => "not installed",
             None if self.failed.contains(lang_id) => "unavailable",
             None => "off",
         }
+    }
+
+    /// The server program of a language, when it isn't installed.
+    pub fn missing_program(&self, lang_id: &str) -> Option<&str> {
+        self.missing.get(lang_id).map(String::as_str)
     }
 
     pub fn shutdown_all(&mut self) {
@@ -175,5 +192,65 @@ fn to_change_event(buffer: &Buffer, c: &Change) -> TextDocumentContentChangeEven
         range: Some(lsp_types::Range { start: to_lsp_position(&start_line, c.start), end: to_lsp_position(&end_line, c.end) }),
         range_length: None,
         text: c.text.clone(),
+    }
+}
+
+fn is_not_found(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound))
+}
+
+/// How to install a language server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstallHint {
+    /// A command the user can paste in a terminal.
+    pub command: &'static str,
+    /// Anything else they need to know.
+    pub note: Option<&'static str>,
+}
+
+/// How to install a language server, for the user to run themselves. Qell
+/// never installs anything on its own.
+pub fn install_hint(program: &str) -> Option<InstallHint> {
+    let mac = cfg!(target_os = "macos");
+    let hint = |command, note| Some(InstallHint { command, note });
+    match program {
+        "rust-analyzer" => hint("rustup component add rust-analyzer", None),
+        "gopls" => hint("go install golang.org/x/tools/gopls@latest", Some("Make sure $(go env GOPATH)/bin is on your PATH.")),
+        "typescript-language-server" => hint("npm install -g typescript-language-server typescript", None),
+        "terraform-ls" if mac => hint("brew install terraform-ls", None),
+        "terraform-ls" => hint(
+            "brew install terraform-ls",
+            Some("Without Homebrew, download it from https://releases.hashicorp.com/terraform-ls."),
+        ),
+        "clangd" if mac => hint("brew install llvm", Some("Then put $(brew --prefix llvm)/bin on your PATH.")),
+        "clangd" => hint("sudo apt install clangd", Some("Or your distribution's clangd package.")),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_program_is_reported_as_not_installed() {
+        let langs = qell_core::LanguageRegistry::new();
+        let mut reg = Registry::new(std::env::temp_dir());
+        reg.set_override("go", vec!["qell-no-such-server-xyz".into()]);
+        assert!(reg.client_for(&langs, "go").is_none());
+        assert_eq!(reg.status("go"), "not installed");
+        assert_eq!(reg.missing_program("go"), Some("qell-no-such-server-xyz"));
+        let events = reg.poll();
+        assert!(events.iter().any(|e| matches!(e, Event::NotInstalled { language, .. } if language == "go")));
+        assert!(!events.iter().any(|e| matches!(e, Event::Exited { .. })));
+    }
+
+    #[test]
+    fn every_builtin_server_has_an_install_hint() {
+        for lang in qell_core::syntax::builtin_languages() {
+            if let Some(cmd) = lang.lsp {
+                assert!(install_hint(cmd[0]).is_some(), "no install hint for {}", cmd[0]);
+            }
+        }
     }
 }

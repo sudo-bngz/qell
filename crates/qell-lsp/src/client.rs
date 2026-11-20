@@ -45,6 +45,12 @@ pub enum Event {
         language: String,
         reason: String,
     },
+    /// The server program isn't installed (not found on `PATH`). Not an
+    /// error: the editor works without it, with fewer features.
+    NotInstalled {
+        language: String,
+        program: String,
+    },
 }
 
 /// Which kind of response a pending request id expects.

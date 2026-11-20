@@ -62,6 +62,12 @@ fn defs() -> Vec<Def> {
             "Git Status Colours",
             "Colour files by git status (modified, untracked…) and show the branch.",
         ),
+        def(
+            "git_scan_depth",
+            "Appearance",
+            "Repository Scan Depth",
+            "Folder levels searched for git repositories when the workspace holds several. 0 only uses the workspace's own.",
+        ),
         def("show_sidebar", "Layout", "Show File Tree", "Show the file tree (also on startup)."),
         def("show_terminal", "Layout", "Show Terminal", "Show the terminal panel (also on startup)."),
         def(
@@ -105,6 +111,7 @@ fn is_modified(key: &str, c: &Config) -> bool {
         "ui_scale" => c.ui_scale != d.ui_scale,
         "file_icons" => c.file_icons != d.file_icons,
         "git_status" => c.git_status != d.git_status,
+        "git_scan_depth" => c.git_scan_depth != d.git_scan_depth,
         "show_sidebar" => c.show_sidebar != d.show_sidebar,
         "show_terminal" => c.show_terminal != d.show_terminal,
         "shell" => c.shell != d.shell,
@@ -124,6 +131,7 @@ fn reset(key: &str, c: &mut Config) {
         "ui_scale" => c.ui_scale = d.ui_scale,
         "file_icons" => c.file_icons = d.file_icons,
         "git_status" => c.git_status = d.git_status,
+        "git_scan_depth" => c.git_scan_depth = d.git_scan_depth,
         "show_sidebar" => c.show_sidebar = d.show_sidebar,
         "show_terminal" => c.show_terminal = d.show_terminal,
         "shell" => c.shell = d.shell,
@@ -204,6 +212,9 @@ fn control(ui: &mut egui::Ui, key: &str, c: &mut Config, drafts: &mut HashMap<St
         }
         "git_status" => {
             ui.checkbox(&mut c.git_status, "Enabled");
+        }
+        "git_scan_depth" => {
+            ui.add(egui::Slider::new(&mut c.git_scan_depth, 0..=6));
         }
         "show_sidebar" => {
             ui.checkbox(&mut c.show_sidebar, "Visible");
@@ -372,6 +383,7 @@ mod tests {
                 "ui_scale" => c.ui_scale = 1.5,
                 "file_icons" => c.file_icons = false,
                 "git_status" => c.git_status = false,
+                "git_scan_depth" => c.git_scan_depth = 1,
                 "show_sidebar" => c.show_sidebar = false,
                 "show_terminal" => c.show_terminal = false,
                 "shell" => c.shell = "zsh".into(),

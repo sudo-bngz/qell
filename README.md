@@ -30,10 +30,16 @@ bottom, and language-server completion for the languages you actually use.
   `rust-analyzer`, `clangd`, `gopls`, `typescript-language-server` or
   `terraform-ls` on demand. Errors are underlined; hover a line to read them.
   Without a server, completion falls back to words from the buffer.
+  Qell never downloads or installs anything: when a server is missing, the
+  status bar says "LSP not installed"; hover it for the command to run
+  (click to copy it).
 - **Git status** — the file tree and tabs are coloured like VS Code
   (modified, added, untracked, deleted, conflict, ignored), with a badge per
   file, a dot on folders containing changes, and the branch with
   ahead/behind counts in the status bar. Refreshed in the background.
+  Works when the folder you open holds several repositories (found up to
+  3 levels deep by default, `git_scan_depth`), or repositories nested in
+  another one: each file is coloured by its own repository.
 - **Integrated terminals** — the Alacritty terminal core in a panel
   (`` Ctrl+` ``), with 256/true colour, scrollback and application-cursor mode.
   Run several shells as tabs: `` Ctrl+Shift+` `` opens a new one,
@@ -107,6 +113,7 @@ auto_complete = true
 ui_scale = 1.0              # whole interface, 0.75–2.0
 file_icons = true
 git_status = true           # colour files by git status, show the branch
+git_scan_depth = 3          # folder levels searched for repositories
 show_sidebar = true
 show_terminal = true
 shell = ""                  # e.g. "zsh -l"; empty uses $SHELL

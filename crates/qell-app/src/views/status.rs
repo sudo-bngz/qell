@@ -10,6 +10,7 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
     let error_color = app.palette.error;
     let warning_color = app.palette.warning;
     let accent = app.palette.accent;
+    let mut copied = false;
 
     egui::TopBottomPanel::bottom("status_bar").exact_height(22.0).show(ctx, |ui| {
         ui.horizontal_centered(|ui| {
@@ -20,23 +21,36 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
             let root = app.root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             ui.label(small(root).color(palette_text_dim));
 
-            if let Some(git) = app.git_status.as_ref().filter(|_| app.config.git_status) {
+            if let Some(ws) = app.git_status.as_ref().filter(|_| app.config.git_status) {
+                let repos = ws.repos.len();
+                let label = match app.active_repo() {
+                    Some((root, git)) => {
+                        let mut text = git.branch.as_deref().unwrap_or("detached").to_string();
+                        // Several repositories: say which one the branch is of.
+                        if repos > 1 && !root.as_os_str().is_empty() {
+                            text = format!("{}: {text}", root.display());
+                        }
+                        if git.ahead > 0 {
+                            text.push_str(&format!(" ↑{}", git.ahead));
+                        }
+                        if git.behind > 0 {
+                            text.push_str(&format!(" ↓{}", git.behind));
+                        }
+                        text
+                    }
+                    None => format!("{repos} repositories"),
+                };
                 // The Powerline branch glyph lives in the bundled monospace font.
                 ui.add_space(-8.0);
                 ui.label(RichText::new("\u{e0a0}").monospace().size(12.0).color(palette_text_dim));
                 ui.add_space(-10.0);
-                let mut text = git.branch.as_deref().unwrap_or("detached").to_string();
-                if git.ahead > 0 {
-                    text.push_str(&format!(" ↑{}", git.ahead));
+                let changed = ws.changed_files();
+                let resp = ui.label(small(label).color(palette_text_dim));
+                let mut tip = format!("{changed} changed file{}", if changed == 1 { "" } else { "s" });
+                if repos > 1 {
+                    tip.push_str(&format!(" in {repos} repositories"));
                 }
-                if git.behind > 0 {
-                    text.push_str(&format!(" ↓{}", git.behind));
-                }
-                let changed = git.changed_files();
-                let resp = ui.label(small(text).color(palette_text_dim));
-                if changed > 0 {
-                    resp.on_hover_text(format!("{changed} changed file{}", if changed == 1 { "" } else { "s" }));
-                }
+                resp.on_hover_text(tip);
             }
 
             if let Some(doc) = app.docs.get(app.active) {
@@ -67,11 +81,46 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                         "unavailable" => error_color,
                         _ => palette_text_dim,
                     };
-                    ui.label(small(format!("LSP {lsp}")).color(lsp_color));
+                    match app.lsp.missing_program(lang_id) {
+                        Some(program) => {
+                            let hint = qell_lsp::install_hint(program);
+                            let mut tip = format!(
+                                "{lang_name} completion and diagnostics come from the {program} language server, which isn't installed.\n\
+                                 Highlighting works without it, and completion falls back to words from the file.\n\n"
+                            );
+                            match hint {
+                                Some(h) => {
+                                    tip.push_str(&format!("To install it, run:\n    {}\n", h.command));
+                                    if let Some(note) = h.note {
+                                        tip.push_str(&format!("{note}\n"));
+                                    }
+                                    tip.push_str("Then restart Qell.");
+                                }
+                                None => tip.push_str(&format!("Install {program} and restart Qell.")),
+                            }
+                            tip.push_str("\n\nAlready installed elsewhere? Set its path in Settings > Language Servers.");
+                            if hint.is_some() {
+                                tip.push_str("\n\nClick to copy the install command.");
+                            }
+                            let resp = ui
+                                .add(egui::Label::new(small("LSP not installed".into()).color(palette_text_dim)).sense(egui::Sense::click()))
+                                .on_hover_text(tip);
+                            if let (true, Some(h)) = (resp.clicked(), hint) {
+                                ui.ctx().copy_text(h.command.to_string());
+                                copied = true;
+                            }
+                        }
+                        None => {
+                            ui.label(small(format!("LSP {lsp}")).color(lsp_color));
+                        }
+                    }
                     ui.label(small(lang_name.to_string()));
                     ui.label(small(format!("Ln {}, Col {}", p.line + 1, p.col + 1)));
                 }
             });
         });
     });
+    if copied {
+        app.notify("Install command copied: paste it in a terminal.");
+    }
 }

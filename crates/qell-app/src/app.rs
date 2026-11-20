@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use egui::{Context, Key, Modifiers};
 use qell_core::{LanguageRegistry, Position};
-use qell_git::{RepoStatus, Watcher as GitWatcher};
+use qell_git::{RepoStatus, Watcher as GitWatcher, WorkspaceStatus};
 use qell_lsp::lsp_types::{CompletionItem, Diagnostic};
 use qell_lsp::{convert, Event as LspEvent, Registry as LspRegistry, RequestId};
 use qell_plugins::{Action as PluginAction, EditorContext, Host as PluginHost};
@@ -118,9 +118,10 @@ pub struct QellApp {
     pub tree_cache: HashMap<PathBuf, Vec<views::sidebar::Entry>>,
     pub pending_commands: Vec<Command>,
     pub pending_plugin_commands: Vec<String>,
-    /// Background `git status`; `git_status` is `None` outside a repository.
+    /// Background `git status` of every repository in the workspace;
+    /// `git_status` is `None` when there is none.
     pub git: GitWatcher,
-    pub git_status: Option<RepoStatus>,
+    pub git_status: Option<WorkspaceStatus>,
     was_focused: bool,
     /// The Settings window.
     pub settings: views::settings::SettingsState,
@@ -162,7 +163,7 @@ impl QellApp {
             lsp.set_override(lang.clone(), cmd.clone());
         }
 
-        let git = GitWatcher::new(root.clone());
+        let git = GitWatcher::new(root.clone(), config.git_scan());
         let mut app = Self {
             applied_config: config.clone(),
             config_dirty_since: None,
@@ -323,6 +324,9 @@ impl QellApp {
         if new.ignore != old.ignore {
             self.command_palette.files.clear();
         }
+        if new.git_scan() != old.git_scan() {
+            self.git.set_options(new.git_scan());
+        }
         if new.lsp != old.lsp {
             // Restart servers so the new commands are used; documents are
             // re-opened with them on the next sync.
@@ -361,6 +365,14 @@ impl QellApp {
         }
         let st = self.git_status.as_ref()?;
         st.status_of(path.strip_prefix(&self.root).ok()?)
+    }
+
+    /// The repository of the active document, else the workspace's own,
+    /// with its workspace-relative root.
+    pub fn active_repo(&self) -> Option<(&Path, &RepoStatus)> {
+        let ws = self.git_status.as_ref()?;
+        let doc_rel = self.docs.get(self.active).and_then(|d| d.buffer.path()).and_then(|p| p.strip_prefix(&self.root).ok());
+        doc_rel.and_then(|rel| ws.repo_for(rel)).or_else(|| ws.repo_for(Path::new(""))).map(|(root, st)| (root.as_path(), st))
     }
 
     fn handle_git(&mut self, ctx: &Context) {
@@ -562,6 +574,12 @@ impl QellApp {
                 LspEvent::Error { message, .. } => log::warn!("lsp: {message}"),
                 LspEvent::Exited { language, reason } => {
                     self.notify_error(format!("{language} language server unavailable: {reason}"));
+                }
+                LspEvent::NotInstalled { language, program } => {
+                    // Shown once per language and session (the registry
+                    // doesn't retry), and not as an error.
+                    let name = self.languages.get(&language).map(|l| l.name).unwrap_or(&language);
+                    self.notify(format!("{program} isn't installed, so {name} has no completion. Hover \"LSP\" in the status bar to see how to add it."));
                 }
             }
         }

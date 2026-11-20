@@ -5,10 +5,14 @@
 //! helpers, and it keeps the build free of C dependencies. Status runs on a
 //! background thread ([`Watcher`]) so a slow repository never stalls a frame.
 //!
-//! Paths in a [`RepoStatus`] are relative to the *workspace* root, which may
-//! be a subdirectory of the repository.
+//! A workspace can be inside one repository, or be a plain folder holding
+//! several (`~/code/{api,web,…}`), or both (a repo with other repos cloned
+//! inside it). [`discover`] finds the repositories, [`RepoStatus`] is one
+//! repository's `git status`, and [`WorkspaceStatus`] merges them so every
+//! path takes its state from the repository it belongs to. All paths are
+//! relative to the *workspace* root.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -77,7 +81,7 @@ fn classify(x: u8, y: u8) -> Option<FileStatus> {
     })
 }
 
-/// A snapshot of `git status` for a workspace.
+/// One repository's `git status`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RepoStatus {
     /// Current branch, or a short commit hash when detached.
@@ -85,40 +89,24 @@ pub struct RepoStatus {
     /// Commits ahead of / behind the upstream, when there is one.
     pub ahead: u32,
     pub behind: u32,
-    /// Files and directories with an explicit status. Directories hold the
-    /// strongest status found beneath them.
-    entries: HashMap<PathBuf, FileStatus>,
-    /// Number of changed files (not directories, not ignored).
-    changed: usize,
+    /// Changed files, relative to where `git status` was asked from.
+    files: Vec<(PathBuf, FileStatus)>,
 }
 
 impl RepoStatus {
-    /// Status of a path relative to the workspace root, including states
-    /// inherited from an untracked or ignored ancestor directory.
-    pub fn status_of(&self, rel: &Path) -> Option<FileStatus> {
-        if let Some(s) = self.entries.get(rel) {
-            return Some(*s);
-        }
-        rel.ancestors()
-            .skip(1)
-            .filter(|a| !a.as_os_str().is_empty())
-            .find_map(|a| self.entries.get(a).copied().filter(|s| s.is_inherited()))
-    }
-
-    /// Number of changed files (excluding ignored ones), for the status bar.
+    /// Number of changed files (excluding ignored ones).
     pub fn changed_files(&self) -> usize {
-        self.changed
+        self.files.iter().filter(|(_, s)| *s != FileStatus::Ignored).count()
     }
 
     /// Parse `git status --porcelain=v1 -z --branch --ignored` output.
     ///
-    /// `prefix` is the workspace's path inside the repository (from
+    /// `prefix` is the path git was run from inside the repository (from
     /// `git rev-parse --show-prefix`, e.g. `"sub/dir/"`); entries outside it
     /// are dropped and the rest are made relative to it.
     pub fn parse(output: &[u8], prefix: &str) -> Self {
         let prefix = Path::new(prefix.trim_end_matches('/'));
         let mut status = RepoStatus::default();
-        let mut files: Vec<(PathBuf, FileStatus)> = Vec::new();
 
         let mut records = output.split(|b| *b == 0).filter(|r| !r.is_empty());
         while let Some(rec) = records.next() {
@@ -142,24 +130,7 @@ impl RepoStatus {
                 // The workspace root itself (e.g. the whole folder is untracked).
                 continue;
             }
-            files.push((rel.to_path_buf(), st));
-        }
-
-        status.changed = files.iter().filter(|(_, s)| *s != FileStatus::Ignored).count();
-        for (path, st) in files {
-            status.entries.entry(path.clone()).and_modify(|e| *e = (*e).max(st)).or_insert(st);
-            // Ignored files don't make their folder look changed.
-            if st == FileStatus::Ignored {
-                continue;
-            }
-            for dir in path.ancestors().skip(1).filter(|a| !a.as_os_str().is_empty()) {
-                // A deleted file is gone from the tree; show its folder as modified.
-                let dir_st = if st == FileStatus::Deleted { FileStatus::Modified } else { st };
-                let e = status.entries.entry(dir.to_path_buf()).or_insert(dir_st);
-                if *e == FileStatus::Ignored || dir_st > *e {
-                    *e = dir_st;
-                }
-            }
+            status.files.push((rel.to_path_buf(), st));
         }
         status
     }
@@ -186,6 +157,100 @@ impl RepoStatus {
     }
 }
 
+/// The git state of a whole workspace: every repository in it, merged.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkspaceStatus {
+    /// Repositories by workspace-relative root, outermost first. An empty
+    /// path is a repository containing the workspace.
+    pub repos: Vec<(PathBuf, RepoStatus)>,
+    /// Files and directories with a status. Directories hold the strongest
+    /// status found beneath them.
+    entries: HashMap<PathBuf, FileStatus>,
+    /// Folders git itself reported as untracked or ignored (`?? dir/`,
+    /// `!! dir/`): everything inside them shares that state. Folders only
+    /// coloured because of a file inside them are not in here.
+    inherited: HashMap<PathBuf, FileStatus>,
+    /// Roots of repositories nested in the workspace (not the empty path).
+    nested_roots: HashSet<PathBuf>,
+}
+
+impl WorkspaceStatus {
+    /// Merge per-repository statuses. Each status's paths are relative to
+    /// its own root, given alongside it relative to the workspace.
+    pub fn merge(mut repos: Vec<(PathBuf, RepoStatus)>) -> Self {
+        repos.sort_by_key(|(root, _)| root.components().count());
+        let nested_roots: HashSet<PathBuf> = repos.iter().map(|(r, _)| r.clone()).filter(|r| !r.as_os_str().is_empty()).collect();
+
+        // Every changed file in workspace coordinates. A repository sees a
+        // repository nested in it as an untracked (or ignored) folder; that
+        // entry is dropped, the nested repository speaks for its own files.
+        let mut files: Vec<(PathBuf, FileStatus)> = Vec::new();
+        for (root, st) in &repos {
+            for (p, s) in &st.files {
+                let path = root.join(p);
+                let inside_nested = path
+                    .ancestors()
+                    .take_while(|a| a.starts_with(root) && *a != root.as_path())
+                    .any(|a| nested_roots.contains(a));
+                if !inside_nested {
+                    files.push((path, *s));
+                }
+            }
+        }
+
+        let inherited: HashMap<PathBuf, FileStatus> = files.iter().filter(|(_, s)| s.is_inherited()).cloned().collect();
+        let mut entries: HashMap<PathBuf, FileStatus> = HashMap::new();
+        for (path, st) in files {
+            entries.entry(path.clone()).and_modify(|e| *e = (*e).max(st)).or_insert(st);
+            // Ignored files don't make their folder look changed.
+            if st == FileStatus::Ignored {
+                continue;
+            }
+            // Folders up to the workspace root show it, across repositories:
+            // a folder of repos lights up when one of them has changes.
+            for dir in path.ancestors().skip(1).filter(|a| !a.as_os_str().is_empty()) {
+                // A deleted file is gone from the tree; show its folder as modified.
+                let dir_st = if st == FileStatus::Deleted { FileStatus::Modified } else { st };
+                let e = entries.entry(dir.to_path_buf()).or_insert(dir_st);
+                if *e == FileStatus::Ignored || dir_st > *e {
+                    *e = dir_st;
+                }
+            }
+        }
+        Self { repos, entries, inherited, nested_roots }
+    }
+
+    /// Status of a workspace-relative path, including states inherited from
+    /// an untracked or ignored ancestor folder of the same repository.
+    pub fn status_of(&self, rel: &Path) -> Option<FileStatus> {
+        if let Some(s) = self.entries.get(rel) {
+            return Some(*s);
+        }
+        for a in rel.ancestors().skip(1).filter(|a| !a.as_os_str().is_empty()) {
+            if let Some(s) = self.inherited.get(a).copied() {
+                return Some(s);
+            }
+            // Don't inherit across a repository boundary: a clean nested
+            // repo inside an ignored folder is not itself ignored.
+            if self.nested_roots.contains(a) {
+                return None;
+            }
+        }
+        None
+    }
+
+    /// The repository a workspace-relative path belongs to (the innermost
+    /// one containing it).
+    pub fn repo_for(&self, rel: &Path) -> Option<&(PathBuf, RepoStatus)> {
+        self.repos.iter().rev().find(|(root, _)| rel.starts_with(root))
+    }
+
+    /// Changed files across all repositories (excluding ignored ones).
+    pub fn changed_files(&self) -> usize {
+        self.repos.iter().map(|(_, s)| s.changed_files()).sum()
+    }
+}
+
 fn git(root: &Path) -> Command {
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(root);
@@ -196,26 +261,26 @@ fn git(root: &Path) -> Command {
     cmd
 }
 
-/// Run `git status` for `root`. `None` when it isn't inside a repository or
-/// git isn't installed.
-pub fn status(root: &Path) -> Option<RepoStatus> {
-    let out = git(root).args(["rev-parse", "--show-prefix"]).output().ok()?;
+/// Run `git status` from `dir`. `None` when it isn't inside a repository
+/// or git isn't installed.
+pub fn status(dir: &Path) -> Option<RepoStatus> {
+    let out = git(dir).args(["rev-parse", "--show-prefix"]).output().ok()?;
     if !out.status.success() {
         return None;
     }
     let prefix = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    let out = git(root)
+    let out = git(dir)
         .args(["status", "--porcelain=v1", "-z", "--branch", "--ignored=matching", "--untracked-files=normal"])
         .output()
         .ok()?;
     if !out.status.success() {
-        log::warn!("git status failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+        log::warn!("git status failed in {}: {}", dir.display(), String::from_utf8_lossy(&out.stderr).trim());
         return None;
     }
     let mut st = RepoStatus::parse(&out.stdout, &prefix);
     if st.branch.is_none() {
         // Detached HEAD: show the short hash instead.
-        if let Ok(o) = git(root).args(["rev-parse", "--short", "HEAD"]).output() {
+        if let Ok(o) = git(dir).args(["rev-parse", "--short", "HEAD"]).output() {
             if o.status.success() {
                 st.branch = Some(String::from_utf8_lossy(&o.stdout).trim().to_string());
             }
@@ -224,34 +289,121 @@ pub fn status(root: &Path) -> Option<RepoStatus> {
     Some(st)
 }
 
+/// How far below the workspace root to look for repositories.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanOptions {
+    /// Folder levels to search (0: only the workspace's own repository).
+    pub depth: usize,
+    /// Folder names never searched (`node_modules`, `target`…).
+    pub skip: Vec<String>,
+}
+
+impl Default for ScanOptions {
+    fn default() -> Self {
+        Self { depth: 3, skip: vec!["node_modules".into(), "target".into(), ".terraform".into(), "vendor".into()] }
+    }
+}
+
+/// Most repositories followed at once; past this a folder is more likely
+/// a dump of clones than a workspace, and statuses would get slow.
+const MAX_REPOS: usize = 64;
+
+/// Find the repositories of a workspace: the one containing `root` (as an
+/// empty relative path), then repositories in folders below it, as paths
+/// relative to `root`. A folder with a `.git` entry (directory, or file for
+/// worktrees and submodules) is a repository.
+pub fn discover(root: &Path, opts: &ScanOptions) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let enclosing = git(root).args(["rev-parse", "--is-inside-work-tree"]).output();
+    if enclosing.is_ok_and(|o| o.status.success()) {
+        found.push(PathBuf::new());
+    }
+    let mut frontier = vec![PathBuf::new()];
+    for _ in 0..opts.depth {
+        let mut next = Vec::new();
+        for rel in frontier {
+            let Ok(rd) = std::fs::read_dir(root.join(&rel)) else { continue };
+            let mut dirs: Vec<_> = rd.flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_dir())).collect();
+            dirs.sort_by_key(|e| e.file_name());
+            for e in dirs {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if name == ".git" || opts.skip.contains(&name) {
+                    continue;
+                }
+                let child = rel.join(&name);
+                if e.path().join(".git").exists() {
+                    if found.len() >= MAX_REPOS {
+                        log::warn!("more than {MAX_REPOS} git repositories under {}; showing the first ones", root.display());
+                        return found;
+                    }
+                    found.push(child.clone());
+                }
+                // Keep going inside repos too: clones nested in a repo exist.
+                next.push(child);
+            }
+        }
+        frontier = next;
+    }
+    found
+}
+
+/// `git status` for every repository, in parallel. `None` when there is
+/// no repository at all.
+pub fn workspace_status(root: &Path, repos: &[PathBuf]) -> Option<WorkspaceStatus> {
+    if repos.is_empty() {
+        return None;
+    }
+    let results: Vec<(PathBuf, RepoStatus)> = thread::scope(|s| {
+        let handles: Vec<_> = repos
+            .iter()
+            .map(|rel| {
+                let dir = root.join(rel);
+                s.spawn(move || status(&dir).map(|st| (rel.clone(), st)))
+            })
+            .collect();
+        handles.into_iter().filter_map(|h| h.join().ok().flatten()).collect()
+    });
+    (!results.is_empty()).then(|| WorkspaceStatus::merge(results))
+}
+
 enum Request {
     Refresh,
     SetRoot(PathBuf),
+    SetOptions(ScanOptions),
 }
 
-/// Keeps a [`RepoStatus`] up to date on a background thread: refreshes on
-/// demand and every few seconds, and hands results back through [`poll`].
+/// Keeps a [`WorkspaceStatus`] up to date on a background thread: refreshes
+/// on demand and every few seconds, and hands results back through [`poll`].
 ///
 /// [`poll`]: Watcher::poll
 pub struct Watcher {
     tx: Sender<Request>,
-    rx: Receiver<Option<RepoStatus>>,
+    rx: Receiver<Option<WorkspaceStatus>>,
 }
 
 /// How often the status is refreshed when nothing asks for it.
 const INTERVAL: Duration = Duration::from_secs(3);
+/// Repositories are looked for again every this many refreshes (and on
+/// every explicit refresh), so a new clone shows up on its own.
+const REDISCOVER_EVERY: u32 = 10;
 
 impl Watcher {
-    pub fn new(root: PathBuf) -> Self {
+    pub fn new(root: PathBuf, opts: ScanOptions) -> Self {
         let (req_tx, req_rx) = mpsc::channel::<Request>();
         let (res_tx, res_rx) = mpsc::channel();
         thread::Builder::new()
             .name("qell-git".into())
             .spawn(move || {
-                let mut root = root;
-                let mut last: Option<Option<RepoStatus>> = None;
+                let (mut root, mut opts) = (root, opts);
+                let mut last: Option<Option<WorkspaceStatus>> = None;
+                let mut repos: Option<Vec<PathBuf>> = None;
+                let mut cycles = 0u32;
                 loop {
-                    let st = status(&root);
+                    if repos.is_none() || cycles.is_multiple_of(REDISCOVER_EVERY) {
+                        repos = Some(discover(&root, &opts));
+                    }
+                    cycles = cycles.wrapping_add(1);
+                    let st = workspace_status(&root, repos.as_deref().unwrap_or_default());
                     // Only wake the UI when something changed.
                     if last.as_ref() != Some(&st) {
                         if res_tx.send(st.clone()).is_err() {
@@ -259,19 +411,24 @@ impl Watcher {
                         }
                         last = Some(st);
                     }
-                    match req_rx.recv_timeout(INTERVAL) {
-                        Ok(Request::Refresh) | Err(RecvTimeoutError::Timeout) => {}
-                        Ok(Request::SetRoot(r)) => {
-                            root = r;
-                            last = None;
-                        }
+                    let first = match req_rx.recv_timeout(INTERVAL) {
+                        Ok(r) => Some(r),
+                        Err(RecvTimeoutError::Timeout) => None,
                         Err(RecvTimeoutError::Disconnected) => return,
-                    }
+                    };
                     // Coalesce a burst of requests into one status run.
-                    while let Ok(req) = req_rx.try_recv() {
-                        if let Request::SetRoot(r) = req {
-                            root = r;
-                            last = None;
+                    for req in first.into_iter().chain(req_rx.try_iter()) {
+                        match req {
+                            Request::Refresh => repos = None,
+                            Request::SetRoot(r) => {
+                                root = r;
+                                repos = None;
+                                last = None;
+                            }
+                            Request::SetOptions(o) => {
+                                opts = o;
+                                repos = None;
+                            }
                         }
                     }
                 }
@@ -290,9 +447,14 @@ impl Watcher {
         let _ = self.tx.send(Request::SetRoot(root));
     }
 
+    /// Change how deep repositories are looked for.
+    pub fn set_options(&self, opts: ScanOptions) {
+        let _ = self.tx.send(Request::SetOptions(opts));
+    }
+
     /// The newest status, if one arrived since the last call. The outer
-    /// `Option` is "is there news", the inner one "is this a repository".
-    pub fn poll(&self) -> Option<Option<RepoStatus>> {
+    /// `Option` is "is there news", the inner one "is there any repository".
+    pub fn poll(&self) -> Option<Option<WorkspaceStatus>> {
         self.rx.try_iter().last()
     }
 }
@@ -305,57 +467,69 @@ mod tests {
         PathBuf::from(s)
     }
 
+    /// A single repository at the workspace root.
+    fn single(out: &[u8], prefix: &str) -> WorkspaceStatus {
+        WorkspaceStatus::merge(vec![(PathBuf::new(), RepoStatus::parse(out, prefix))])
+    }
+
     #[test]
     fn parses_files_and_propagates_to_dirs() {
         let out =
             b"## main...origin/main [ahead 2, behind 1]\0 M src/app.rs\0?? notes/\0A  src/new.rs\0!! target/\0 D old/gone.rs\0";
-        let st = RepoStatus::parse(out, "");
+        let ws = single(out, "");
+        let st = &ws.repos[0].1;
         assert_eq!(st.branch.as_deref(), Some("main"));
         assert_eq!((st.ahead, st.behind), (2, 1));
-        assert_eq!(st.status_of(&p("src/app.rs")), Some(FileStatus::Modified));
-        assert_eq!(st.status_of(&p("src/new.rs")), Some(FileStatus::Added));
+        assert_eq!(ws.status_of(&p("src/app.rs")), Some(FileStatus::Modified));
+        assert_eq!(ws.status_of(&p("src/new.rs")), Some(FileStatus::Added));
         // Strongest child wins.
-        assert_eq!(st.status_of(&p("src")), Some(FileStatus::Modified));
-        assert_eq!(st.status_of(&p("old")), Some(FileStatus::Modified));
+        assert_eq!(ws.status_of(&p("src")), Some(FileStatus::Modified));
+        assert_eq!(ws.status_of(&p("old")), Some(FileStatus::Modified));
         // Inherited from the untracked / ignored directory.
-        assert_eq!(st.status_of(&p("notes/todo.md")), Some(FileStatus::Untracked));
-        assert_eq!(st.status_of(&p("target/debug/qell")), Some(FileStatus::Ignored));
-        assert_eq!(st.status_of(&p("src/lib.rs")), None);
-        assert_eq!(st.status_of(&p("README.md")), None);
+        assert_eq!(ws.status_of(&p("notes/todo.md")), Some(FileStatus::Untracked));
+        assert_eq!(ws.status_of(&p("target/debug/qell")), Some(FileStatus::Ignored));
+        assert_eq!(ws.status_of(&p("src/lib.rs")), None);
+        assert_eq!(ws.status_of(&p("README.md")), None);
     }
 
     #[test]
     fn renames_skip_the_original_path() {
-        let out = b"## main\0R  b.rs\0a.rs\0 M c.rs\0";
-        let st = RepoStatus::parse(out, "");
-        assert_eq!(st.status_of(&p("b.rs")), Some(FileStatus::Renamed));
-        assert_eq!(st.status_of(&p("a.rs")), None);
-        assert_eq!(st.status_of(&p("c.rs")), Some(FileStatus::Modified));
+        let ws = single(b"## main\0R  b.rs\0a.rs\0 M c.rs\0", "");
+        assert_eq!(ws.status_of(&p("b.rs")), Some(FileStatus::Renamed));
+        assert_eq!(ws.status_of(&p("a.rs")), None);
+        assert_eq!(ws.status_of(&p("c.rs")), Some(FileStatus::Modified));
     }
 
     #[test]
     fn conflicts() {
         for code in ["UU", "AA", "DD", "AU", "UD"] {
             let out = format!("{code} f.rs\0");
-            assert_eq!(RepoStatus::parse(out.as_bytes(), "").status_of(&p("f.rs")), Some(FileStatus::Conflict), "{code}");
+            assert_eq!(single(out.as_bytes(), "").status_of(&p("f.rs")), Some(FileStatus::Conflict), "{code}");
         }
     }
 
     #[test]
     fn workspace_prefix_filters_and_strips() {
-        let out = b"## main\0 M sub/a.rs\0 M other/b.rs\0";
-        let st = RepoStatus::parse(out, "sub/");
-        assert_eq!(st.status_of(&p("a.rs")), Some(FileStatus::Modified));
-        assert_eq!(st.status_of(&p("other/b.rs")), None);
-        assert_eq!(st.changed_files(), 1);
+        let ws = single(b"## main\0 M sub/a.rs\0 M other/b.rs\0", "sub/");
+        assert_eq!(ws.status_of(&p("a.rs")), Some(FileStatus::Modified));
+        assert_eq!(ws.status_of(&p("other/b.rs")), None);
+        assert_eq!(ws.changed_files(), 1);
+    }
+
+    #[test]
+    fn clean_files_next_to_a_new_file_stay_clean() {
+        // src/ is green because of new.rs, but lib.rs is still tracked and clean.
+        let ws = single(b"?? src/new.rs\0", "");
+        assert_eq!(ws.status_of(&p("src")), Some(FileStatus::Untracked));
+        assert_eq!(ws.status_of(&p("src/new.rs")), Some(FileStatus::Untracked));
+        assert_eq!(ws.status_of(&p("src/lib.rs")), None);
     }
 
     #[test]
     fn ignored_files_do_not_mark_parent() {
-        let out = b"!! src/gen.rs\0";
-        let st = RepoStatus::parse(out, "");
-        assert_eq!(st.status_of(&p("src/gen.rs")), Some(FileStatus::Ignored));
-        assert_eq!(st.status_of(&p("src")), None);
+        let ws = single(b"!! src/gen.rs\0", "");
+        assert_eq!(ws.status_of(&p("src/gen.rs")), Some(FileStatus::Ignored));
+        assert_eq!(ws.status_of(&p("src")), None);
     }
 
     #[test]
@@ -369,37 +543,112 @@ mod tests {
     }
 
     #[test]
+    fn folder_of_repositories() {
+        // Workspace is not a repo; api/ and tools/cli/ are.
+        let api = RepoStatus::parse(b"## main\0 M README.md\0", "");
+        let cli = RepoStatus::parse(b"## dev\0?? new.go\0", "");
+        let ws = WorkspaceStatus::merge(vec![(p("tools/cli"), cli), (p("api"), api)]);
+        assert_eq!(ws.status_of(&p("api/README.md")), Some(FileStatus::Modified));
+        assert_eq!(ws.status_of(&p("api")), Some(FileStatus::Modified));
+        assert_eq!(ws.status_of(&p("tools/cli/new.go")), Some(FileStatus::Untracked));
+        // Folders above a repository light up too.
+        assert_eq!(ws.status_of(&p("tools")), Some(FileStatus::Untracked));
+        assert_eq!(ws.status_of(&p("api/src/main.go")), None);
+        assert_eq!(ws.repo_for(&p("tools/cli/new.go")).and_then(|(_, r)| r.branch.as_deref()), Some("dev"));
+        assert_eq!(ws.repo_for(&p("api/x")).map(|(r, _)| r.as_path()), Some(Path::new("api")));
+        assert!(ws.repo_for(&p("elsewhere")).is_none());
+        assert_eq!(ws.changed_files(), 2);
+    }
+
+    #[test]
+    fn repository_inside_a_repository() {
+        // The outer repo sees the clone as an untracked (or ignored) folder;
+        // the clone's own status must win.
+        let outer = RepoStatus::parse(b"## main\0?? vendor/lib/\0!! clones/\0 M top.txt\0", "");
+        let lib = RepoStatus::parse(b"## main\0 M src/a.rs\0", "");
+        let tool = RepoStatus::parse(b"## main\0", "");
+        let ws = WorkspaceStatus::merge(vec![(p(""), outer), (p("vendor/lib"), lib), (p("clones/tool"), tool)]);
+        assert_eq!(ws.status_of(&p("vendor/lib/src/a.rs")), Some(FileStatus::Modified));
+        // Clean file of the nested repo: not "untracked" from the outer one.
+        assert_eq!(ws.status_of(&p("vendor/lib/README.md")), None);
+        assert_eq!(ws.status_of(&p("vendor/lib")), Some(FileStatus::Modified));
+        // A clean repo inside an ignored folder isn't greyed out.
+        assert_eq!(ws.status_of(&p("clones/tool/main.go")), None);
+        assert_eq!(ws.status_of(&p("clones/other.txt")), Some(FileStatus::Ignored));
+        assert_eq!(ws.status_of(&p("top.txt")), Some(FileStatus::Modified));
+    }
+
+    fn git_available() -> bool {
+        Command::new("git").arg("--version").output().is_ok_and(|o| o.status.success())
+    }
+
+    fn init_repo(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@t"], &["config", "user.name", "t"]] {
+            assert!(Command::new("git").arg("-C").arg(dir).args(args).output().unwrap().status.success());
+        }
+    }
+
+    fn commit_all(dir: &Path) {
+        for args in [&["add", "."][..], &["commit", "-q", "-m", "init"]] {
+            assert!(Command::new("git").arg("-C").arg(dir).args(args).output().unwrap().status.success());
+        }
+    }
+
+    #[test]
     fn real_repository() {
-        let has_git = Command::new("git").arg("--version").output().is_ok_and(|o| o.status.success());
-        if !has_git {
+        if !git_available() {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let run = |args: &[&str]| {
-            let ok = Command::new("git").arg("-C").arg(root).args(args).output().unwrap().status.success();
-            assert!(ok, "git {args:?}");
-        };
-        run(&["init", "-q", "-b", "main"]);
-        run(&["config", "user.email", "t@t"]);
-        run(&["config", "user.name", "t"]);
+        init_repo(root);
         std::fs::write(root.join("tracked.txt"), "a").unwrap();
         std::fs::write(root.join(".gitignore"), "build/\n").unwrap();
-        run(&["add", "."]);
-        run(&["commit", "-q", "-m", "init"]);
+        commit_all(root);
         std::fs::write(root.join("tracked.txt"), "b").unwrap();
         std::fs::write(root.join("new.txt"), "n").unwrap();
         std::fs::create_dir(root.join("build")).unwrap();
         std::fs::write(root.join("build/out"), "o").unwrap();
 
-        let st = status(root).expect("is a repo");
-        assert_eq!(st.branch.as_deref(), Some("main"));
-        assert_eq!(st.status_of(&p("tracked.txt")), Some(FileStatus::Modified));
-        assert_eq!(st.status_of(&p("new.txt")), Some(FileStatus::Untracked));
-        assert_eq!(st.status_of(&p("build/out")), Some(FileStatus::Ignored));
-        assert_eq!(st.status_of(&p(".gitignore")), None);
+        let repos = discover(root, &ScanOptions::default());
+        assert_eq!(repos, vec![PathBuf::new()]);
+        let ws = workspace_status(root, &repos).expect("is a repo");
+        assert_eq!(ws.repos[0].1.branch.as_deref(), Some("main"));
+        assert_eq!(ws.status_of(&p("tracked.txt")), Some(FileStatus::Modified));
+        assert_eq!(ws.status_of(&p("new.txt")), Some(FileStatus::Untracked));
+        assert_eq!(ws.status_of(&p("build/out")), Some(FileStatus::Ignored));
+        assert_eq!(ws.status_of(&p(".gitignore")), None);
 
         let not_repo = tempfile::tempdir().unwrap();
-        assert!(status(not_repo.path()).is_none());
+        assert!(discover(not_repo.path(), &ScanOptions::default()).is_empty());
+        assert!(workspace_status(not_repo.path(), &[]).is_none());
+    }
+
+    #[test]
+    fn real_folder_of_repositories() {
+        if !git_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for r in ["api", "web", "tools/cli", "node_modules/pkg"] {
+            init_repo(&root.join(r));
+            std::fs::write(root.join(r).join("README.md"), "a").unwrap();
+            commit_all(&root.join(r));
+        }
+        std::fs::write(root.join("api/README.md"), "changed").unwrap();
+        std::fs::write(root.join("web/new.txt"), "n").unwrap();
+
+        let repos = discover(root, &ScanOptions::default());
+        assert_eq!(repos, vec![p("api"), p("web"), p("tools/cli")], "node_modules is skipped");
+        let shallow = discover(root, &ScanOptions { depth: 1, ..Default::default() });
+        assert_eq!(shallow, vec![p("api"), p("web")]);
+
+        let ws = workspace_status(root, &repos).expect("has repos");
+        assert_eq!(ws.status_of(&p("api/README.md")), Some(FileStatus::Modified));
+        assert_eq!(ws.status_of(&p("web/new.txt")), Some(FileStatus::Untracked));
+        assert_eq!(ws.status_of(&p("web/README.md")), None);
+        assert_eq!(ws.status_of(&p("api")), Some(FileStatus::Modified));
     }
 }

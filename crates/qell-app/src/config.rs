@@ -26,6 +26,9 @@ pub struct Config {
     pub file_icons: bool,
     /// Colour the file tree and tabs by git status.
     pub git_status: bool,
+    /// Folder levels searched for git repositories below the workspace
+    /// (for a folder holding several repos). 0: only the workspace's own.
+    pub git_scan_depth: usize,
     /// Show the file tree on startup.
     pub show_sidebar: bool,
     /// Show the terminal panel on startup.
@@ -52,6 +55,7 @@ impl Default for Config {
             ui_scale: 1.0,
             file_icons: true,
             git_status: true,
+            git_scan_depth: 3,
             show_sidebar: true,
             show_terminal: true,
             shell: String::new(),
@@ -76,6 +80,14 @@ pub fn plugins_dir() -> PathBuf {
 }
 
 impl Config {
+    /// Where to look for git repositories, from these settings.
+    pub fn git_scan(&self) -> qell_git::ScanOptions {
+        let mut skip: Vec<String> = self.ignore.iter().filter(|n| *n != ".git").cloned().collect();
+        skip.extend(qell_git::ScanOptions::default().skip);
+        skip.dedup();
+        qell_git::ScanOptions { depth: self.git_scan_depth, skip }
+    }
+
     /// Load the config, writing a default file on first run. Errors fall
     /// back to defaults (logged); use [`Config::parse`] to surface them.
     pub fn load() -> Self {

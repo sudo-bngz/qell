@@ -15,6 +15,6 @@ pub mod convert;
 pub mod registry;
 
 pub use client::{Client, Event, RequestId};
-pub use registry::Registry;
+pub use registry::{install_hint, InstallHint, Registry};
 
 pub use lsp_types;
