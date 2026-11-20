@@ -67,6 +67,27 @@ impl Default for CommandPalette {
     }
 }
 
+/// One shell in the terminal panel.
+pub struct TerminalTab {
+    pub term: Terminal,
+    /// Stable number shown in the tab, VS Code style ("1: bash").
+    pub number: usize,
+}
+
+impl TerminalTab {
+    /// Tab label: the title the shell set, else the shell's name.
+    pub fn label(&self) -> String {
+        let title = self.term.title().trim();
+        if !title.is_empty() {
+            return title.to_string();
+        }
+        std::env::var("SHELL")
+            .ok()
+            .and_then(|s| std::path::Path::new(&s).file_name().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| "shell".into())
+    }
+}
+
 pub struct Notification {
     pub text: String,
     pub at: Instant,
@@ -82,7 +103,9 @@ pub struct QellApp {
     pub focus: Focus,
     pub languages: LanguageRegistry,
     pub lsp: LspRegistry,
-    pub terminal: Option<Terminal>,
+    pub terminals: Vec<TerminalTab>,
+    pub active_terminal: usize,
+    next_terminal_number: usize,
     pub plugins: Option<PluginHost>,
     pub plugin_commands: Vec<String>,
     pub completion: Completion,
@@ -143,7 +166,9 @@ impl QellApp {
             docs: Vec::new(),
             active: 0,
             focus: Focus::Editor,
-            terminal: None,
+            terminals: Vec::new(),
+            active_terminal: 0,
+            next_terminal_number: 1,
             plugins,
             plugin_commands,
             completion: Completion::default(),
@@ -202,7 +227,9 @@ impl QellApp {
         self.root = path;
         self.tree_cache.clear();
         self.command_palette.files.clear();
-        self.terminal = None; // restarts in the new directory
+        // Shells restart in the new directory.
+        self.terminals.clear();
+        self.next_terminal_number = 1;
         self.notify(format!("Opened {}", self.root.display()));
     }
 
@@ -328,6 +355,21 @@ impl QellApp {
                 self.show_terminal = !self.show_terminal;
                 self.focus = if self.show_terminal { Focus::Terminal } else { Focus::Editor };
             }
+            Command::NewTerminal => {
+                self.show_terminal = true;
+                self.new_terminal();
+                self.focus = Focus::Terminal;
+            }
+            Command::KillTerminal => self.kill_terminal(self.active_terminal),
+            Command::NextTerminal | Command::PrevTerminal => {
+                let n = self.terminals.len();
+                if n > 0 {
+                    let step = if cmd == Command::NextTerminal { 1 } else { n - 1 };
+                    self.active_terminal = (self.active_terminal + step) % n;
+                    self.show_terminal = true;
+                    self.focus = Focus::Terminal;
+                }
+            }
             Command::FocusTerminal => {
                 self.show_terminal = true;
                 self.focus = Focus::Terminal;
@@ -439,15 +481,67 @@ impl QellApp {
 
     // ---- terminal --------------------------------------------------------
 
-    fn ensure_terminal(&mut self) {
-        if self.terminal.as_ref().is_some_and(|t| !t.has_exited()) {
-            return;
-        }
+    /// Open a new shell in the workspace root and make it active.
+    pub fn new_terminal(&mut self) {
         match Terminal::new(80, 24, Some(self.root.clone())) {
-            Ok(t) => self.terminal = Some(t),
+            Ok(term) => {
+                let number = self.next_terminal_number;
+                self.next_terminal_number += 1;
+                self.terminals.push(TerminalTab { term, number });
+                self.active_terminal = self.terminals.len() - 1;
+            }
             Err(e) => {
                 self.notify_error(format!("Terminal unavailable: {e:#}"));
-                self.show_terminal = false;
+                if self.terminals.is_empty() {
+                    self.show_terminal = false;
+                }
+            }
+        }
+    }
+
+    /// Close a shell. Closing the last one hides the panel, like VS Code.
+    pub fn kill_terminal(&mut self, index: usize) {
+        if index >= self.terminals.len() {
+            return;
+        }
+        self.terminals.remove(index);
+        self.after_terminal_removed(index);
+    }
+
+    /// Replace a shell with a fresh one in the same tab.
+    pub fn restart_terminal(&mut self, index: usize) {
+        let Some(tab) = self.terminals.get_mut(index) else { return };
+        match Terminal::new(80, 24, Some(self.root.clone())) {
+            Ok(term) => tab.term = term,
+            Err(e) => self.notify_error(format!("Terminal unavailable: {e:#}")),
+        }
+    }
+
+    fn after_terminal_removed(&mut self, index: usize) {
+        if self.terminals.is_empty() {
+            self.show_terminal = false;
+            self.focus = Focus::Editor;
+            self.active_terminal = 0;
+            self.next_terminal_number = 1;
+        } else if self.active_terminal > index || self.active_terminal >= self.terminals.len() {
+            self.active_terminal = self.active_terminal.saturating_sub(1);
+        }
+    }
+
+    /// Drain every shell's events (background tabs keep running) and drop
+    /// the ones whose shell exited.
+    fn poll_terminals(&mut self) {
+        if self.show_terminal && self.terminals.is_empty() {
+            self.new_terminal();
+        }
+        let mut i = 0;
+        while i < self.terminals.len() {
+            self.terminals[i].term.poll();
+            if self.terminals[i].term.has_exited() {
+                self.terminals.remove(i);
+                self.after_terminal_removed(i);
+            } else {
+                i += 1;
             }
         }
     }
@@ -462,15 +556,21 @@ impl QellApp {
             }
             return;
         }
-        for cmd in Command::ALL {
-            let Some(sc) = cmd.shortcut() else { continue };
+        for (cmd, sc) in Command::by_shortcut_specificity() {
+            let in_terminal = self.focus == Focus::Terminal && self.show_terminal;
+            // Switching terminals only makes sense from the terminal.
+            if matches!(cmd, Command::NextTerminal | Command::PrevTerminal) && !in_terminal {
+                continue;
+            }
             // In the terminal, Ctrl+<letter> belongs to the shell, except
             // the few view commands people expect to keep working.
-            if self.focus == Focus::Terminal
-                && self.show_terminal
+            if in_terminal
                 && !matches!(
                     cmd,
                     Command::ToggleTerminal
+                        | Command::NewTerminal
+                        | Command::NextTerminal
+                        | Command::PrevTerminal
                         | Command::CommandPalette
                         | Command::QuickOpen
                         | Command::ToggleSidebar
@@ -480,7 +580,7 @@ impl QellApp {
                 continue;
             }
             if ctx.input_mut(|i| i.consume_shortcut(&sc)) {
-                self.pending_commands.push(*cmd);
+                self.pending_commands.push(cmd);
             }
         }
     }
@@ -491,12 +591,7 @@ impl eframe::App for QellApp {
         self.notifications.retain(|n| n.at.elapsed() < Duration::from_secs(if n.is_error { 8 } else { 4 }));
         self.handle_lsp_events();
         self.handle_git(ctx);
-        if self.show_terminal {
-            self.ensure_terminal();
-            if let Some(t) = self.terminal.as_mut() {
-                t.poll();
-            }
-        }
+        self.poll_terminals();
         self.handle_shortcuts(ctx);
 
         views::menu::show(self, ctx);

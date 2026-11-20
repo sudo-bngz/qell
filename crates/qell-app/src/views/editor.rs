@@ -51,22 +51,24 @@ fn show_tabs(app: &mut QellApp, ui: &mut egui::Ui) {
                         None if active => text,
                         None => text_dim,
                     };
-                    let resp = egui::Frame::new()
-                        .fill(fill)
-                        .inner_margin(egui::Margin::symmetric(12, 7))
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 8.0;
-                                ui.label(egui::RichText::new(title).size(13.0).color(color));
-                                if ui.small_button("×").clicked() {
-                                    close = Some(i);
-                                }
-                            });
+                    let inner = egui::Frame::new().fill(fill).inner_margin(egui::Margin::symmetric(12, 7)).show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
+                            ui.label(egui::RichText::new(title).size(13.0).color(color));
+                            ui.small_button("×").rect
                         })
-                        .response;
-                    let resp = resp.interact(Sense::click());
+                        .inner
+                    });
+                    // The whole tab is the click target; it sits above the ×,
+                    // so tell the two apart by where the click landed.
+                    let close_rect = inner.inner;
+                    let resp = inner.response.interact(Sense::click());
                     if resp.clicked() {
-                        switch_to = Some(i);
+                        if resp.interact_pointer_pos().is_some_and(|p| close_rect.contains(p)) {
+                            close = Some(i);
+                        } else {
+                            switch_to = Some(i);
+                        }
                     }
                     if resp.middle_clicked() {
                         close = Some(i);

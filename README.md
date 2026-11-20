@@ -23,8 +23,11 @@ bottom, and language-server completion for the languages you actually use.
   (modified, added, untracked, deleted, conflict, ignored), with a badge per
   file, a dot on folders containing changes, and the branch with
   ahead/behind counts in the status bar. Refreshed in the background.
-- **Integrated terminal** — the Alacritty terminal core in a panel
-  (`Ctrl+\``), with 256/true colour, scrollback and application-cursor mode.
+- **Integrated terminals** — the Alacritty terminal core in a panel
+  (`` Ctrl+` ``), with 256/true colour, scrollback and application-cursor mode.
+  Run several shells as tabs: `` Ctrl+Shift+` `` opens a new one,
+  `Ctrl+PageUp`/`Ctrl+PageDown` switch between them, and typing `exit`
+  closes a tab.
 - **Plugins** — WebAssembly modules loaded from `~/.config/qell/plugins`,
   sandboxed by Wasmtime, exposing commands to the palette. See
   [`plugins/hello`](plugins/hello).
@@ -67,6 +70,8 @@ npm i -g typescript typescript-language-server
 | Trigger completion    | `Ctrl+Space`       |
 | Toggle sidebar        | `Ctrl+B`           |
 | Toggle terminal       | `` Ctrl+` ``       |
+| New terminal          | `` Ctrl+Shift+` `` |
+| Next / prev terminal  | `Ctrl+PageDown/Up` |
 | Zoom                  | `Ctrl+=` / `Ctrl+-` |
 
 On macOS, `Ctrl` is `⌘` for the editor shortcuts.

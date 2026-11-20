@@ -43,6 +43,7 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                 ui.separator();
                 item(ui, app, Command::ToggleSidebar);
                 item(ui, app, Command::ToggleTerminal);
+                item(ui, app, Command::NewTerminal);
                 ui.separator();
                 item(ui, app, Command::ZoomIn);
                 item(ui, app, Command::ZoomOut);

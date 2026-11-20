@@ -23,6 +23,10 @@ pub enum Command {
     TriggerCompletion,
     ToggleSidebar,
     ToggleTerminal,
+    NewTerminal,
+    KillTerminal,
+    NextTerminal,
+    PrevTerminal,
     FocusTerminal,
     FocusEditor,
     CommandPalette,
@@ -49,6 +53,10 @@ impl Command {
         Command::TriggerCompletion,
         Command::ToggleSidebar,
         Command::ToggleTerminal,
+        Command::NewTerminal,
+        Command::KillTerminal,
+        Command::NextTerminal,
+        Command::PrevTerminal,
         Command::FocusTerminal,
         Command::FocusEditor,
         Command::CommandPalette,
@@ -75,6 +83,10 @@ impl Command {
             Command::TriggerCompletion => "Edit: Trigger Completion",
             Command::ToggleSidebar => "View: Toggle Sidebar",
             Command::ToggleTerminal => "View: Toggle Terminal",
+            Command::NewTerminal => "Terminal: New Terminal",
+            Command::KillTerminal => "Terminal: Kill Active Terminal",
+            Command::NextTerminal => "Terminal: Focus Next Terminal",
+            Command::PrevTerminal => "Terminal: Focus Previous Terminal",
             Command::FocusTerminal => "View: Focus Terminal",
             Command::FocusEditor => "View: Focus Editor",
             Command::CommandPalette => "Command Palette",
@@ -107,6 +119,10 @@ impl Command {
             Command::TriggerCompletion => s(Modifiers::CTRL, Key::Space),
             Command::ToggleSidebar => s(cmd, Key::B),
             Command::ToggleTerminal => s(Modifiers::CTRL, Key::Backtick),
+            Command::NewTerminal => s(Modifiers::CTRL | Modifiers::SHIFT, Key::Backtick),
+            Command::KillTerminal => None,
+            Command::NextTerminal => s(Modifiers::CTRL, Key::PageDown),
+            Command::PrevTerminal => s(Modifiers::CTRL, Key::PageUp),
             Command::FocusTerminal => None,
             Command::FocusEditor => None,
             Command::CommandPalette => s(cmd_shift, Key::P),
@@ -116,6 +132,16 @@ impl Command {
             Command::ZoomOut => s(cmd, Key::Minus),
             Command::Quit => s(cmd, Key::Q),
         }
+    }
+
+    /// Commands with a shortcut, most specific first. egui matches
+    /// shortcuts "logically" (an extra Shift still matches), so Ctrl+Tab
+    /// would otherwise swallow Ctrl+Shift+Tab.
+    pub fn by_shortcut_specificity() -> Vec<(Command, KeyboardShortcut)> {
+        let mut v: Vec<_> = Self::ALL.iter().filter_map(|c| c.shortcut().map(|s| (*c, s))).collect();
+        let weight = |m: Modifiers| m.shift as u8 + m.alt as u8 + (m.ctrl || m.command || m.mac_cmd) as u8;
+        v.sort_by_key(|(_, s)| std::cmp::Reverse(weight(s.modifiers)));
+        v
     }
 
     pub fn shortcut_text(self, ctx: &egui::Context) -> String {
@@ -156,6 +182,15 @@ mod tests {
         assert!(fuzzy_score("sv", "File: Save").is_some());
         assert!(fuzzy_score("xyz", "File: Save").is_none());
         assert!(fuzzy_score("save", "File: Save").unwrap() < fuzzy_score("save", "View: Sidebar visible").unwrap());
+    }
+
+    #[test]
+    fn shifted_shortcuts_are_checked_first() {
+        let order = Command::by_shortcut_specificity();
+        let pos = |c| order.iter().position(|(x, _)| *x == c).unwrap();
+        assert!(pos(Command::PrevTab) < pos(Command::NextTab));
+        assert!(pos(Command::NewTerminal) < pos(Command::ToggleTerminal));
+        assert!(pos(Command::SaveAs) < pos(Command::Save));
     }
 
     #[test]

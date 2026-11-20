@@ -202,6 +202,12 @@ impl Terminal {
         self.palette = palette;
     }
 
+    /// Window title set by the shell or the running program (OSC 0/2);
+    /// empty if none was set.
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
     pub fn has_exited(&self) -> bool {
         self.exited
     }

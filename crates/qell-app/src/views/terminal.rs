@@ -5,6 +5,7 @@ use egui::{Color32, Context, Event, Key, Pos2, Rect, Sense, Stroke, Vec2};
 use qell_term::{Key as TermKey, Snapshot};
 
 use crate::app::{Focus, QellApp};
+use crate::commands::Command;
 
 pub fn show(app: &mut QellApp, ctx: &Context) {
     let bg = app.palette.panel_bg;
@@ -15,27 +16,105 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
         .height_range(80.0..=1200.0)
         .frame(egui::Frame::new().fill(bg).stroke(Stroke::new(1.0_f32, border)).inner_margin(egui::Margin::symmetric(6, 4)))
         .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                let title = app
-                    .terminal
-                    .as_ref()
-                    .map(|t| t.snapshot().title)
-                    .filter(|t| !t.is_empty())
-                    .unwrap_or_else(|| "TERMINAL".into());
-                ui.label(egui::RichText::new(title).size(11.0).color(app.palette.text_dim));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("×").on_hover_text("Close panel").clicked() {
-                        app.show_terminal = false;
-                        app.focus = Focus::Editor;
-                    }
-                    if ui.small_button("⟳").on_hover_text("Restart shell").clicked() {
-                        app.terminal = None;
-                    }
-                });
-            });
+            show_header(app, ui);
             ui.add_space(2.0);
             show_grid(app, ui);
         });
+}
+
+/// Tab strip on the left, panel actions on the right.
+fn show_header(app: &mut QellApp, ui: &mut egui::Ui) {
+    let text = app.palette.text;
+    let text_dim = app.palette.text_dim;
+    let accent = app.palette.accent;
+    let multiple = app.terminals.len() > 1;
+
+    ui.horizontal(|ui| {
+        // Actions first (right-to-left) so the tabs get what's left.
+        let mut new = false;
+        let mut restart = false;
+        let mut hide = false;
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            hide = ui.small_button("×").on_hover_text("Hide panel").clicked();
+            restart = ui.small_button("⟳").on_hover_text("Restart this shell").clicked();
+            let new_tip = format!("New terminal ({})", Command::NewTerminal.shortcut_text(ui.ctx()));
+            new = ui.small_button("+").on_hover_text(new_tip).clicked();
+
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                egui::ScrollArea::horizontal().id_salt("terminal_tabs").auto_shrink([false, true]).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        let mut switch_to = None;
+                        let mut kill = None;
+                        for (i, tab) in app.terminals.iter().enumerate() {
+                            let active = i == app.active_terminal;
+                            let full = tab.label();
+                            let label =
+                                if multiple { format!("{}: {}", tab.number, shorten(&full, 32)) } else { shorten(&full, 48) };
+                            let color = if active { text } else { text_dim };
+                            let inner = egui::Frame::new().inner_margin(egui::Margin::symmetric(6, 1)).show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                    ui.label(egui::RichText::new(label).size(11.0).color(color));
+                                    // Only offer × per tab when there's a choice;
+                                    // the panel × covers the single-shell case.
+                                    multiple.then(|| ui.small_button("×").rect)
+                                })
+                                .inner
+                            });
+                            // The tab sits above its ×: decide by click position.
+                            let close_rect = inner.inner;
+                            let resp = inner.response.interact(Sense::click()).on_hover_text(full);
+                            if resp.clicked() {
+                                let on_close = resp.interact_pointer_pos().zip(close_rect).is_some_and(|(p, r)| r.contains(p));
+                                if on_close {
+                                    kill = Some(i);
+                                } else {
+                                    switch_to = Some(i);
+                                }
+                            }
+                            if resp.middle_clicked() {
+                                kill = Some(i);
+                            }
+                            if active && multiple {
+                                let r = resp.rect;
+                                ui.painter().hline(r.x_range(), r.bottom(), Stroke::new(1.5_f32, accent));
+                            }
+                        }
+                        if let Some(i) = switch_to {
+                            app.active_terminal = i;
+                            app.focus = Focus::Terminal;
+                        }
+                        if let Some(i) = kill {
+                            app.kill_terminal(i);
+                        }
+                    });
+                });
+            });
+        });
+        if new {
+            app.new_terminal();
+            app.focus = Focus::Terminal;
+        }
+        if restart {
+            app.restart_terminal(app.active_terminal);
+        }
+        if hide {
+            app.show_terminal = false;
+            app.focus = Focus::Editor;
+        }
+    });
+}
+
+/// Trim long shell titles ("user@host: /a/very/long/path") from the left,
+/// where the least useful part is.
+fn shorten(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    let tail: String = s.chars().skip(n - (max - 1)).collect();
+    format!("…{tail}")
 }
 
 fn to_color(c: [u8; 3]) -> Color32 {
@@ -43,7 +122,8 @@ fn to_color(c: [u8; 3]) -> Color32 {
 }
 
 fn show_grid(app: &mut QellApp, ui: &mut egui::Ui) {
-    let Some(term) = app.terminal.as_mut() else {
+    let active = app.active_terminal;
+    let Some(term) = app.terminals.get_mut(active).map(|t| &mut t.term) else {
         ui.label("Starting shell…");
         return;
     };
@@ -210,5 +290,17 @@ fn show_grid(app: &mut QellApp, ui: &mut egui::Ui) {
             egui::FontId::proportional(11.0),
             app.palette.text_dim,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shorten;
+
+    #[test]
+    fn shorten_keeps_the_end() {
+        assert_eq!(shorten("bash", 10), "bash");
+        assert_eq!(shorten("user@host: /home/me/project", 10), "…e/project");
+        assert_eq!(shorten("user@host: /home/me/project", 10).chars().count(), 10);
     }
 }
