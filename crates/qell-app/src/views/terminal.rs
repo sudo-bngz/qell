@@ -16,6 +16,14 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
         .height_range(80.0..=1200.0)
         .frame(egui::Frame::new().fill(bg).stroke(Stroke::new(1.0_f32, border)).inner_margin(egui::Margin::symmetric(6, 4)))
         .show(ctx, |ui| {
+            // A click anywhere in the panel (padding included) focuses the
+            // shell, not only on the character grid. Registered first so
+            // the tabs and buttons on top keep their own clicks. Covers the
+            // padding (6 px sides, 4 px top) except the resize handles.
+            let panel = ui.max_rect().expand2(Vec2::new(3.0, 1.0));
+            if ui.interact(panel, ui.id().with("terminal_panel_bg"), Sense::click()).clicked() {
+                app.focus = Focus::Terminal;
+            }
             show_header(app, ui);
             ui.add_space(2.0);
             show_grid(app, ui);
