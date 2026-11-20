@@ -5,6 +5,7 @@
 //! how to undo what they did ([`history`]) and how to colour it
 //! ([`syntax`]). Everything else in Qell builds on top of these types.
 
+pub mod alea;
 pub mod buffer;
 pub mod conf;
 pub mod history;

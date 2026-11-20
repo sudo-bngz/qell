@@ -460,6 +460,7 @@ pub fn builtin_languages() -> Vec<Language> {
             lexer: Some(crate::conf::highlight),
             ..Default::default()
         },
+        Language { id: "alea", name: "alea", extensions: &["alea"], lexer: Some(crate::alea::highlight), ..Default::default() },
         Language { id: "plaintext", name: "Plain Text", extensions: &["txt", "log"], ..Default::default() },
     ]
 }
@@ -764,6 +765,7 @@ mod tests {
         assert_eq!(language_for_path(Path::new("main.tf")).as_deref(), Some("terraform"));
         assert_eq!(language_for_path(Path::new("x.tsx")).as_deref(), Some("typescriptreact"));
         assert_eq!(language_for_path(Path::new("default.vcl")).as_deref(), Some("vcl"));
+        assert_eq!(language_for_path(Path::new("rosace.alea")).as_deref(), Some("alea"));
         assert_eq!(language_for_path(Path::new("noext")), None);
     }
 }
