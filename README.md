@@ -58,7 +58,9 @@ bottom, and language-server completion for the languages you actually use.
   (`` Ctrl+` ``), with 256/true colour, scrollback and application-cursor mode.
   Run several shells as tabs: `` Ctrl+Shift+` `` opens a new one,
   `Ctrl+PageUp`/`Ctrl+PageDown` switch between them, and typing `exit`
-  closes a tab.
+  closes a tab. Select text with the mouse (double-click: word, triple-click:
+  line) and copy it with `⌘C` / `Ctrl+Shift+C`; right-click for Copy, Paste,
+  Select All and Clear Terminal.
 - **Plugins** — WebAssembly modules loaded from `~/.config/qell/plugins`,
   sandboxed by Wasmtime, exposing commands to the palette. See
   [`plugins/hello`](plugins/hello).

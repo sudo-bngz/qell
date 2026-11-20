@@ -15,7 +15,8 @@ use std::sync::Arc;
 use alacritty_terminal::event::{Event, EventListener, Notify, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, Msg, Notifier};
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::index::Point;
+use alacritty_terminal::index::{Column, Line, Point, Side};
+use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{self, Config, Term, TermMode};
@@ -46,6 +47,17 @@ pub struct CellSnapshot {
     pub inverse: bool,
     /// Second half of a wide (CJK, emoji) glyph: draw nothing here.
     pub wide_spacer: bool,
+    /// Inside the mouse selection.
+    pub selected: bool,
+}
+
+/// How a mouse selection grows: by character, by word (double click) or
+/// by whole line (triple click).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionKind {
+    Chars,
+    Words,
+    Lines,
 }
 
 /// Everything the UI needs to draw one frame of the terminal.
@@ -333,6 +345,66 @@ impl Terminal {
         self.write(seq.to_vec());
     }
 
+    /// Grid point of a screen cell (`row` counted from the top of what is
+    /// shown, which may be scrolled back).
+    fn point_at(term: &Term<Listener>, col: usize, row: usize) -> Point {
+        let offset = term.grid().display_offset() as i32;
+        let row = row.min(term.screen_lines().saturating_sub(1));
+        Point::new(Line(row as i32 - offset), Column(col.min(term.columns().saturating_sub(1))))
+    }
+
+    /// Start a selection at a screen cell; `right_half` when the pointer is
+    /// on the right half of it (so a drag from there skips that char).
+    pub fn select_start(&self, col: usize, row: usize, right_half: bool, kind: SelectionKind) {
+        let mut term = self.term.lock();
+        let p = Self::point_at(&term, col, row);
+        let ty = match kind {
+            SelectionKind::Chars => SelectionType::Simple,
+            SelectionKind::Words => SelectionType::Semantic,
+            SelectionKind::Lines => SelectionType::Lines,
+        };
+        term.selection = Some(Selection::new(ty, p, if right_half { Side::Right } else { Side::Left }));
+    }
+
+    /// Extend the selection to a screen cell (while dragging).
+    pub fn select_update(&self, col: usize, row: usize, right_half: bool) {
+        let mut term = self.term.lock();
+        let p = Self::point_at(&term, col, row);
+        if let Some(sel) = term.selection.as_mut() {
+            sel.update(p, if right_half { Side::Right } else { Side::Left });
+        }
+    }
+
+    /// Select everything: the scrollback and the screen.
+    pub fn select_all(&self) {
+        let mut term = self.term.lock();
+        let top = Point::new(term.grid().topmost_line(), Column(0));
+        let bottom = Point::new(term.grid().bottommost_line(), Column(term.columns().saturating_sub(1)));
+        let mut sel = Selection::new(SelectionType::Simple, top, Side::Left);
+        sel.update(bottom, Side::Right);
+        term.selection = Some(sel);
+    }
+
+    pub fn clear_selection(&self) {
+        self.term.lock().selection = None;
+    }
+
+    /// The selected text, if any (empty selections count as none).
+    pub fn selection_text(&self) -> Option<String> {
+        self.term.lock().selection_to_string().filter(|s| !s.is_empty())
+    }
+
+    /// Clear the screen and the scrollback, like ⌘K in Terminal.app. The
+    /// shell is asked to redraw its prompt (Ctrl+L).
+    pub fn clear(&self) {
+        {
+            let mut term = self.term.lock();
+            term.selection = None;
+            term.grid_mut().clear_history();
+        }
+        self.write(&b"\x0c"[..]);
+    }
+
     /// Scroll the view by `lines` (positive = towards older output).
     pub fn scroll(&self, lines: i32) {
         self.term.lock().scroll_display(alacritty_terminal::grid::Scroll::Delta(lines));
@@ -349,6 +421,7 @@ impl Terminal {
         let cols = term.columns();
         let rows = term.screen_lines();
         let colors = content.colors;
+        let selection = content.selection;
         let mut cells = vec![vec![CellSnapshot::blank(&self.palette); cols]; rows];
 
         for indexed in content.display_iter {
@@ -377,6 +450,7 @@ impl Terminal {
                 underline: flags.intersects(Flags::ALL_UNDERLINES),
                 inverse: flags.contains(Flags::INVERSE),
                 wide_spacer: flags.contains(Flags::WIDE_CHAR_SPACER),
+                selected: selection.is_some_and(|s| s.contains(indexed.point)),
             };
         }
 
@@ -419,6 +493,7 @@ impl CellSnapshot {
             underline: false,
             inverse: false,
             wide_spacer: false,
+            selected: false,
         }
     }
 }
@@ -465,6 +540,34 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "custom shell never echoed");
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn select_and_copy_output() {
+        let Ok(mut t) = Terminal::new(40, 6, None, Some("/bin/sh -i")) else { return };
+        t.send_text("echo hello_qell_world\n");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while t.screen_text().matches("hello_qell_world").count() < 2 {
+            t.poll();
+            assert!(std::time::Instant::now() < deadline, "shell never echoed");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        // The output line: the second line holding the word.
+        let text = t.screen_text();
+        let row = text.lines().enumerate().filter(|(_, l)| l.contains("hello_qell_world")).nth(1).unwrap().0;
+        let col = text.lines().nth(row).unwrap().find("qell").unwrap();
+        // Double click on "qell": the whole word (underscores included).
+        t.select_start(col, row, false, SelectionKind::Words);
+        assert_eq!(t.selection_text().as_deref(), Some("hello_qell_world"));
+        assert!(t.snapshot().cells[row][col].selected);
+        // A drag over "qell".
+        t.select_start(col, row, false, SelectionKind::Chars);
+        t.select_update(col + 3, row, true);
+        assert_eq!(t.selection_text().as_deref(), Some("qell"));
+        t.clear_selection();
+        assert_eq!(t.selection_text(), None);
+        assert!(!t.snapshot().cells[row][col].selected);
     }
 
     #[test]
