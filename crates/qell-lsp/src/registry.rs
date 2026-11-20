@@ -8,7 +8,7 @@ use lsp_types::{TextDocumentContentChangeEvent, Uri};
 use qell_core::buffer::Change;
 use qell_core::{Buffer, LanguageRegistry};
 
-use crate::client::{Client, Event, RequestId};
+use crate::client::{Client, Event, RequestId, Waker};
 use crate::convert::{path_to_uri, to_lsp_position};
 
 pub struct Registry {
@@ -20,6 +20,8 @@ pub struct Registry {
     failed: HashSet<String>,
     /// Languages whose server program isn't installed, with that program.
     missing: HashMap<String, String>,
+    /// Wakes the UI when a server sends something.
+    waker: Option<Waker>,
     /// Documents already sent with `didOpen`, keyed by uri.
     open: HashSet<Uri>,
     events_tx: Sender<Event>,
@@ -35,6 +37,7 @@ impl Registry {
             clients: HashMap::new(),
             failed: HashSet::new(),
             missing: HashMap::new(),
+            waker: None,
             open: HashSet::new(),
             events_tx,
             events_rx,
@@ -42,6 +45,12 @@ impl Registry {
     }
 
     /// Replace the command used for a language (from the user's config).
+    /// Called after every message from any server (typically
+    /// `egui::Context::request_repaint`), so responses show up immediately.
+    pub fn set_waker(&mut self, waker: Waker) {
+        self.waker = Some(waker);
+    }
+
     pub fn set_override(&mut self, lang_id: impl Into<String>, command: Vec<String>) {
         self.overrides.insert(lang_id.into(), command);
     }
@@ -72,7 +81,7 @@ impl Registry {
                 _ => languages.get(lang_id)?.lsp?.iter().map(|s| s.to_string()).collect(),
             };
             let cmd: Vec<&str> = owned.iter().map(String::as_str).collect();
-            match Client::start(lang_id, &cmd, &self.root, self.events_tx.clone()) {
+            match Client::start(lang_id, &cmd, &self.root, self.events_tx.clone(), self.waker.clone()) {
                 Ok(c) => {
                     self.clients.insert(lang_id.to_string(), c);
                 }
@@ -119,7 +128,7 @@ impl Registry {
             client.did_open(uri.clone(), &lang, buffer.version(), buffer.text());
             self.open.insert(uri);
         } else if !changes.is_empty() {
-            let events = changes.iter().map(|c| to_change_event(buffer, c)).collect();
+            let events = changes.iter().map(to_change_event).collect();
             client.did_change(uri, buffer.version(), events);
         }
     }
@@ -141,12 +150,34 @@ impl Registry {
         }
     }
 
-    pub fn request_completion(&mut self, buffer: &Buffer) -> Option<RequestId> {
+    /// Ask for completions at the cursor. The buffer's pending edits are
+    /// sent first: the request must describe the text the user sees, not
+    /// the text as of the previous frame.
+    pub fn request_completion(
+        &mut self,
+        languages: &LanguageRegistry,
+        buffer: &mut Buffer,
+        trigger: Option<char>,
+        refresh_incomplete: bool,
+    ) -> Option<RequestId> {
+        self.sync(languages, buffer);
         let lang = buffer.language()?;
         let uri = buffer.path().and_then(path_to_uri)?;
         let client = self.clients.get(lang).filter(|c| c.is_ready())?;
         let p = buffer.cursor.head();
-        Some(client.completion(uri, to_lsp_position(&buffer.line(p.line), p)))
+        Some(client.completion(uri, to_lsp_position(&buffer.line(p.line), p), trigger, refresh_incomplete))
+    }
+
+    /// Fetch the documentation / edits a server left out of a completion
+    /// item. `None` when the server doesn't do that.
+    pub fn resolve_completion(&self, lang_id: &str, item: &lsp_types::CompletionItem) -> Option<RequestId> {
+        let client = self.clients.get(lang_id).filter(|c| c.is_ready() && c.resolves_completions())?;
+        Some(client.resolve_completion(item))
+    }
+
+    /// Characters that open the completion list for a language.
+    pub fn completion_triggers(&self, lang_id: &str) -> Vec<String> {
+        self.clients.get(lang_id).map(|c| c.completion_triggers()).unwrap_or_default()
     }
 
     pub fn request_hover(&mut self, buffer: &Buffer) -> Option<RequestId> {
@@ -185,11 +216,13 @@ impl Registry {
 /// the same line), and we approximate the end the same way. Since the
 /// editor only emits single-cursor edits this is exact for ASCII and
 /// correct for BMP text, which is what matters day to day.
-fn to_change_event(buffer: &Buffer, c: &Change) -> TextDocumentContentChangeEvent {
-    let start_line = buffer.line(c.start.line.min(buffer.line_count().saturating_sub(1)));
-    let end_line = buffer.line(c.end.line.min(buffer.line_count().saturating_sub(1)));
+/// An LSP change event. Columns come from the change itself, measured
+/// when it happened: converting with the buffer's current lines would be
+/// wrong as soon as another change in the batch moved them.
+fn to_change_event(c: &Change) -> TextDocumentContentChangeEvent {
+    let pos = |line: usize, col: usize| lsp_types::Position { line: line as u32, character: col as u32 };
     TextDocumentContentChangeEvent {
-        range: Some(lsp_types::Range { start: to_lsp_position(&start_line, c.start), end: to_lsp_position(&end_line, c.end) }),
+        range: Some(lsp_types::Range { start: pos(c.start.line, c.start_utf16), end: pos(c.end.line, c.end_utf16) }),
         range_length: None,
         text: c.text.clone(),
     }
@@ -252,5 +285,69 @@ mod tests {
                 assert!(install_hint(cmd[0]).is_some(), "no install hint for {}", cmd[0]);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod sync_tests {
+    use super::*;
+    use qell_core::Position;
+
+    /// Apply LSP change events to a plain string, as a server would.
+    fn apply_lsp(text: &str, ev: &TextDocumentContentChangeEvent) -> String {
+        let r = ev.range.unwrap();
+        let lines: Vec<&str> = text.split('\n').collect();
+        // Byte offset of an LSP position (line, UTF-16 column).
+        let off = |p: lsp_types::Position| -> usize {
+            let mut o = 0;
+            for l in &lines[..p.line as usize] {
+                o += l.len() + 1;
+            }
+            let mut units = 0;
+            for (i, ch) in lines[p.line as usize].char_indices() {
+                if units >= p.character as usize {
+                    return o + i;
+                }
+                units += ch.len_utf16();
+            }
+            o + lines[p.line as usize].len()
+        };
+        let (s, e) = (off(r.start), off(r.end));
+        format!("{}{}{}", &text[..s], ev.text, &text[e..])
+    }
+
+    #[test]
+    fn several_edits_in_one_batch_replay_to_the_same_text() {
+        let initial = "// Entry point\n\nfunction main() {\n  const s = formatD\n}\n";
+        let mut b = Buffer::from_text(initial, None);
+        b.take_changes();
+        // Accepting a completion with an auto-import: the word, then a line
+        // inserted above it.
+        b.replace_range(Position::new(3, 12), Position::new(3, 19), "formatDate");
+        b.replace_range(Position::new(1, 0), Position::new(1, 0), "\nimport { formatDate } from \"./utils\"\n");
+        b.set_cursor(Position::new(5, 22), false);
+        b.insert("(");
+        b.insert("x");
+        let mut server = initial.to_string();
+        for c in b.take_changes() {
+            server = apply_lsp(&server, &to_change_event(&c));
+        }
+        assert_eq!(server, b.text());
+    }
+
+    #[test]
+    fn non_ascii_columns_survive_line_shifts() {
+        let initial = "let é = \"😀\"; x\nend\n";
+        let mut b = Buffer::from_text(initial, None);
+        b.take_changes();
+        // Edit after the emoji (UTF-16 column != char column), then insert
+        // lines above it in the same batch.
+        b.replace_range(Position::new(0, 13), Position::new(0, 14), "y");
+        b.replace_range(Position::new(0, 0), Position::new(0, 0), "// ä\n// ö\n");
+        let mut server = initial.to_string();
+        for c in b.take_changes() {
+            server = apply_lsp(&server, &to_change_event(&c));
+        }
+        assert_eq!(server, b.text());
     }
 }

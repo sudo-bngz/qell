@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 use egui::{Context, Key, Modifiers};
 use qell_core::{LanguageRegistry, Position};
 use qell_git::{RepoStatus, Watcher as GitWatcher, WorkspaceStatus};
-use qell_lsp::lsp_types::{CompletionItem, Diagnostic};
+use qell_lsp::convert::from_lsp_position;
+use qell_lsp::lsp_types::{CompletionItem, Diagnostic, InsertTextFormat};
 use qell_lsp::{convert, Event as LspEvent, Registry as LspRegistry, RequestId};
 use qell_plugins::{Action as PluginAction, EditorContext, Host as PluginHost};
 use qell_term::Terminal;
@@ -42,6 +43,23 @@ pub struct Completion {
     pub word_start: Position,
     /// Screen position (bottom-left of the cursor) to anchor the popup.
     pub anchor: egui::Pos2,
+    /// The server's list wasn't complete: typing must ask again rather than
+    /// filter what we have.
+    pub incomplete: bool,
+    /// Pending `completionItem/resolve`: request id and item index.
+    pub resolving: Option<(RequestId, usize)>,
+    /// Items already resolved (or asked for).
+    pub resolved: std::collections::HashSet<usize>,
+}
+
+/// Tab stops left to visit after inserting a snippet completion.
+pub struct SnippetSession {
+    pub doc: usize,
+    /// Character ranges in the buffer, in visiting order.
+    pub stops: Vec<(usize, usize)>,
+    /// The stop being edited and its end when it was selected, to measure
+    /// what the user typed into it.
+    pub current: (usize, usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,6 +134,9 @@ pub struct QellApp {
     pub plugins: Option<PluginHost>,
     pub plugin_commands: Vec<String>,
     pub completion: Completion,
+    /// Item indices of the completion list in the order shown (filtered
+    /// and ranked), for arrow-key navigation.
+    pub completion_order: Vec<usize>,
     pub command_palette: CommandPalette,
     pub notifications: Vec<Notification>,
     pub show_sidebar: bool,
@@ -133,6 +154,9 @@ pub struct QellApp {
     /// The Settings window.
     pub settings: views::settings::SettingsState,
     pub sidebar_view: SidebarView,
+    pub snippet: Option<SnippetSession>,
+    /// For waking the UI from background threads.
+    pub egui_ctx: Context,
     /// The native menu bar, once installed (macOS only).
     pub native_menu: Option<crate::native_menu::NativeMenu>,
     pub scm: views::scm::ScmState,
@@ -174,10 +198,7 @@ impl QellApp {
             })
             .unwrap_or_default();
 
-        let mut lsp = LspRegistry::new(root.clone());
-        for (lang, cmd) in &config.lsp {
-            lsp.set_override(lang.clone(), cmd.clone());
-        }
+        let lsp = new_lsp(&cc.egui_ctx, &root, &config);
 
         let git = GitWatcher::new(root.clone(), config.git_scan());
         let mut app = Self {
@@ -185,6 +206,8 @@ impl QellApp {
             config_dirty_since: None,
             settings: Default::default(),
             sidebar_view: SidebarView::Explorer,
+            snippet: None,
+            egui_ctx: cc.egui_ctx.clone(),
             native_menu: None,
             scm: Default::default(),
             show_sidebar: config.show_sidebar,
@@ -204,6 +227,7 @@ impl QellApp {
             plugins,
             plugin_commands,
             completion: Completion::default(),
+            completion_order: Vec::new(),
             command_palette: CommandPalette::default(),
             notifications: Vec::new(),
             tree_cache: HashMap::new(),
@@ -250,10 +274,7 @@ impl QellApp {
     pub fn open_folder(&mut self, path: PathBuf) {
         let path = std::fs::canonicalize(&path).unwrap_or(path);
         self.lsp.shutdown_all();
-        self.lsp = LspRegistry::new(path.clone());
-        for (lang, cmd) in &self.config.lsp {
-            self.lsp.set_override(lang.clone(), cmd.clone());
-        }
+        self.lsp = new_lsp(&self.egui_ctx, &path, &self.config);
         self.git.set_root(path.clone());
         self.git_status = None;
         self.root = path;
@@ -411,10 +432,7 @@ impl QellApp {
             // Restart servers so the new commands are used; documents are
             // re-opened with them on the next sync.
             self.lsp.shutdown_all();
-            self.lsp = LspRegistry::new(self.root.clone());
-            for (lang, cmd) in &self.config.lsp {
-                self.lsp.set_override(lang.clone(), cmd.clone());
-            }
+            self.lsp = new_lsp(&self.egui_ctx, &self.root, &self.config);
         }
         self.config_dirty_since = Some(Instant::now());
     }
@@ -532,7 +550,10 @@ impl QellApp {
                     d.buffer.select_all();
                 }
             }
-            Command::TriggerCompletion => self.request_completion(),
+            Command::TriggerCompletion => {
+                self.completion.open = false;
+                self.request_completion(None);
+            }
             Command::ToggleSidebar => self.show_sidebar = !self.show_sidebar,
             Command::ShowExplorer => self.show_sidebar_view(SidebarView::Explorer),
             Command::ShowSourceControl => self.show_sidebar_view(SidebarView::SourceControl),
@@ -611,40 +632,165 @@ impl QellApp {
 
     // ---- LSP -------------------------------------------------------------
 
-    pub fn request_completion(&mut self) {
+    /// Open or update the completion list at the cursor. `trigger` is the
+    /// character that asked for it (`.`, `:`), `None` while typing a word.
+    pub fn request_completion(&mut self, trigger: Option<char>) {
         let Some(doc) = self.docs.get_mut(self.active) else { return };
         let word = doc.buffer.word_before_cursor();
         let head = doc.buffer.cursor.head();
-        self.completion.word_start = Position::new(head.line, head.col.saturating_sub(word.chars().count()));
-        self.completion.request = self.lsp.request_completion(&doc.buffer);
-        if self.completion.request.is_none() {
+        let word_start = Position::new(head.line, head.col.saturating_sub(word.chars().count()));
+        // Still typing the same word and the server sent everything: just
+        // narrow the list we have, like VS Code. No round trip, no flicker.
+        let c = &mut self.completion;
+        if trigger.is_none() && c.open && !c.incomplete && c.word_start == word_start && !c.items.is_empty() {
+            return;
+        }
+        let refresh = c.open && c.incomplete && c.word_start == word_start;
+        c.word_start = word_start;
+        c.request = self.lsp.request_completion(&self.languages, &mut doc.buffer, trigger, refresh);
+        if c.request.is_none() {
             // No server: fall back to words from the buffer so completion
             // still does something useful in plain-text files.
-            let items = views::editor::buffer_word_completions(&doc.buffer, &word);
-            self.completion.items = items;
-            self.completion.selected = 0;
-            self.completion.open = !self.completion.items.is_empty();
+            c.items = views::editor::buffer_word_completions(&doc.buffer, &word);
+            c.incomplete = true; // recompute on every keystroke
+            c.selected = 0;
+            c.resolved.clear();
+            c.open = !c.items.is_empty();
+        }
+    }
+
+    /// Fetch the documentation of the selected item if the server left it
+    /// out of the list.
+    pub fn resolve_selected_completion(&mut self) {
+        let i = self.completion.selected;
+        let Some(item) = self.completion.items.get(i) else { return };
+        if item.documentation.is_some() || self.completion.resolved.contains(&i) {
+            return;
+        }
+        let Some(lang) = self.docs.get(self.active).and_then(|d| d.buffer.language()) else { return };
+        self.completion.resolved.insert(i);
+        if let Some(id) = self.lsp.resolve_completion(lang, item) {
+            self.completion.resolving = Some((id, i));
         }
     }
 
     pub fn accept_completion(&mut self) {
         let Some(item) = self.completion.items.get(self.completion.selected).cloned() else { return };
-        let Some(doc) = self.docs.get_mut(self.active) else { return };
-        let (start, end, text) = views::editor::completion_edit(&doc.buffer, &item, self.completion.word_start);
-        doc.buffer.replace_range(start, end, &text);
-        doc.scroll_to_cursor = true;
         self.completion.open = false;
+        let doc_idx = self.active;
+        let Some(doc) = self.docs.get_mut(doc_idx) else { return };
+        let b = &mut doc.buffer;
+
+        let (start, end, raw) = views::editor::completion_edit(b, &item, self.completion.word_start);
+        let indent: String = b.line(start.line).chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+        let expanded = if item.insert_text_format == Some(InsertTextFormat::SNIPPET) {
+            crate::snippet::expand(&raw, &indent)
+        } else {
+            crate::snippet::Expanded { text: raw, stops: Vec::new() }
+        };
+
+        // The completion plus the server's extra edits (auto-imports), as
+        // character ranges of the current text, applied last-first so the
+        // ranges stay valid.
+        let main = (b.pos_to_char(start), b.pos_to_char(end));
+        let mut extra: Vec<(usize, usize, String)> = item
+            .additional_text_edits
+            .iter()
+            .flatten()
+            .map(|e| {
+                let s = from_lsp_position(&b.line(e.range.start.line as usize), e.range.start);
+                let en = from_lsp_position(&b.line(e.range.end.line as usize), e.range.end);
+                (b.pos_to_char(s), b.pos_to_char(en), e.new_text.clone())
+            })
+            .filter(|(s, e, _)| *e <= main.0 || *s >= main.1) // never overlapping the main edit
+            .collect();
+        extra.sort_by_key(|(s, _, _)| std::cmp::Reverse(*s));
+        let mut shift: isize = 0;
+        let mut main_done = false;
+        for (s, e, text) in &extra {
+            if !main_done && *s < main.0 {
+                b.replace_range(b.char_to_pos(main.0), b.char_to_pos(main.1), &expanded.text);
+                main_done = true;
+            }
+            b.replace_range(b.char_to_pos(*s), b.char_to_pos(*e), text);
+            if *s < main.0 {
+                shift += text.chars().count() as isize - (*e - *s) as isize;
+            }
+        }
+        if !main_done {
+            b.replace_range(b.char_to_pos(main.0), b.char_to_pos(main.1), &expanded.text);
+        }
+        let inserted_at = (main.0 as isize + shift) as usize;
+        let inserted_end = inserted_at + expanded.text.chars().count();
+
+        // Snippet: select the first tab stop; Tab visits the next ones.
+        let mut stops: Vec<(usize, usize)> =
+            expanded.stops.iter().map(|s| (inserted_at + s.start, inserted_at + s.end)).collect();
+        if stops.is_empty() {
+            b.set_cursor(b.char_to_pos(inserted_end), false);
+            self.snippet = None;
+        } else {
+            let (s, e) = stops.remove(0);
+            b.set_cursor(b.char_to_pos(s), false);
+            b.set_cursor(b.char_to_pos(e), true);
+            // A lone `$0` is just where the cursor ends: no session needed.
+            self.snippet = (!stops.is_empty()).then_some(SnippetSession { doc: doc_idx, stops, current: (s, e) });
+        }
+        doc.scroll_to_cursor = true;
+    }
+
+    /// Tab inside a snippet: move to the next tab stop. Returns `false`
+    /// when there is no snippet session (Tab indents as usual).
+    pub fn next_snippet_stop(&mut self) -> bool {
+        let Some(session) = self.snippet.as_mut() else { return false };
+        let Some(doc) = self.docs.get_mut(session.doc).filter(|_| session.doc == self.active) else {
+            self.snippet = None;
+            return false;
+        };
+        let b = &mut doc.buffer;
+        // Whatever was typed into the current stop shifted the later ones.
+        let cursor = b.pos_to_char(b.cursor.head());
+        let (cur_start, cur_end) = session.current;
+        if cursor < cur_start {
+            self.snippet = None;
+            return false;
+        }
+        crate::snippet::shift_stops(&mut session.stops, cur_end, cursor);
+        let (s, e) = session.stops.remove(0);
+        let len = b.rope().len_chars();
+        let (s, e) = (s.min(len), e.min(len));
+        b.set_cursor(b.char_to_pos(s), false);
+        b.set_cursor(b.char_to_pos(e), true);
+        doc.scroll_to_cursor = true;
+        if session.stops.is_empty() {
+            self.snippet = None;
+        } else {
+            session.current = (s, e);
+        }
+        true
     }
 
     fn handle_lsp_events(&mut self) {
         for ev in self.lsp.poll() {
             match ev {
                 LspEvent::Ready { language } => self.notify(format!("{language} language server ready")),
-                LspEvent::Completion { id, items } => {
+                LspEvent::Completion { id, items, incomplete } => {
                     if self.completion.request == Some(id) {
-                        self.completion.items = items;
-                        self.completion.selected = 0;
-                        self.completion.open = !self.completion.items.is_empty();
+                        let c = &mut self.completion;
+                        c.items = items;
+                        c.incomplete = incomplete;
+                        c.selected = 0;
+                        c.resolved.clear();
+                        c.resolving = None;
+                        c.open = !c.items.is_empty();
+                    }
+                }
+                LspEvent::CompletionResolved { id, item } => {
+                    if let Some((rid, i)) = self.completion.resolving {
+                        if rid == id && i < self.completion.items.len() {
+                            self.completion.items[i] = *item;
+                            self.completion.resolving = None;
+                        }
                     }
                 }
                 LspEvent::Hover { .. } => {}
@@ -849,4 +995,16 @@ fn same_file(a: &Path, b: &Path) -> bool {
         (Ok(a), Ok(b)) => a == b,
         _ => a == b,
     }
+}
+
+/// A language-server registry for `root` that wakes the UI whenever a
+/// server answers, with the user's command overrides.
+fn new_lsp(ctx: &Context, root: &Path, config: &Config) -> LspRegistry {
+    let mut lsp = LspRegistry::new(root.to_path_buf());
+    let ctx = ctx.clone();
+    lsp.set_waker(std::sync::Arc::new(move || ctx.request_repaint()));
+    for (lang, cmd) in &config.lsp {
+        lsp.set_override(lang.clone(), cmd.clone());
+    }
+    lsp
 }

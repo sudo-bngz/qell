@@ -28,8 +28,13 @@ bottom, and language-server completion for the languages you actually use.
   Nerd Fonts; nothing to install.
 - **Completion & diagnostics** — a JSON-RPC LSP client that launches
   `rust-analyzer`, `clangd`, `gopls`, `typescript-language-server` or
-  `terraform-ls` on demand. Errors are underlined; hover a line to read them.
-  Without a server, completion falls back to words from the buffer.
+  `terraform-ls` on demand. VS Code-style suggestions: icons per kind,
+  typed letters highlighted, a documentation panel beside the list,
+  auto-imports, snippets with placeholders you Tab through, and the
+  server's own trigger characters (`.`, `::`, `->`…). The list filters
+  locally as you type and only goes back to the server when it has to.
+  Errors are underlined; hover a line to read them. Without a server,
+  completion falls back to words from the buffer.
   Qell never downloads or installs anything: when a server is missing, the
   status bar says "LSP not installed"; hover it for the command to run
   (click to copy it).

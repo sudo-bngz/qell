@@ -18,6 +18,12 @@ pub struct Change {
     pub start: Position,
     pub end: Position,
     pub text: String,
+    /// `start` / `end` columns in UTF-16 code units, measured on the text
+    /// as it was when the change happened. Language servers count columns
+    /// that way, and a later change in the same batch can move lines, so
+    /// they can't be recomputed from the final text.
+    pub start_utf16: usize,
+    pub end_utf16: usize,
 }
 
 #[derive(Debug)]
@@ -157,6 +163,11 @@ impl Buffer {
         let old: String = self.rope.slice(start..start + old_len).to_string();
         let start_pos = self.char_to_pos(start);
         let end_pos = self.char_to_pos(start + old_len);
+        let utf16_col = |p: Position| -> usize {
+            let line_start = self.rope.line_to_char(p.line);
+            self.rope.slice(line_start..line_start + p.col).chars().map(char::len_utf16).sum()
+        };
+        let (start_utf16, end_utf16) = (utf16_col(start_pos), utf16_col(end_pos));
         let cursor_before = self.cursor.head();
 
         self.rope.remove(start..start + old_len);
@@ -166,7 +177,7 @@ impl Buffer {
         self.cursor = Cursor::at(after);
         self.version += 1;
         self.dirty = true;
-        self.pending_changes.push(Change { start: start_pos, end: end_pos, text: new.to_string() });
+        self.pending_changes.push(Change { start: start_pos, end: end_pos, text: new.to_string(), start_utf16, end_utf16 });
 
         if record {
             self.history.record(Edit { start, old, new: new.to_string(), cursor_before, cursor_after: after });

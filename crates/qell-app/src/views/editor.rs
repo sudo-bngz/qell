@@ -9,7 +9,7 @@ use egui::text::{LayoutJob, TextFormat};
 use egui::{Align2, Color32, Context, Event, Key, Pos2, Rect, Sense, Stroke, Vec2};
 use qell_core::{Buffer, HighlightSpan, Position};
 use qell_lsp::convert::from_lsp_position;
-use qell_lsp::lsp_types::{CompletionItem, CompletionItemKind, CompletionTextEdit, DiagnosticSeverity};
+use qell_lsp::lsp_types::{CompletionItem, CompletionItemKind, CompletionTextEdit, DiagnosticSeverity, Documentation};
 
 use crate::app::{Focus, QellApp};
 use crate::commands::Command;
@@ -134,6 +134,17 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
 
     // ---- input ----------------------------------------------------------
     let mut want_completion = false;
+    let mut trigger: Option<char> = None;
+    let mut next_stop = false;
+    let triggers: Vec<String> = {
+        let lang = app.docs.get(doc_idx).and_then(|d| d.buffer.language()).unwrap_or("");
+        let t = app.lsp.completion_triggers(lang);
+        if t.is_empty() {
+            vec![".".into(), ":".into()]
+        } else {
+            t
+        }
+    };
     let mut close_completion = false;
     let mut accept = false;
     let mut consumed_events = Vec::new();
@@ -158,10 +169,15 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                             b.insert(t);
                             doc.scroll_to_cursor = true;
                             let ident = t.chars().all(|c| c.is_alphanumeric() || c == '_');
+                            let single = t.chars().next().filter(|_| t.chars().count() == 1);
                             if ident && (auto_complete || app.completion.open) {
                                 want_completion = true;
-                            } else if t == "." || t == ":" {
+                            } else if let Some(c) = single.filter(|c| triggers.iter().any(|t| t.starts_with(*c))) {
+                                // The server's own trigger characters (`.`,
+                                // `:`, `>`, `"`…) open a fresh list.
                                 want_completion = auto_complete;
+                                trigger = Some(c);
+                                app.completion.open = false;
                             } else {
                                 close_completion = true;
                             }
@@ -193,14 +209,17 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                         let word = m.ctrl || m.alt && cfg!(target_os = "macos");
                         if app.completion.open {
                             match key {
-                                Key::ArrowDown => {
-                                    app.completion.selected =
-                                        (app.completion.selected + 1).min(app.completion.items.len().saturating_sub(1));
-                                    consumed_events.push(idx);
-                                    continue;
-                                }
-                                Key::ArrowUp => {
-                                    app.completion.selected = app.completion.selected.saturating_sub(1);
+                                Key::ArrowDown | Key::ArrowUp => {
+                                    // Move through the list in the order it is shown.
+                                    let order = &app.completion_order;
+                                    if let Some(pos) = order.iter().position(|&i| i == app.completion.selected) {
+                                        let next = if *key == Key::ArrowDown {
+                                            (pos + 1).min(order.len() - 1)
+                                        } else {
+                                            pos.saturating_sub(1)
+                                        };
+                                        app.completion.selected = order[next];
+                                    }
                                     consumed_events.push(idx);
                                     continue;
                                 }
@@ -294,6 +313,11 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                                 b.insert_newline();
                                 close_completion = true;
                             }
+                            Key::Tab if !ext && app.snippet.is_some() => {
+                                // Jump to the next snippet placeholder (after
+                                // the loop: it needs the whole app).
+                                next_stop = true;
+                            }
                             Key::Tab => {
                                 if ext {
                                     dedent_line(b, tab_size);
@@ -308,6 +332,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                                 let h = b.cursor.head();
                                 b.set_cursor(h, false);
                                 close_completion = true;
+                                app.snippet = None;
                             }
                             _ => used = false,
                         }
@@ -334,10 +359,16 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
             });
         });
     }
+    if next_stop && !app.next_snippet_stop() {
+        // The session ended (cursor left it): Tab indents after all.
+        let doc = &mut app.docs[doc_idx];
+        let col = doc.buffer.cursor.head().col;
+        doc.buffer.insert(&" ".repeat(tab_size - (col % tab_size)));
+    }
     if accept {
         app.accept_completion();
     } else if want_completion {
-        app.request_completion();
+        app.request_completion(trigger);
     } else if close_completion {
         app.completion.open = false;
     }
@@ -587,6 +618,7 @@ pub fn buffer_word_completions(b: &Buffer, prefix: &str) -> Vec<CompletionItem> 
 }
 
 /// Work out what accepting `item` should do: `(start, end, replacement)`.
+/// The replacement may be a snippet; the caller expands it.
 pub fn completion_edit(b: &Buffer, item: &CompletionItem, word_start: Position) -> (Position, Position, String) {
     let head = b.cursor.head();
     if let Some(CompletionTextEdit::Edit(e)) = &item.text_edit {
@@ -594,69 +626,88 @@ pub fn completion_edit(b: &Buffer, item: &CompletionItem, word_start: Position) 
         let s = from_lsp_position(&line, e.range.start);
         let line_e = b.line(e.range.end.line as usize);
         let en = from_lsp_position(&line_e, e.range.end);
-        return (s, en.max(head), strip_snippet(&e.new_text));
+        return (s, en.max(head), e.new_text.clone());
     }
     let text = item.insert_text.clone().unwrap_or_else(|| item.label.clone());
-    (word_start, head, strip_snippet(&text))
+    (word_start, head, text)
 }
 
-/// We advertise no snippet support, but some servers send `$0`/`${1:x}`
-/// anyway. Keep the placeholder text, drop the markers.
-fn strip_snippet(s: &str) -> String {
-    let mut out = String::new();
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '$' {
-            match chars.peek() {
-                Some('{') => {
-                    chars.next();
-                    let mut inner = String::new();
-                    let mut depth = 1;
-                    for c in chars.by_ref() {
-                        if c == '{' {
-                            depth += 1;
-                        } else if c == '}' {
-                            depth -= 1;
-                            if depth == 0 {
-                                break;
-                            }
-                        }
-                        inner.push(c);
-                    }
-                    if let Some((_, placeholder)) = inner.split_once(':') {
-                        out.push_str(&strip_snippet(placeholder));
-                    }
-                }
-                Some(d) if d.is_ascii_digit() => {
-                    while chars.peek().is_some_and(|d| d.is_ascii_digit()) {
-                        chars.next();
-                    }
-                }
-                _ => out.push('$'),
-            }
-        } else if c == '\\' {
-            if let Some(n) = chars.next() {
-                out.push(n);
-            }
-        } else {
-            out.push(c);
+/// VS Code's icon and colour for a completion kind.
+fn kind_icon(kind: Option<CompletionItemKind>, text: Color32) -> (char, Color32) {
+    let purple = Color32::from_rgb(0xb1, 0x80, 0xd7);
+    let blue = Color32::from_rgb(0x75, 0xbe, 0xff);
+    let orange = Color32::from_rgb(0xee, 0x9d, 0x28);
+    use CompletionItemKind as K;
+    match kind.unwrap_or(K::TEXT) {
+        K::METHOD | K::FUNCTION | K::CONSTRUCTOR => ('\u{ea8c}', purple),
+        K::FIELD => ('\u{eb5f}', blue),
+        K::VARIABLE => ('\u{ea88}', blue),
+        K::PROPERTY => ('\u{eb65}', text),
+        K::CLASS => ('\u{eb5b}', orange),
+        K::STRUCT => ('\u{ea91}', text),
+        K::INTERFACE => ('\u{eb61}', blue),
+        K::MODULE => ('\u{ea8b}', text),
+        K::ENUM | K::VALUE => ('\u{ea95}', orange),
+        K::ENUM_MEMBER => ('\u{eb5e}', blue),
+        K::EVENT => ('\u{ea86}', orange),
+        K::KEYWORD => ('\u{eb62}', text),
+        K::SNIPPET => ('\u{eb66}', text),
+        K::COLOR => ('\u{eb5c}', text),
+        K::FILE => ('\u{eb60}', text),
+        K::FOLDER => ('\u{ea83}', text),
+        K::REFERENCE => ('\u{eb36}', text),
+        K::CONSTANT => ('\u{eb5d}', text),
+        K::OPERATOR => ('\u{eb64}', text),
+        K::TYPE_PARAMETER => ('\u{ea92}', text),
+        K::UNIT => ('\u{ea96}', text),
+        _ => ('\u{ea93}', text), // text and anything else
+    }
+}
+
+fn documentation_text(doc: &Documentation) -> String {
+    match doc {
+        Documentation::String(s) => s.clone(),
+        Documentation::MarkupContent(m) => m.value.clone(),
+    }
+}
+
+/// Render Markdown documentation simply: fenced code in monospace on a
+/// darker block, the rest as wrapped text without the markup characters.
+fn show_markdown(ui: &mut egui::Ui, md: &str, mono: &egui::FontId, code_bg: Color32, dim: Color32) {
+    let mut in_code = false;
+    let mut block = String::new();
+    let flush = |ui: &mut egui::Ui, block: &mut String, code: bool| {
+        let text = block.trim_end_matches('\n').to_string();
+        block.clear();
+        if text.trim().is_empty() {
+            return;
         }
+        if code {
+            egui::Frame::new().fill(code_bg).inner_margin(egui::Margin::same(6)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(egui::RichText::new(text).font(mono.clone()));
+            });
+        } else {
+            for para in text.split("\n\n") {
+                let line = para.replace('\n', " ");
+                let heading = line.starts_with('#');
+                let clean = line.trim_start_matches('#').trim().replace(['*', '`'], "");
+                let rt = egui::RichText::new(clean).size(12.5);
+                ui.label(if heading { rt.strong() } else { rt.color(dim) });
+            }
+        }
+        ui.add_space(4.0);
+    };
+    for line in md.lines() {
+        if line.trim_start().starts_with("```") {
+            flush(ui, &mut block, in_code);
+            in_code = !in_code;
+            continue;
+        }
+        block.push_str(line);
+        block.push('\n');
     }
-    out
-}
-
-fn kind_label(kind: Option<CompletionItemKind>) -> &'static str {
-    match kind {
-        Some(CompletionItemKind::FUNCTION) | Some(CompletionItemKind::METHOD) => "ƒ",
-        Some(CompletionItemKind::VARIABLE) | Some(CompletionItemKind::FIELD) | Some(CompletionItemKind::PROPERTY) => "◇",
-        Some(CompletionItemKind::CLASS) | Some(CompletionItemKind::STRUCT) | Some(CompletionItemKind::INTERFACE) => "◈",
-        Some(CompletionItemKind::ENUM) | Some(CompletionItemKind::ENUM_MEMBER) => "≡",
-        Some(CompletionItemKind::MODULE) => "▣",
-        Some(CompletionItemKind::KEYWORD) => "k",
-        Some(CompletionItemKind::SNIPPET) => "✂",
-        Some(CompletionItemKind::CONSTANT) => "π",
-        _ => "·",
-    }
+    flush(ui, &mut block, in_code);
 }
 
 fn show_completion_popup(app: &mut QellApp, ctx: &Context) {
@@ -664,90 +715,118 @@ fn show_completion_popup(app: &mut QellApp, ctx: &Context) {
         return;
     }
     let Some(doc) = app.docs.get(app.active) else { return };
-    let prefix = doc.buffer.word_before_cursor().to_lowercase();
+    let prefix = doc.buffer.word_before_cursor();
 
-    // Client-side filter against the current prefix; servers usually send
-    // a superset and expect the client to narrow it.
-    let mut visible: Vec<usize> = app
+    // Client-side filter and rank against the typed prefix; servers send a
+    // superset and expect the client to narrow it.
+    let mut visible: Vec<(usize, usize, Vec<usize>)> = app
         .completion
         .items
         .iter()
         .enumerate()
-        .filter(|(_, it)| {
-            let key = it.filter_text.as_deref().unwrap_or(&it.label).to_lowercase();
-            prefix.is_empty() || crate::commands::fuzzy_score(&prefix, &key).is_some()
+        .filter_map(|(i, it)| {
+            let key = it.filter_text.as_deref().unwrap_or(&it.label);
+            let (score, _) = crate::commands::fuzzy_match(&prefix, key)?;
+            // Highlight against the label, which is what is shown.
+            let hits = crate::commands::fuzzy_match(&prefix, &it.label).map(|(_, h)| h).unwrap_or_default();
+            // A case-sensitive prefix match ranks first.
+            let bonus = if key.starts_with(prefix.as_str()) { 0 } else { 1000 };
+            Some((i, score + bonus, hits))
         })
-        .map(|(i, _)| i)
         .collect();
-    visible.sort_by_key(|&i| {
-        let it = &app.completion.items[i];
-        let key = it.filter_text.as_deref().unwrap_or(&it.label).to_lowercase();
-        let starts = !key.starts_with(&prefix);
-        (starts, it.sort_text.clone().unwrap_or_else(|| it.label.clone()))
+    let all = &app.completion.items;
+    visible.sort_by(|a, b| {
+        let items = all;
+        let sa = items[a.0].sort_text.as_deref().unwrap_or(&items[a.0].label);
+        let sb = items[b.0].sort_text.as_deref().unwrap_or(&items[b.0].label);
+        a.1.cmp(&b.1).then_with(|| sa.cmp(sb))
     });
     if visible.is_empty() {
         app.completion.open = false;
         return;
     }
-    if !visible.contains(&app.completion.selected) {
-        app.completion.selected = visible[0];
+    if !visible.iter().any(|v| v.0 == app.completion.selected) {
+        app.completion.selected = visible[0].0;
     }
-    let anchor = app.completion.anchor;
-    let font = app.palette.mono(app.font_size);
-    let accent = app.palette.accent;
-    let text_dim = app.palette.text_dim;
+    // Arrow keys move through the visible order, not the server's.
+    let order: Vec<usize> = visible.iter().map(|v| v.0).collect();
+    app.completion_order = order;
+    app.resolve_selected_completion();
+    let items = &app.completion.items;
+
+    let text = app.palette.text;
+    let dim = app.palette.text_dim;
+    let accent = Color32::from_rgb(0x2a, 0xaa, 0xff);
+    let sel_bg = app.palette.selection;
+    let font = egui::FontId::monospace(app.font_size.max(12.0) - 1.0);
+    let small = egui::FontId::proportional(12.0);
     let selected = app.completion.selected;
+    let anchor = app.completion.anchor;
+    const ROW: f32 = 22.0;
+    const WIDTH: f32 = 440.0;
     let mut clicked = None;
 
-    egui::Area::new(egui::Id::new("completion_popup"))
+    let popup = egui::Area::new(egui::Id::new("completion_popup"))
         .order(egui::Order::Foreground)
         .fixed_pos(anchor + Vec2::new(0.0, 2.0))
         .show(ctx, |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.set_max_height(240.0);
-                ui.set_min_width(260.0);
-                egui::ScrollArea::vertical().show(ui, |ui| {
+            egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(2)).show(ui, |ui| {
+                ui.set_width(WIDTH);
+                egui::ScrollArea::vertical().max_height(ROW * 10.0).auto_shrink([false, true]).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 0.0;
-                    for &i in visible.iter().take(100) {
-                        let it = &app.completion.items[i];
-                        let is_sel = i == selected;
-                        let detail = it.detail.clone().unwrap_or_default();
-                        let resp = ui
-                            .horizontal(|ui| {
-                                let w = ui.available_width().max(260.0);
-                                let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 22.0), Sense::click());
-                                if is_sel {
-                                    ui.painter().rect_filled(rect, 0.0, accent.gamma_multiply(0.35));
-                                }
-                                let p = ui.painter();
-                                p.text(
-                                    rect.left_center() + Vec2::new(6.0, 0.0),
-                                    Align2::LEFT_CENTER,
-                                    kind_label(it.kind),
-                                    font.clone(),
-                                    text_dim,
-                                );
-                                p.text(
-                                    rect.left_center() + Vec2::new(26.0, 0.0),
-                                    Align2::LEFT_CENTER,
-                                    &it.label,
-                                    font.clone(),
-                                    ui.visuals().text_color(),
-                                );
-                                if !detail.is_empty() {
-                                    p.text(
-                                        rect.right_center() - Vec2::new(6.0, 0.0),
-                                        Align2::RIGHT_CENTER,
-                                        detail,
-                                        egui::FontId::monospace(font.size * 0.85),
-                                        text_dim,
-                                    );
-                                }
-                                resp
-                            })
-                            .inner;
+                    for (i, _, hits) in visible.iter().take(200) {
+                        let it = &items[*i];
+                        let is_sel = *i == selected;
+                        let (rect, resp) = ui.allocate_exact_size(Vec2::new(WIDTH, ROW), Sense::click());
+                        let p = ui.painter_at(rect);
+                        if is_sel {
+                            p.rect_filled(rect, 2.0, sel_bg);
+                        }
+                        let (icon, icon_color) = kind_icon(it.kind, text);
+                        p.text(
+                            rect.left_center() + Vec2::new(8.0, 0.0),
+                            Align2::LEFT_CENTER,
+                            icon,
+                            crate::icons::font(14.0),
+                            icon_color,
+                        );
+
+                        // Label with the typed characters highlighted, then
+                        // the signature-ish label details, dimmed.
+                        let mut job = LayoutJob::default();
+                        for (ci, ch) in it.label.chars().enumerate() {
+                            let hit = hits.contains(&ci);
+                            let color = if hit { accent } else { text };
+                            job.append(&ch.to_string(), 0.0, TextFormat { font_id: font.clone(), color, ..Default::default() });
+                        }
+                        if let Some(d) = it.label_details.as_ref().and_then(|d| d.detail.as_deref()) {
+                            job.append(d, 0.0, TextFormat { font_id: font.clone(), color: dim, ..Default::default() });
+                        }
+                        let label = ui.fonts_mut(|f| f.layout_job(job));
+                        let label_w = label.size().x;
+                        p.galley(rect.left_center() + Vec2::new(28.0, -label.size().y / 2.0), label, text);
+
+                        // Right side: where it comes from / its type.
+                        let right = it
+                            .label_details
+                            .as_ref()
+                            .and_then(|d| d.description.clone())
+                            .or_else(|| it.detail.clone())
+                            .unwrap_or_default();
+                        // One line only: details are often multi-line signatures.
+                        let right = right.lines().next().unwrap_or("").trim().to_string();
+                        let room = WIDTH - 28.0 - label_w - 20.0;
+                        if !right.is_empty() && room > 40.0 {
+                            let max_chars = (room / 7.0) as usize;
+                            let shown: String = if right.chars().count() > max_chars {
+                                right.chars().take(max_chars.saturating_sub(1)).chain(std::iter::once('…')).collect()
+                            } else {
+                                right
+                            };
+                            p.text(rect.right_center() - Vec2::new(8.0, 0.0), Align2::RIGHT_CENTER, shown, small.clone(), dim);
+                        }
                         if resp.clicked() {
-                            clicked = Some(i);
+                            clicked = Some(*i);
                         }
                         if is_sel {
                             resp.scroll_to_me(None);
@@ -756,6 +835,48 @@ fn show_completion_popup(app: &mut QellApp, ctx: &Context) {
                 });
             });
         });
+
+    // Documentation of the selected item, beside the list.
+    if let Some(it) = items.get(selected) {
+        let doc_text = it.documentation.as_ref().map(documentation_text).unwrap_or_default();
+        let detail = it.detail.clone().unwrap_or_default();
+        if !doc_text.trim().is_empty() || !detail.trim().is_empty() {
+            let list = popup.response.rect;
+            let screen = ctx.content_rect();
+            const DOC_W: f32 = 380.0;
+            let pos = if list.right() + 4.0 + DOC_W <= screen.right() {
+                list.right_top() + Vec2::new(4.0, 0.0)
+            } else {
+                list.left_top() - Vec2::new(4.0 + DOC_W, 0.0)
+            };
+            let code_bg = app.palette.editor_bg;
+            egui::Area::new(egui::Id::new("completion_docs")).order(egui::Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
+                    ui.set_width(DOC_W - 16.0);
+                    // No scroll area: inside a floating panel it keeps the
+                    // height it had before the docs arrived. Long docs are
+                    // cut instead, like VS Code's suggest details.
+                    if !detail.trim().is_empty() {
+                        ui.label(egui::RichText::new(&detail).font(font.clone()));
+                        if !doc_text.trim().is_empty() {
+                            ui.separator();
+                        }
+                    }
+                    const MAX_LINES: usize = 18;
+                    let mut lines: Vec<&str> = doc_text.lines().collect();
+                    if lines.len() > MAX_LINES {
+                        lines.truncate(MAX_LINES);
+                        // Don't leave a code fence open.
+                        if lines.iter().filter(|l| l.trim_start().starts_with("```")).count() % 2 == 1 {
+                            lines.push("```");
+                        }
+                        lines.push("…");
+                    }
+                    show_markdown(ui, &lines.join("\n"), &font, code_bg, dim);
+                });
+            });
+        }
+    }
 
     if let Some(i) = clicked {
         app.completion.selected = i;
@@ -766,13 +887,6 @@ fn show_completion_popup(app: &mut QellApp, ctx: &Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn snippet_markers_are_stripped() {
-        assert_eq!(strip_snippet("println!(\"$1\")$0"), "println!(\"\")");
-        assert_eq!(strip_snippet("foo(${1:bar}, ${2:baz})"), "foo(bar, baz)");
-        assert_eq!(strip_snippet("plain"), "plain");
-    }
 
     #[test]
     fn buffer_words() {

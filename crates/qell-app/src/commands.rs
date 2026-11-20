@@ -190,6 +190,27 @@ pub fn fuzzy_score(needle: &str, haystack: &str) -> Option<usize> {
     Some(score)
 }
 
+/// Like [`fuzzy_score`], also returning which characters of `haystack`
+/// matched (char indices), to highlight them.
+pub fn fuzzy_match(needle: &str, haystack: &str) -> Option<(usize, Vec<usize>)> {
+    let hay: Vec<char> = haystack.chars().map(|c| c.to_ascii_lowercase()).collect();
+    let mut score = 0;
+    let mut pos = 0;
+    let mut last = None;
+    let mut hits = Vec::new();
+    for n in needle.chars().map(|c| c.to_ascii_lowercase()) {
+        let found = hay[pos..].iter().position(|&h| h == n)? + pos;
+        score += match last {
+            Some(l) => found - l - 1,
+            None => found,
+        };
+        hits.push(found);
+        last = Some(found);
+        pos = found + 1;
+    }
+    Some((score, hits))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,6 +230,13 @@ mod tests {
         assert!(pos(Command::PrevTab) < pos(Command::NextTab));
         assert!(pos(Command::NewTerminal) < pos(Command::ToggleTerminal));
         assert!(pos(Command::SaveAs) < pos(Command::Save));
+    }
+
+    #[test]
+    fn fuzzy_match_positions() {
+        assert_eq!(fuzzy_match("pl", "println"), Some((4, vec![0, 5])));
+        assert_eq!(fuzzy_match("", "x"), Some((0, vec![])));
+        assert!(fuzzy_match("zz", "println").is_none());
     }
 
     #[test]

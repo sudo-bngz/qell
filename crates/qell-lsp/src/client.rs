@@ -16,6 +16,10 @@ use serde_json::{json, Value};
 
 pub type RequestId = i64;
 
+/// Called after each message from a server, so the UI can redraw at once
+/// instead of on its next timer tick.
+pub type Waker = Arc<dyn Fn() + Send + Sync>;
+
 /// What a client tells the rest of the editor.
 #[derive(Debug)]
 pub enum Event {
@@ -26,6 +30,15 @@ pub enum Event {
     Completion {
         id: RequestId,
         items: Vec<CompletionItem>,
+        /// The server didn't send everything: typing more must ask again
+        /// instead of filtering this list.
+        incomplete: bool,
+    },
+    /// A completion item with its lazily computed fields (documentation,
+    /// detail, additional edits) filled in.
+    CompletionResolved {
+        id: RequestId,
+        item: Box<CompletionItem>,
     },
     Hover {
         id: RequestId,
@@ -57,6 +70,7 @@ pub enum Event {
 #[derive(Debug, Clone, Copy)]
 enum Pending {
     Completion,
+    Resolve,
     Hover,
     Other,
 }
@@ -76,7 +90,7 @@ impl Client {
     /// Spawn `command` and start the reader/writer threads. Events go to
     /// `events`. `initialize` is sent immediately; `Event::Ready` arrives
     /// when the server answers.
-    pub fn start(language: &str, command: &[&str], root: &Path, events: Sender<Event>) -> Result<Self> {
+    pub fn start(language: &str, command: &[&str], root: &Path, events: Sender<Event>, waker: Option<Waker>) -> Result<Self> {
         let (program, args) = command.split_first().ok_or_else(|| anyhow!("empty LSP command"))?;
         let mut child = Command::new(program)
             .args(args)
@@ -124,8 +138,14 @@ impl Client {
                         Ok(msg) => dispatch(&lang, msg, &pending, &capabilities, &ready, &outgoing, &events),
                         Err(e) => {
                             let _ = events.send(Event::Exited { language: lang.clone(), reason: e.to_string() });
+                            if let Some(w) = &waker {
+                                w();
+                            }
                             break;
                         }
+                    }
+                    if let Some(w) = &waker {
+                        w();
                     }
                 }
             })?;
@@ -159,10 +179,19 @@ impl Client {
                 text_document: Some(TextDocumentClientCapabilities {
                     completion: Some(CompletionClientCapabilities {
                         completion_item: Some(CompletionItemCapability {
-                            snippet_support: Some(false),
-                            documentation_format: Some(vec![MarkupKind::PlainText, MarkupKind::Markdown]),
+                            snippet_support: Some(true),
+                            documentation_format: Some(vec![MarkupKind::Markdown, MarkupKind::PlainText]),
+                            label_details_support: Some(true),
+                            // Servers may leave these out of the list and send
+                            // them on `completionItem/resolve`, which keeps the
+                            // list fast.
+                            resolve_support: Some(CompletionItemCapabilityResolveSupport {
+                                properties: vec!["documentation".into(), "detail".into(), "additionalTextEdits".into()],
+                            }),
+                            insert_replace_support: Some(false),
                             ..Default::default()
                         }),
+                        context_support: Some(true),
                         ..Default::default()
                     }),
                     hover: Some(HoverClientCapabilities {
@@ -225,17 +254,56 @@ impl Client {
 
     // ---- requests --------------------------------------------------------
 
-    pub fn completion(&self, uri: Uri, position: Position) -> RequestId {
+    /// Ask for completions at `position`. `trigger` is the character that
+    /// opened the list (`.`, `:`), `None` when typing or invoked by hand.
+    pub fn completion(&self, uri: Uri, position: Position, trigger: Option<char>, refresh_incomplete: bool) -> RequestId {
+        let context = match trigger {
+            Some(c) => CompletionContext {
+                trigger_kind: CompletionTriggerKind::TRIGGER_CHARACTER,
+                trigger_character: Some(c.to_string()),
+            },
+            None if refresh_incomplete => CompletionContext {
+                trigger_kind: CompletionTriggerKind::TRIGGER_FOR_INCOMPLETE_COMPLETIONS,
+                trigger_character: None,
+            },
+            None => CompletionContext { trigger_kind: CompletionTriggerKind::INVOKED, trigger_character: None },
+        };
         self.request(
             "textDocument/completion",
             CompletionParams {
                 text_document_position: TextDocumentPositionParams { text_document: TextDocumentIdentifier { uri }, position },
                 work_done_progress_params: Default::default(),
                 partial_result_params: Default::default(),
-                context: Some(CompletionContext { trigger_kind: CompletionTriggerKind::INVOKED, trigger_character: None }),
+                context: Some(context),
             },
             Pending::Completion,
         )
+    }
+
+    /// Whether the server fills in items lazily (`completionItem/resolve`).
+    pub fn resolves_completions(&self) -> bool {
+        self.capabilities
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|c| c.completion_provider.as_ref())
+            .and_then(|p| p.resolve_provider)
+            .unwrap_or(false)
+    }
+
+    /// Characters that should open the completion list, per the server.
+    pub fn completion_triggers(&self) -> Vec<String> {
+        self.capabilities
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|c| c.completion_provider.as_ref())
+            .and_then(|p| p.trigger_characters.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn resolve_completion(&self, item: &CompletionItem) -> RequestId {
+        self.request("completionItem/resolve", item, Pending::Resolve)
     }
 
     pub fn hover(&self, uri: Uri, position: Position) -> RequestId {
@@ -338,12 +406,17 @@ fn dispatch(
     let result = msg.get("result").cloned().unwrap_or(Value::Null);
     match kind {
         Some(Pending::Completion) => {
-            let items = match parse::<CompletionResponse>(result) {
-                Some(CompletionResponse::Array(items)) => items,
-                Some(CompletionResponse::List(list)) => list.items,
-                None => Vec::new(),
+            let (items, incomplete) = match parse::<CompletionResponse>(result) {
+                Some(CompletionResponse::Array(items)) => (items, false),
+                Some(CompletionResponse::List(list)) => (list.items, list.is_incomplete),
+                None => (Vec::new(), false),
             };
-            let _ = events.send(Event::Completion { id, items });
+            let _ = events.send(Event::Completion { id, items, incomplete });
+        }
+        Some(Pending::Resolve) => {
+            if let Some(item) = parse::<CompletionItem>(result) {
+                let _ = events.send(Event::CompletionResolved { id, item: Box::new(item) });
+            }
         }
         Some(Pending::Hover) => {
             let _ = events.send(Event::Hover { id, hover: parse(result) });
