@@ -25,3 +25,4 @@ qell-core.workspace = true
 qell-lsp.workspace = true
 qell-term.workspace = true
 qell-plugins.workspace = true
+qell-git.workspace = true

@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use egui::{Context, Key, Modifiers};
 use qell_core::{LanguageRegistry, Position};
+use qell_git::{RepoStatus, Watcher as GitWatcher};
 use qell_lsp::lsp_types::{CompletionItem, Diagnostic};
 use qell_lsp::{convert, Event as LspEvent, Registry as LspRegistry, RequestId};
 use qell_plugins::{Action as PluginAction, EditorContext, Host as PluginHost};
@@ -94,6 +95,10 @@ pub struct QellApp {
     pub tree_cache: HashMap<PathBuf, Vec<views::sidebar::Entry>>,
     pub pending_commands: Vec<Command>,
     pub pending_plugin_commands: Vec<String>,
+    /// Background `git status`; `git_status` is `None` outside a repository.
+    pub git: GitWatcher,
+    pub git_status: Option<RepoStatus>,
+    was_focused: bool,
 }
 
 impl QellApp {
@@ -125,6 +130,7 @@ impl QellApp {
             lsp.set_override(lang.clone(), cmd.clone());
         }
 
+        let git = GitWatcher::new(root.clone());
         let mut app = Self {
             show_sidebar: config.show_sidebar,
             show_terminal: config.show_terminal,
@@ -146,6 +152,9 @@ impl QellApp {
             tree_cache: HashMap::new(),
             pending_commands: Vec::new(),
             pending_plugin_commands: Vec::new(),
+            git,
+            git_status: None,
+            was_focused: true,
         };
         match file {
             Some(f) => app.open_file(f),
@@ -188,6 +197,8 @@ impl QellApp {
         for (lang, cmd) in &self.config.lsp {
             self.lsp.set_override(lang.clone(), cmd.clone());
         }
+        self.git.set_root(path.clone());
+        self.git_status = None;
         self.root = path;
         self.tree_cache.clear();
         self.command_palette.files.clear();
@@ -208,6 +219,7 @@ impl QellApp {
             return;
         }
         self.lsp.did_save(&doc.buffer);
+        self.git.refresh();
         let name = doc.buffer.file_name();
         self.notify(format!("Saved {name}"));
     }
@@ -223,6 +235,29 @@ impl QellApp {
         }
         self.active = self.active.min(self.docs.len() - 1);
         self.completion.open = false;
+    }
+
+    // ---- git -------------------------------------------------------------
+
+    /// Git status of a path, if it is inside the workspace and has one.
+    pub fn git_status_of(&self, path: &Path) -> Option<qell_git::FileStatus> {
+        let st = self.git_status.as_ref()?;
+        st.status_of(path.strip_prefix(&self.root).ok()?)
+    }
+
+    fn handle_git(&mut self, ctx: &Context) {
+        // Regaining window focus usually means files changed elsewhere.
+        let focused = ctx.input(|i| i.focused);
+        if focused && !self.was_focused {
+            self.git.refresh();
+        }
+        self.was_focused = focused;
+        if let Some(st) = self.git.poll() {
+            // Something changed on disk; new or removed files must show up
+            // in the tree too.
+            self.tree_cache.clear();
+            self.git_status = st;
+        }
     }
 
     // ---- notifications ---------------------------------------------------
@@ -455,6 +490,7 @@ impl eframe::App for QellApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         self.notifications.retain(|n| n.at.elapsed() < Duration::from_secs(if n.is_error { 8 } else { 4 }));
         self.handle_lsp_events();
+        self.handle_git(ctx);
         if self.show_terminal {
             self.ensure_terminal();
             if let Some(t) = self.terminal.as_mut() {

@@ -20,6 +20,25 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
             let root = app.root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             ui.label(small(root).color(palette_text_dim));
 
+            if let Some(git) = &app.git_status {
+                // The Powerline branch glyph lives in the bundled monospace font.
+                ui.add_space(-8.0);
+                ui.label(RichText::new("\u{e0a0}").monospace().size(12.0).color(palette_text_dim));
+                ui.add_space(-10.0);
+                let mut text = git.branch.as_deref().unwrap_or("detached").to_string();
+                if git.ahead > 0 {
+                    text.push_str(&format!(" ↑{}", git.ahead));
+                }
+                if git.behind > 0 {
+                    text.push_str(&format!(" ↓{}", git.behind));
+                }
+                let changed = git.changed_files();
+                let resp = ui.label(small(text).color(palette_text_dim));
+                if changed > 0 {
+                    resp.on_hover_text(format!("{changed} changed file{}", if changed == 1 { "" } else { "s" }));
+                }
+            }
+
             if let Some(doc) = app.docs.get(app.active) {
                 let errors = doc.diagnostics.iter().filter(|d| d.severity == Some(DiagnosticSeverity::ERROR)).count();
                 let warnings = doc.diagnostics.iter().filter(|d| d.severity == Some(DiagnosticSeverity::WARNING)).count();

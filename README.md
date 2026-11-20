@@ -19,6 +19,10 @@ bottom, and language-server completion for the languages you actually use.
   `rust-analyzer`, `clangd`, `gopls`, `typescript-language-server` or
   `terraform-ls` on demand. Errors are underlined; hover a line to read them.
   Without a server, completion falls back to words from the buffer.
+- **Git status** — the file tree and tabs are coloured like VS Code
+  (modified, added, untracked, deleted, conflict, ignored), with a badge per
+  file, a dot on folders containing changes, and the branch with
+  ahead/behind counts in the status bar. Refreshed in the background.
 - **Integrated terminal** — the Alacritty terminal core in a panel
   (`Ctrl+\``), with 256/true colour, scrollback and application-cursor mode.
 - **Plugins** — WebAssembly modules loaded from `~/.config/qell/plugins`,

@@ -3,6 +3,7 @@
 
 use egui::{Color32, CornerRadius, FontFamily, FontId, Stroke, Visuals};
 use qell_core::{Theme, TokenKind};
+use qell_git::FileStatus;
 
 pub struct Palette {
     pub syntax: Theme,
@@ -20,6 +21,17 @@ pub struct Palette {
     pub error: Color32,
     pub warning: Color32,
     pub hover: Color32,
+    pub git: GitColors,
+}
+
+/// File-tree / tab colours for git states, taken from VS Code's Dark Modern.
+pub struct GitColors {
+    pub modified: Color32,
+    pub added: Color32,
+    pub untracked: Color32,
+    pub deleted: Color32,
+    pub conflict: Color32,
+    pub ignored: Color32,
 }
 
 fn c(rgb: [u8; 3]) -> Color32 {
@@ -44,12 +56,32 @@ impl Palette {
             error: Color32::from_rgb(0xf1, 0x4c, 0x4c),
             warning: Color32::from_rgb(0xcc, 0xa7, 0x00),
             hover: Color32::from_rgb(0x2a, 0x2d, 0x2e),
+            git: GitColors {
+                modified: Color32::from_rgb(0xe2, 0xc0, 0x8d),
+                added: Color32::from_rgb(0x81, 0xb8, 0x8b),
+                untracked: Color32::from_rgb(0x73, 0xc9, 0x91),
+                deleted: Color32::from_rgb(0xc7, 0x4e, 0x39),
+                conflict: Color32::from_rgb(0xe4, 0x67, 0x6b),
+                ignored: Color32::from_rgb(0x8c, 0x8c, 0x8c),
+            },
             syntax,
         }
     }
 
     pub fn token(&self, kind: TokenKind) -> Color32 {
         c(self.syntax.color(kind))
+    }
+
+    pub fn git_color(&self, status: FileStatus) -> Color32 {
+        let g = &self.git;
+        match status {
+            FileStatus::Modified => g.modified,
+            FileStatus::Added | FileStatus::Renamed => g.added,
+            FileStatus::Untracked => g.untracked,
+            FileStatus::Deleted => g.deleted,
+            FileStatus::Conflict => g.conflict,
+            FileStatus::Ignored => g.ignored,
+        }
     }
 
     pub fn mono(&self, size: f32) -> FontId {

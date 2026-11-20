@@ -45,7 +45,12 @@ fn show_tabs(app: &mut QellApp, ui: &mut egui::Ui) {
                     let active = i == app.active;
                     let title = doc.title();
                     let fill = if active { editor_bg } else { chrome };
-                    let color = if active { text } else { text_dim };
+                    let git = doc.buffer.path().and_then(|p| app.git_status_of(p));
+                    let color = match git {
+                        Some(st) => app.palette.git_color(st),
+                        None if active => text,
+                        None => text_dim,
+                    };
                     let resp = egui::Frame::new()
                         .fill(fill)
                         .inner_margin(egui::Margin::symmetric(12, 7))
