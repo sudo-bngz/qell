@@ -64,6 +64,8 @@ bottom, and language-server completion for the languages you actually use.
 - **Plugins** — WebAssembly modules loaded from `~/.config/qell/plugins`,
   sandboxed by Wasmtime, exposing commands to the palette. See
   [`plugins/hello`](plugins/hello).
+- **Change marks in the gutter** — lines added (green), modified (blue) or
+  deleted (red wedge) since git's version of the file, updated as you type.
 - **Vim mode** (Settings → Editor, or "View: Toggle Vim Mode") — Normal,
   Insert and Visual modes in the editor, with a command line under the code;
   the file tree, tabs, terminal and minimap stay as they are.

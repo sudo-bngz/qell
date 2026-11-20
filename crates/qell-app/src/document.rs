@@ -28,6 +28,13 @@ pub struct Document {
     pub indent_unit: usize,
     /// (buffer version, tab size) the two above were computed for.
     structure_key: Option<(i32, usize)>,
+    /// The file as git has it, to mark what changed since (`None`: not
+    /// tracked, or not fetched yet).
+    pub git_base: Option<std::sync::Arc<str>>,
+    pub git_base_state: BaseState,
+    /// Per line: how it differs from `git_base`.
+    pub changes: Vec<LineChange>,
+    changes_key: Option<i32>,
     /// Rows on screen (word wrap), for the width last drawn at.
     pub wrap: WrapLayout,
     /// (buffer version, wrap width) `wrap` was computed for.
@@ -37,6 +44,58 @@ pub struct Document {
     pub goal_col: Option<usize>,
     /// The miniature beside the editor.
     pub minimap: crate::views::minimap::Minimap,
+}
+
+/// Whether git's version of a file has been asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BaseState {
+    /// Not asked yet, or out of date (git noticed changes).
+    Unknown,
+    Loading,
+    Loaded,
+}
+
+/// How a line differs from git's version of the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LineChange {
+    pub added: bool,
+    pub modified: bool,
+    /// Lines were deleted just above this one / just below it (the end).
+    pub deleted_above: bool,
+    pub deleted_below: bool,
+}
+
+/// Marks for each line of `text` compared with `base`.
+pub fn line_changes(base: &str, text: &str) -> Vec<LineChange> {
+    use similar::DiffOp;
+    let diff = similar::TextDiff::configure().timeout(std::time::Duration::from_millis(40)).diff_lines(base, text);
+    let mut marks: Vec<LineChange> = Vec::new();
+    fn at(marks: &mut Vec<LineChange>, i: usize) -> &mut LineChange {
+        if marks.len() <= i {
+            marks.resize(i + 1, LineChange::default());
+        }
+        &mut marks[i]
+    }
+    for op in diff.ops() {
+        match *op {
+            DiffOp::Equal { .. } => {}
+            DiffOp::Insert { new_index, new_len, .. } => {
+                (new_index..new_index + new_len).for_each(|l| at(&mut marks, l).added = true)
+            }
+            DiffOp::Replace { new_index, new_len, .. } => {
+                (new_index..new_index + new_len).for_each(|l| at(&mut marks, l).modified = true)
+            }
+            DiffOp::Delete { new_index, .. } => {
+                // Past the last line: mark the end of the one before.
+                if new_index >= text.lines().count() && new_index > 0 {
+                    at(&mut marks, new_index - 1).deleted_below = true;
+                } else {
+                    at(&mut marks, new_index).deleted_above = true;
+                }
+            }
+        }
+    }
+    marks
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +123,10 @@ impl Document {
             brackets: Brackets::default(),
             indent_unit: 4,
             structure_key: None,
+            git_base: None,
+            git_base_state: BaseState::Unknown,
+            changes: Vec::new(),
+            changes_key: None,
             wrap: WrapLayout::plain(1),
             wrap_key: None,
             goal_col: None,
@@ -120,6 +183,26 @@ impl Document {
         &self.spans
     }
 
+    /// Git's version of the file arrived (or there is none).
+    pub fn set_git_base(&mut self, base: Option<String>) {
+        self.git_base = base.map(Into::into);
+        self.git_base_state = BaseState::Loaded;
+        self.changes_key = None;
+    }
+
+    /// Recompute the gutter's change marks if the text changed.
+    pub fn update_changes(&mut self) {
+        let version = self.buffer.version();
+        if self.changes_key == Some(version) {
+            return;
+        }
+        self.changes_key = Some(version);
+        self.changes = match &self.git_base {
+            Some(base) if self.buffer.rope().len_bytes() <= HIGHLIGHT_LIMIT_BYTES => line_changes(base, &self.buffer.text()),
+            _ => Vec::new(),
+        };
+    }
+
     /// Lay the text out in rows of `width` columns (0: no wrapping), if the
     /// text or the width changed.
     pub fn update_wrap(&mut self, width: usize) {
@@ -168,5 +251,39 @@ impl Document {
         self.brackets =
             if code && text.len() <= HIGHLIGHT_LIMIT_BYTES { Brackets::compute(&text, &self.spans) } else { Brackets::default() };
         self.indent_unit = detect_indent_unit(text.lines(), tab_size);
+    }
+}
+
+#[cfg(test)]
+mod change_tests {
+    use super::*;
+
+    fn kinds(base: &str, text: &str) -> String {
+        let marks = line_changes(base, text);
+        (0..text.lines().count().max(marks.len()))
+            .map(|i| {
+                let m = marks.get(i).copied().unwrap_or_default();
+                let c = if m.added {
+                    'A'
+                } else if m.modified {
+                    'M'
+                } else {
+                    '.'
+                };
+                format!("{}{c}{}", if m.deleted_above { "^" } else { "" }, if m.deleted_below { "v" } else { "" })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn added_modified_and_deleted_lines() {
+        let base = "a\nb\nc\nd\n";
+        assert_eq!(kinds(base, base), "....");
+        assert_eq!(kinds(base, "a\nb\nNEW\nc\nd\n"), "..A..");
+        assert_eq!(kinds(base, "a\nB\nc\nd\n"), ".M..");
+        assert_eq!(kinds(base, "a\nc\nd\n"), ".^..");
+        assert_eq!(kinds(base, "a\nb\nc\n"), "...v");
+        assert_eq!(kinds(base, "b\nc\nd\n"), "^...");
+        assert_eq!(kinds("", "x\ny\n"), "AA");
     }
 }

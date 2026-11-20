@@ -36,6 +36,8 @@ muda = { version = "0.21", default-features = false }
 trash = "5"
 # Vim mode: `/` search and `:s`.
 regex = "1"
+# Line diff against git, for the change marks in the gutter.
+similar = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Reads the clipboard for Edit → Paste in the native menu.

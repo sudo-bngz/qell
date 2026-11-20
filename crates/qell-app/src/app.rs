@@ -203,6 +203,10 @@ pub struct QellApp {
     pub searcher: qell_index::Searcher,
     pub search: views::search::SearchState,
     pub pending_nav: Option<(RequestId, NavRequest)>,
+    /// Git's version of open files, fetched off the UI thread for the
+    /// gutter's change marks.
+    git_base_tx: std::sync::mpsc::Sender<(PathBuf, Option<String>)>,
+    git_base_rx: std::sync::mpsc::Receiver<(PathBuf, Option<String>)>,
     /// Vim mode state, and what its commands asked the app to do.
     pub vim: crate::vim::Vim,
     pub pending_vim: Vec<crate::vim::Action>,
@@ -266,6 +270,7 @@ impl QellApp {
         };
         let indexer = qell_index::Indexer::new(root.clone(), config.ignore.clone(), Some(wake.clone()));
         let searcher = qell_index::Searcher::new(indexer.index(), Some(wake));
+        let (git_base_tx, git_base_rx) = std::sync::mpsc::channel();
         let mut app = Self {
             applied_config: config.clone(),
             config_dirty_since: None,
@@ -275,6 +280,8 @@ impl QellApp {
             searcher,
             search: Default::default(),
             pending_nav: None,
+            git_base_tx,
+            git_base_rx,
             vim: crate::vim::Vim::new(),
             pending_vim: Vec::new(),
             tree_edit: None,
@@ -879,6 +886,7 @@ impl QellApp {
             let new = if rest.as_os_str().is_empty() { to.to_path_buf() } else { to.join(rest) };
             self.lsp.did_close(&self.docs[i].buffer);
             self.docs[i].buffer.set_path(new);
+            self.docs[i].git_base_state = crate::document::BaseState::Unknown;
         }
     }
 
@@ -1059,6 +1067,44 @@ impl QellApp {
             // in the tree too.
             self.tree_cache.clear();
             self.git_status = st;
+            // A commit, a checkout, staging…: what files are compared with
+            // may have changed. Keep the marks until the new version is in.
+            for d in &mut self.docs {
+                d.git_base_state = crate::document::BaseState::Unknown;
+            }
+        }
+        self.handle_git_base(ctx);
+    }
+
+    /// Fetch git's version of the active file when it isn't known (one
+    /// `git show`, in a thread), and take in the ones that arrived.
+    fn handle_git_base(&mut self, ctx: &Context) {
+        use crate::document::BaseState;
+        for (path, base) in self.git_base_rx.try_iter() {
+            for d in self.docs.iter_mut().filter(|d| d.buffer.path() == Some(path.as_path())) {
+                d.set_git_base(base.clone());
+            }
+        }
+        let on = self.config.git_status;
+        let Some(doc) = self.docs.get_mut(self.active) else { return };
+        if !on || doc.read_only {
+            doc.git_base = None;
+            doc.changes.clear();
+            return;
+        }
+        if doc.git_base_state != BaseState::Unknown {
+            return;
+        }
+        let Some(path) = doc.buffer.path().map(Path::to_path_buf) else { return };
+        doc.git_base_state = BaseState::Loading;
+        let (tx, ctx) = (self.git_base_tx.clone(), ctx.clone());
+        let spawned = std::thread::Builder::new().name("qell-git-base".into()).spawn(move || {
+            let base = qell_git::index_text(&path);
+            let _ = tx.send((path, base));
+            ctx.request_repaint();
+        });
+        if spawned.is_err() {
+            doc.git_base_state = BaseState::Loaded;
         }
     }
 
