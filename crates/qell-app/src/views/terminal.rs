@@ -2,7 +2,7 @@
 
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Color32, Context, Event, Key, Pos2, Rect, Sense, Stroke, Vec2};
-use qell_term::{Key as TermKey, Snapshot};
+use qell_term::{Key as TermKey, SelectionKind, Snapshot, Terminal};
 
 use crate::app::{Focus, QellApp};
 use crate::commands::Command;
@@ -129,6 +129,33 @@ fn shorten(s: &str, max: usize) -> String {
     format!("…{tail}")
 }
 
+/// Right-click menu of the terminal.
+fn context_menu(ui: &mut egui::Ui, term: &Terminal, focus: &mut Focus) {
+    let copy = egui::Button::new("Copy").shortcut_text(if cfg!(target_os = "macos") { "⌘C" } else { "Ctrl+Shift+C" });
+    if ui.add_enabled(term.selection_text().is_some(), copy).clicked() {
+        if let Some(t) = term.selection_text() {
+            ui.ctx().copy_text(t);
+        }
+        ui.close();
+    }
+    let paste = egui::Button::new("Paste").shortcut_text(if cfg!(target_os = "macos") { "⌘V" } else { "Ctrl+Shift+V" });
+    if ui.add(paste).clicked() {
+        // Arrives next frame as a paste event, which the terminal handles.
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+        *focus = Focus::Terminal;
+        ui.close();
+    }
+    if ui.button("Select All").clicked() {
+        term.select_all();
+        ui.close();
+    }
+    ui.separator();
+    if ui.button("Clear Terminal").clicked() {
+        term.clear();
+        ui.close();
+    }
+}
+
 fn to_color(c: [u8; 3]) -> Color32 {
     Color32::from_rgb(c[0], c[1], c[2])
 }
@@ -158,6 +185,45 @@ fn show_grid(app: &mut QellApp, ui: &mut egui::Ui) {
         super::hold_keyboard(ui, ui.id().with("terminal_keyboard"), rect.min);
     }
 
+    // ---- mouse selection ----
+    // Screen cell under a point, and whether it's the cell's right half.
+    let cell_at = |p: Pos2| {
+        let fx = ((p.x - rect.left()) / char_width).max(0.0);
+        let col = (fx.floor() as usize).min(cols - 1);
+        let row = (((p.y - rect.top()) / row_height).floor().max(0.0) as usize).min(rows - 1);
+        (col, row, fx.fract() > 0.5)
+    };
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
+    }
+    if let Some(p) = resp.interact_pointer_pos() {
+        if resp.triple_clicked() {
+            let (c, r, _) = cell_at(p);
+            term.select_start(c, r, false, SelectionKind::Lines);
+        } else if resp.double_clicked() {
+            let (c, r, _) = cell_at(p);
+            term.select_start(c, r, false, SelectionKind::Words);
+        } else if resp.drag_started() {
+            // From where the button went down, not where the drag was noticed.
+            let origin = ui.input(|i| i.pointer.press_origin()).unwrap_or(p);
+            let (c, r, right) = cell_at(origin);
+            term.select_start(c, r, right, SelectionKind::Chars);
+        } else if resp.dragged() {
+            // Past the top or bottom edge: scroll to extend the selection.
+            if p.y < rect.top() {
+                term.scroll(1);
+            } else if p.y > rect.bottom() {
+                term.scroll(-1);
+            }
+            let (c, r, right) = cell_at(p);
+            term.select_update(c, r, right);
+            ui.ctx().request_repaint();
+        } else if resp.clicked() {
+            term.clear_selection();
+        }
+    }
+    resp.context_menu(|ui| context_menu(ui, term, &mut app.focus));
+
     // ---- input ----
     if focused {
         let events = ui.input(|i| i.events.clone());
@@ -169,10 +235,21 @@ fn show_grid(app: &mut QellApp, ui: &mut egui::Ui) {
                     if mods.ctrl && !mods.alt {
                         continue;
                     }
+                    term.clear_selection();
                     term.send_text(t);
                     term.scroll_to_bottom();
                 }
-                Event::Paste(t) => term.send_text(t),
+                Event::Paste(t) => {
+                    term.clear_selection();
+                    term.send_text(t);
+                }
+                // With a selection, Copy copies it: ⌘C on macOS, and Ctrl+C
+                // or Ctrl+Shift+C elsewhere (as in VS Code on Windows).
+                Event::Copy if term.selection_text().is_some() => {
+                    if let Some(t) = term.selection_text() {
+                        ui.ctx().copy_text(t);
+                    }
+                }
                 // On Linux and Windows, Ctrl+C reaches us as Copy: in a
                 // terminal it means interrupt, as in VS Code. On macOS Copy
                 // is ⌘C (Ctrl+C arrives as a key and is handled below), and
@@ -252,7 +329,7 @@ fn show_grid(app: &mut QellApp, ui: &mut egui::Ui) {
             }
         };
         for (col, cell) in row.iter().take(cols).enumerate() {
-            let bg = to_color(cell.bg);
+            let bg = if cell.selected { app.palette.selection } else { to_color(cell.bg) };
             if bg != default_bg {
                 let x = rect.left() + col as f32 * char_width;
                 painter.rect_filled(Rect::from_min_size(Pos2::new(x, y), Vec2::new(char_width, row_height)), 0.0, bg);
