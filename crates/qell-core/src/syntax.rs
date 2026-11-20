@@ -12,15 +12,18 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::LazyLock;
 
 use tree_sitter::Language as TsLanguage;
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
 
 /// Capture names we recognise, in priority order. The index in this list is
 /// what tree-sitter-highlight hands back, so [`TokenKind::from_index`] must
-/// stay in sync with it.
+/// stay in sync with it. A capture is matched to the entry sharing the most
+/// dot-separated parts, so `@keyword.conditional` falls back to `keyword`.
 const CAPTURE_NAMES: &[&str] = &[
     "attribute",
+    "boolean",
     "comment",
     "comment.documentation",
     "constant",
@@ -42,12 +45,38 @@ const CAPTURE_NAMES: &[&str] = &[
     "punctuation.delimiter",
     "punctuation.special",
     "string",
+    "string.escape",
     "string.special",
+    "string.special.key",
+    "tag",
     "type",
     "type.builtin",
     "variable",
     "variable.builtin",
     "variable.parameter",
+    // Markup (Markdown, XML). Older grammars use `text.*`, newer `markup.*`.
+    "text.title",
+    "markup.heading",
+    "text.emphasis",
+    "markup.italic",
+    "text.strong",
+    "markup.bold",
+    "text.literal",
+    "markup.raw",
+    "text.uri",
+    "text.reference",
+    "markup.link",
+    // Older nvim-style names still used by some grammars (Makefile, CSS).
+    "conditional",
+    "repeat",
+    "include",
+    "exception",
+    "import",
+    "media",
+    "keyframes",
+    "supports",
+    "namespace",
+    "charset",
 ];
 
 /// The coarse token categories the UI colours.
@@ -67,28 +96,70 @@ pub enum TokenKind {
     Type,
     Variable,
     Parameter,
+    /// HTML / XML element names.
+    Tag,
+    /// Markdown headings.
+    Heading,
+    /// Italic text (rendered in italics).
+    Emphasis,
+    /// Bold text.
+    Strong,
+    /// URLs and link targets (rendered underlined).
+    Link,
     Text,
 }
 
 impl TokenKind {
+    pub const ALL: &'static [TokenKind] = {
+        use TokenKind::*;
+        &[
+            Attribute,
+            Comment,
+            Constant,
+            Function,
+            Keyword,
+            Label,
+            Number,
+            Operator,
+            Property,
+            Punctuation,
+            String,
+            Type,
+            Variable,
+            Parameter,
+            Tag,
+            Heading,
+            Emphasis,
+            Strong,
+            Link,
+            Text,
+        ]
+    };
+
     fn from_index(i: usize) -> TokenKind {
         use TokenKind::*;
         match CAPTURE_NAMES.get(i).copied().unwrap_or("") {
             "attribute" => Attribute,
             "comment" | "comment.documentation" => Comment,
-            "constant" | "constant.builtin" | "escape" => Constant,
+            "boolean" | "constant" | "constant.builtin" | "escape" | "string.escape" => Constant,
             "constructor" => Type,
             "function" | "function.builtin" | "function.macro" | "function.method" | "function.special" => Function,
-            "keyword" => Keyword,
+            "keyword" | "conditional" | "repeat" | "include" | "exception" | "import" | "media" | "keyframes" | "supports"
+            | "namespace" | "charset" => Keyword,
             "label" => Label,
             "number" => Number,
             "operator" => Operator,
-            "property" => Property,
+            "property" | "string.special.key" => Property,
             "punctuation.bracket" | "punctuation.delimiter" | "punctuation.special" => Punctuation,
-            "string" | "string.special" => String,
+            "string" | "string.special" | "text.literal" | "markup.raw" => String,
+            "tag" => Tag,
             "type" | "type.builtin" => Type,
             "variable" | "variable.builtin" => Variable,
             "variable.parameter" => Parameter,
+            "text.title" | "markup.heading" => Heading,
+            "text.emphasis" | "markup.italic" => Emphasis,
+            "text.strong" | "markup.bold" => Strong,
+            "text.uri" | "text.reference" | "markup.link" => Link,
             _ => Text,
         }
     }
@@ -103,14 +174,23 @@ pub struct HighlightSpan {
 }
 
 /// Static description of a language.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Language {
     /// Stable identifier, also the LSP `languageId`.
     pub id: &'static str,
     pub name: &'static str,
     pub extensions: &'static [&'static str],
+    /// Exact file names (`Makefile`, `.bashrc`) for files without a telling
+    /// extension.
+    pub filenames: &'static [&'static str],
+    /// Other names the language goes by, used to resolve injections such as
+    /// a Markdown code fence tagged `sh` or `yml`.
+    pub aliases: &'static [&'static str],
     /// Command line of the language server, if one is known.
     pub lsp: Option<&'static [&'static str]>,
+    /// Internal languages (Markdown's inline grammar) are only reachable
+    /// through injections, never picked for a file.
+    pub hidden: bool,
     grammar: Option<Grammar>,
 }
 
@@ -122,11 +202,32 @@ struct Grammar {
     locals: &'static str,
 }
 
+impl Grammar {
+    fn new(language: TsLanguage, highlights: &'static str) -> Self {
+        Self { language, highlights, injections: "", locals: "" }
+    }
+
+    fn injections(mut self, q: &'static str) -> Self {
+        self.injections = q;
+        self
+    }
+
+    fn locals(mut self, q: &'static str) -> Self {
+        self.locals = q;
+        self
+    }
+}
+
 impl std::fmt::Debug for Grammar {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("Grammar")
     }
 }
+
+/// Upstream Makefile highlights plus Qell's additions.
+static MAKE_HIGHLIGHTS: LazyLock<String> = LazyLock::new(|| {
+    format!("{}\n{}", tree_sitter_make::HIGHLIGHTS_QUERY, include_str!("../queries/makefile-highlights-extra.scm"))
+});
 
 /// Every language Qell ships with. Adding a language is adding one entry
 /// here (plus a grammar crate in `Cargo.toml`).
@@ -136,98 +237,224 @@ pub fn builtin_languages() -> Vec<Language> {
             id: "rust",
             name: "Rust",
             extensions: &["rs"],
+            aliases: &["rs"],
             lsp: Some(&["rust-analyzer"]),
-            grammar: Some(Grammar {
-                language: tree_sitter_rust::LANGUAGE.into(),
-                highlights: tree_sitter_rust::HIGHLIGHTS_QUERY,
-                injections: tree_sitter_rust::INJECTIONS_QUERY,
-                locals: "",
-            }),
+            grammar: Some(
+                Grammar::new(tree_sitter_rust::LANGUAGE.into(), tree_sitter_rust::HIGHLIGHTS_QUERY)
+                    .injections(tree_sitter_rust::INJECTIONS_QUERY),
+            ),
+            ..Default::default()
         },
         Language {
             id: "c",
             name: "C",
             extensions: &["c", "h"],
             lsp: Some(&["clangd"]),
-            grammar: Some(Grammar {
-                language: tree_sitter_c::LANGUAGE.into(),
-                highlights: tree_sitter_c::HIGHLIGHT_QUERY,
-                injections: "",
-                locals: "",
-            }),
+            grammar: Some(Grammar::new(tree_sitter_c::LANGUAGE.into(), tree_sitter_c::HIGHLIGHT_QUERY)),
+            ..Default::default()
         },
         Language {
             id: "go",
             name: "Go",
             extensions: &["go"],
+            aliases: &["golang"],
             lsp: Some(&["gopls"]),
-            grammar: Some(Grammar {
-                language: tree_sitter_go::LANGUAGE.into(),
-                highlights: tree_sitter_go::HIGHLIGHTS_QUERY,
-                injections: "",
-                locals: "",
-            }),
+            grammar: Some(Grammar::new(tree_sitter_go::LANGUAGE.into(), tree_sitter_go::HIGHLIGHTS_QUERY)),
+            ..Default::default()
         },
         Language {
             id: "javascript",
             name: "JavaScript",
             extensions: &["js", "mjs", "cjs", "jsx"],
+            aliases: &["js", "jsx", "node"],
             lsp: Some(&["typescript-language-server", "--stdio"]),
-            grammar: Some(Grammar {
-                language: tree_sitter_javascript::LANGUAGE.into(),
-                highlights: tree_sitter_javascript::HIGHLIGHT_QUERY,
-                injections: tree_sitter_javascript::INJECTIONS_QUERY,
-                locals: tree_sitter_javascript::LOCALS_QUERY,
-            }),
+            grammar: Some(
+                Grammar::new(tree_sitter_javascript::LANGUAGE.into(), tree_sitter_javascript::HIGHLIGHT_QUERY)
+                    .injections(tree_sitter_javascript::INJECTIONS_QUERY)
+                    .locals(tree_sitter_javascript::LOCALS_QUERY),
+            ),
+            ..Default::default()
         },
         Language {
             id: "typescript",
             name: "TypeScript",
             extensions: &["ts", "mts", "cts"],
+            aliases: &["ts"],
             lsp: Some(&["typescript-language-server", "--stdio"]),
-            grammar: Some(Grammar {
-                language: tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-                highlights: tree_sitter_typescript::HIGHLIGHTS_QUERY,
-                injections: "",
-                locals: tree_sitter_typescript::LOCALS_QUERY,
-            }),
+            grammar: Some(
+                Grammar::new(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(), tree_sitter_typescript::HIGHLIGHTS_QUERY)
+                    .locals(tree_sitter_typescript::LOCALS_QUERY),
+            ),
+            ..Default::default()
         },
         Language {
             id: "typescriptreact",
             name: "TSX",
             extensions: &["tsx"],
+            aliases: &["tsx"],
             lsp: Some(&["typescript-language-server", "--stdio"]),
-            grammar: Some(Grammar {
-                language: tree_sitter_typescript::LANGUAGE_TSX.into(),
-                highlights: tree_sitter_typescript::HIGHLIGHTS_QUERY,
-                injections: "",
-                locals: tree_sitter_typescript::LOCALS_QUERY,
-            }),
+            grammar: Some(
+                Grammar::new(tree_sitter_typescript::LANGUAGE_TSX.into(), tree_sitter_typescript::HIGHLIGHTS_QUERY)
+                    .locals(tree_sitter_typescript::LOCALS_QUERY),
+            ),
+            ..Default::default()
         },
         Language {
             id: "terraform",
             name: "Terraform / HCL",
             extensions: &["tf", "tfvars", "hcl"],
+            filenames: &[".terraformrc", "terraform.rc"],
+            aliases: &["tf", "hcl"],
             lsp: Some(&["terraform-ls", "serve"]),
-            grammar: Some(Grammar {
-                language: tree_sitter_hcl::LANGUAGE.into(),
-                highlights: include_str!("../queries/hcl-highlights.scm"),
-                injections: "",
-                locals: "",
-            }),
+            grammar: Some(Grammar::new(tree_sitter_hcl::LANGUAGE.into(), include_str!("../queries/hcl-highlights.scm"))),
+            ..Default::default()
         },
-        // VCL (Varnish) has no maintained tree-sitter grammar yet; it is
-        // recognised so files open with the right language id and an LSP
-        // can be attached, but it is rendered as plain text for now.
-        Language { id: "vcl", name: "VCL", extensions: &["vcl"], lsp: None, grammar: None },
-        Language { id: "plaintext", name: "Plain Text", extensions: &["txt", "md", "log"], lsp: None, grammar: None },
+        Language {
+            id: "vcl",
+            name: "VCL",
+            extensions: &["vcl"],
+            aliases: &["varnish"],
+            grammar: Some(Grammar::new(tree_sitter_vcl::LANGUAGE.into(), include_str!("../queries/vcl-highlights.scm"))),
+            ..Default::default()
+        },
+        Language {
+            id: "markdown",
+            name: "Markdown",
+            extensions: &["md", "markdown", "mdown", "mkd"],
+            aliases: &["md"],
+            grammar: Some(
+                Grammar::new(tree_sitter_md::LANGUAGE.into(), tree_sitter_md::HIGHLIGHT_QUERY_BLOCK)
+                    .injections(include_str!("../queries/markdown-injections.scm")),
+            ),
+            ..Default::default()
+        },
+        Language {
+            id: "markdown_inline",
+            name: "Markdown (inline)",
+            hidden: true,
+            grammar: Some(
+                Grammar::new(tree_sitter_md::INLINE_LANGUAGE.into(), tree_sitter_md::HIGHLIGHT_QUERY_INLINE)
+                    .injections(tree_sitter_md::INJECTION_QUERY_INLINE),
+            ),
+            ..Default::default()
+        },
+        Language {
+            id: "html",
+            name: "HTML",
+            extensions: &["html", "htm", "xhtml"],
+            grammar: Some(
+                Grammar::new(tree_sitter_html::LANGUAGE.into(), tree_sitter_html::HIGHLIGHTS_QUERY)
+                    .injections(tree_sitter_html::INJECTIONS_QUERY),
+            ),
+            ..Default::default()
+        },
+        Language {
+            id: "css",
+            name: "CSS",
+            extensions: &["css"],
+            grammar: Some(Grammar::new(tree_sitter_css::LANGUAGE.into(), tree_sitter_css::HIGHLIGHTS_QUERY)),
+            ..Default::default()
+        },
+        Language {
+            id: "json",
+            name: "JSON",
+            extensions: &["json", "jsonc", "json5", "geojson", "webmanifest", "tfstate"],
+            filenames: &[".babelrc", ".eslintrc", ".prettierrc", "flake.lock", "composer.lock"],
+            grammar: Some(Grammar::new(tree_sitter_json::LANGUAGE.into(), include_str!("../queries/json-highlights.scm"))),
+            ..Default::default()
+        },
+        Language {
+            id: "toml",
+            name: "TOML",
+            extensions: &["toml"],
+            filenames: &["Cargo.lock", "poetry.lock", "Pipfile", "uv.lock"],
+            grammar: Some(Grammar::new(tree_sitter_toml_ng::LANGUAGE.into(), tree_sitter_toml_ng::HIGHLIGHTS_QUERY)),
+            ..Default::default()
+        },
+        Language {
+            id: "yaml",
+            name: "YAML",
+            extensions: &["yaml", "yml"],
+            filenames: &[".clang-format", ".clang-tidy", ".clangd"],
+            aliases: &["yml"],
+            grammar: Some(Grammar::new(tree_sitter_yaml::LANGUAGE.into(), tree_sitter_yaml::HIGHLIGHTS_QUERY)),
+            ..Default::default()
+        },
+        Language {
+            id: "xml",
+            name: "XML",
+            extensions: &["xml", "svg", "xsd", "xsl", "xslt", "plist", "csproj", "fsproj", "props", "targets", "rss", "atom"],
+            grammar: Some(Grammar::new(tree_sitter_xml::LANGUAGE_XML.into(), tree_sitter_xml::XML_HIGHLIGHT_QUERY)),
+            ..Default::default()
+        },
+        Language {
+            id: "ini",
+            name: "INI",
+            extensions: &["ini", "cfg", "properties", "desktop", "service", "timer", "socket", "editorconfig"],
+            filenames: &[".editorconfig", ".gitconfig", ".npmrc", ".pylintrc", "setup.cfg", "tox.ini", "config"],
+            aliases: &["dosini", "gitconfig"],
+            grammar: Some(Grammar::new(tree_sitter_ini::LANGUAGE.into(), tree_sitter_ini::HIGHLIGHTS_QUERY)),
+            ..Default::default()
+        },
+        Language {
+            id: "shellscript",
+            name: "Shell Script",
+            extensions: &["sh", "bash", "zsh", "ksh", "env", "envrc"],
+            filenames: &[
+                ".bashrc",
+                ".bash_profile",
+                ".bash_aliases",
+                ".bash_logout",
+                ".profile",
+                ".zshrc",
+                ".zshenv",
+                ".zprofile",
+                ".env",
+                ".envrc",
+                "PKGBUILD",
+            ],
+            aliases: &["sh", "bash", "zsh", "shell", "console", "shellsession"],
+            grammar: Some(Grammar::new(tree_sitter_bash::LANGUAGE.into(), tree_sitter_bash::HIGHLIGHT_QUERY)),
+            ..Default::default()
+        },
+        Language {
+            id: "makefile",
+            name: "Makefile",
+            extensions: &["mk", "mak"],
+            filenames: &["Makefile", "makefile", "GNUmakefile"],
+            aliases: &["make"],
+            grammar: Some(
+                Grammar::new(tree_sitter_make::LANGUAGE.into(), &MAKE_HIGHLIGHTS)
+                    .injections(include_str!("../queries/makefile-injections.scm")),
+            ),
+            ..Default::default()
+        },
+        Language {
+            id: "nginx",
+            name: "Nginx",
+            extensions: &["nginx", "nginxconf"],
+            filenames: &["nginx.conf", "mime.types", "fastcgi_params", "uwsgi_params", "scgi_params"],
+            grammar: Some(Grammar::new(tree_sitter_nginx::LANGUAGE.into(), include_str!("../queries/nginx-highlights.scm"))),
+            ..Default::default()
+        },
+        Language { id: "plaintext", name: "Plain Text", extensions: &["txt", "log"], ..Default::default() },
     ]
 }
 
-/// Language id for a file path, by extension.
+/// Language id for a file path: by exact file name first (`Makefile`,
+/// `.bashrc`), then `.env.*` files, then by extension.
 pub fn language_for_path(path: &Path) -> Option<String> {
+    let languages = builtin_languages();
+    let name = path.file_name()?.to_str()?;
+    if let Some(l) = languages.iter().find(|l| l.filenames.contains(&name)) {
+        return Some(l.id.to_string());
+    }
+    // .env.local, .env.production, …
+    if name.starts_with(".env.") {
+        return Some("shellscript".into());
+    }
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
-    builtin_languages().into_iter().find(|l| l.extensions.contains(&ext.as_str())).map(|l| l.id.to_string())
+    languages.into_iter().find(|l| !l.hidden && l.extensions.contains(&ext.as_str())).map(|l| l.id.to_string())
 }
 
 /// Compiled grammars plus a highlighter. One per editor is plenty; it is
@@ -236,6 +463,8 @@ pub fn language_for_path(path: &Path) -> Option<String> {
 pub struct LanguageRegistry {
     languages: Vec<Language>,
     configs: HashMap<&'static str, HighlightConfiguration>,
+    /// Lower-cased id, alias or extension → language id, for injections.
+    names: HashMap<String, &'static str>,
     highlighter: Highlighter,
 }
 
@@ -259,7 +488,14 @@ impl LanguageRegistry {
                 Err(e) => log::error!("failed to compile highlight query for {}: {e}", lang.id),
             }
         }
-        Self { languages, configs, highlighter: Highlighter::new() }
+        let mut names = HashMap::new();
+        for lang in &languages {
+            // Ids win over aliases, aliases over extensions.
+            for n in lang.extensions.iter().chain(lang.aliases).chain([&lang.id]) {
+                names.insert(n.to_ascii_lowercase(), lang.id);
+            }
+        }
+        Self { languages, configs, names, highlighter: Highlighter::new() }
     }
 
     pub fn languages(&self) -> &[Language] {
@@ -275,7 +511,11 @@ impl LanguageRegistry {
     pub fn highlight(&mut self, lang_id: &str, source: &str) -> Vec<HighlightSpan> {
         let Some(cfg) = self.configs.get(lang_id) else { return Vec::new() };
         let configs = &self.configs;
-        let events = match self.highlighter.highlight(cfg, source.as_bytes(), None, None, |name| configs.get(name)) {
+        let names = &self.names;
+        // Injected languages (a ```sh fence, <script> in HTML) are named by
+        // whatever the author wrote, so resolve aliases too.
+        let injected = |name: &str| names.get(&name.trim().to_ascii_lowercase()).and_then(|id| configs.get(id));
+        let events = match self.highlighter.highlight(cfg, source.as_bytes(), None, None, injected) {
             Ok(ev) => ev,
             Err(e) => {
                 log::warn!("highlight error for {lang_id}: {e}");
@@ -337,6 +577,11 @@ impl Theme {
             (Type, [0x4e, 0xc9, 0xb0]),
             (Variable, [0x9c, 0xdc, 0xfe]),
             (Parameter, [0x9c, 0xdc, 0xfe]),
+            (Tag, [0x56, 0x9c, 0xd6]),
+            (Heading, [0x56, 0x9c, 0xd6]),
+            (Emphasis, [0xd4, 0xd4, 0xd4]),
+            (Strong, [0x56, 0x9c, 0xd6]),
+            (Link, [0x4f, 0xc1, 0xff]),
             (Text, [0xd4, 0xd4, 0xd4]),
         ]);
         Self {
@@ -389,6 +634,81 @@ mod tests {
         let spans = reg.highlight("terraform", src);
         assert!(spans.iter().any(|s| s.kind == TokenKind::Keyword && &src[s.start..s.end] == "resource"));
         assert!(spans.iter().any(|s| s.kind == TokenKind::String));
+    }
+
+    /// Kind of the first span covering exactly `token` in `src`.
+    fn kind_of(reg: &mut LanguageRegistry, lang: &str, src: &str, token: &str) -> Option<TokenKind> {
+        let spans = reg.highlight(lang, src);
+        spans.iter().find(|s| src[s.start..s.end].trim() == token).map(|s| s.kind)
+    }
+
+    #[test]
+    fn config_and_markup_languages_are_highlighted() {
+        use TokenKind::*;
+        let mut reg = LanguageRegistry::new();
+        let cases: &[(&str, &str, &str, &[TokenKind])] = &[
+            ("json", r#"{"name": "qell", "n": 1, "ok": true}"#, r#""name""#, &[Property]),
+            ("json", r#"{"name": "qell", "n": 1, "ok": true}"#, "true", &[Constant]),
+            ("toml", "[package]\nname = \"qell\" # c\n", "name", &[Property]),
+            ("toml", "[package]\nname = \"qell\" # c\n", "# c", &[Comment]),
+            ("yaml", "key: value\nlist:\n  - 3\n", "key", &[Property]),
+            ("yaml", "key: value\nlist:\n  - 3\n", "3", &[Number]),
+            ("html", "<div class=\"a\">hi</div>", "div", &[Tag]),
+            ("html", "<div class=\"a\">hi</div>", "class", &[Attribute]),
+            ("css", "body { color: red; }", "color", &[Property]),
+            ("xml", "<root attr=\"1\"><a/></root>", "root", &[Tag]),
+            ("ini", "[core]\neditor = vim\n", "editor", &[Property]),
+            ("shellscript", "export FOO=bar # set\necho \"$FOO\"\n", "# set", &[Comment]),
+            ("shellscript", "if true; then echo hi; fi\n", "if", &[Keyword]),
+            ("shellscript", "PORT=8080\n", "PORT", &[Property, Variable]),
+            ("makefile", "all: build\n\tcargo build\n", "all", &[Function]),
+            ("makefile", "build: dep\n\tcargo build\n", "build", &[Function]),
+            ("makefile", "build: dep\n\tif true; then cargo build; fi\n", "if", &[Keyword]),
+            ("vcl", "vcl 4.1;\nsub vcl_recv {\n  return (pass);\n}\n", "sub", &[Keyword]),
+            ("nginx", "server {\n  listen 80;\n}\n", "listen", &[Keyword, Property, Function, Variable]),
+            ("markdown", "# Title\n\nSome *em* text.\n", "Title", &[Heading]),
+            ("markdown", "# Title\n\nSome *em* text.\n", "em", &[Emphasis]),
+        ];
+        let mut failures = Vec::new();
+        for (lang, src, token, expected) in cases {
+            let got = kind_of(&mut reg, lang, src, token);
+            if !got.is_some_and(|k| expected.contains(&k)) {
+                let spans: Vec<_> = reg.highlight(lang, src).iter().map(|s| (&src[s.start..s.end], s.kind)).collect();
+                failures.push(format!("{lang}: {token:?} was {got:?}, expected {expected:?}; spans {spans:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn markdown_code_fences_use_the_fenced_language() {
+        let mut reg = LanguageRegistry::new();
+        // `sh` is an alias, not the language id.
+        let src = "Run:\n\n```sh\nif true; then echo hi; fi\n```\n\n```rust\nfn main() {}\n```\n";
+        assert_eq!(kind_of(&mut reg, "markdown", src, "if"), Some(TokenKind::Keyword));
+        assert_eq!(kind_of(&mut reg, "markdown", src, "fn"), Some(TokenKind::Keyword));
+    }
+
+    #[test]
+    fn html_script_is_javascript() {
+        let mut reg = LanguageRegistry::new();
+        let src = "<script>const x = 1;</script>";
+        assert_eq!(kind_of(&mut reg, "html", src, "const"), Some(TokenKind::Keyword));
+    }
+
+    #[test]
+    fn filename_lookup() {
+        let id = |p: &str| language_for_path(Path::new(p));
+        assert_eq!(id("Makefile").as_deref(), Some("makefile"));
+        assert_eq!(id("/home/me/.bashrc").as_deref(), Some("shellscript"));
+        assert_eq!(id(".env").as_deref(), Some("shellscript"));
+        assert_eq!(id(".env.production").as_deref(), Some("shellscript"));
+        assert_eq!(id("Cargo.lock").as_deref(), Some("toml"));
+        assert_eq!(id("README.md").as_deref(), Some("markdown"));
+        assert_eq!(id("docker-compose.yml").as_deref(), Some("yaml"));
+        assert_eq!(id("tsconfig.json").as_deref(), Some("json"));
+        assert_eq!(id("/etc/nginx/nginx.conf").as_deref(), Some("nginx"));
+        assert_eq!(id(".gitconfig").as_deref(), Some("ini"));
     }
 
     #[test]

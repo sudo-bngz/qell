@@ -92,6 +92,19 @@ fn show_tabs(app: &mut QellApp, ui: &mut egui::Ui) {
     });
 }
 
+/// Text format for a token: its colour, plus italics for emphasis and an
+/// underline for links (Markdown).
+fn token_format(kind: qell_core::TokenKind, font_id: egui::FontId, color: Color32) -> TextFormat {
+    use qell_core::TokenKind;
+    TextFormat {
+        font_id,
+        color,
+        italics: kind == TokenKind::Emphasis,
+        underline: if kind == TokenKind::Link { Stroke::new(1.0_f32, color.gamma_multiply(0.6)) } else { Stroke::NONE },
+        ..Default::default()
+    }
+}
+
 /// Per-line view of the highlight spans: binary search for the first span
 /// that could overlap a byte range.
 fn spans_in(spans: &[HighlightSpan], start: usize, end: usize) -> &[HighlightSpan] {
@@ -334,26 +347,8 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
     let palette_cursor = app.palette.cursor;
     let palette_err = app.palette.error;
     let palette_warn = app.palette.warning;
-    let token_colors: Vec<(qell_core::TokenKind, Color32)> = [
-        qell_core::TokenKind::Attribute,
-        qell_core::TokenKind::Comment,
-        qell_core::TokenKind::Constant,
-        qell_core::TokenKind::Function,
-        qell_core::TokenKind::Keyword,
-        qell_core::TokenKind::Label,
-        qell_core::TokenKind::Number,
-        qell_core::TokenKind::Operator,
-        qell_core::TokenKind::Property,
-        qell_core::TokenKind::Punctuation,
-        qell_core::TokenKind::String,
-        qell_core::TokenKind::Type,
-        qell_core::TokenKind::Variable,
-        qell_core::TokenKind::Parameter,
-        qell_core::TokenKind::Text,
-    ]
-    .into_iter()
-    .map(|k| (k, app.palette.token(k)))
-    .collect();
+    let token_colors: Vec<(qell_core::TokenKind, Color32)> =
+        qell_core::TokenKind::ALL.iter().copied().map(|k| (k, app.palette.token(k))).collect();
     let color_of =
         |k: qell_core::TokenKind| token_colors.iter().find(|(kk, _)| *kk == k).map(|(_, c)| *c).unwrap_or(palette_text);
 
@@ -454,11 +449,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                         );
                     }
                     if s1 > s0 && line_text.is_char_boundary(s0) && line_text.is_char_boundary(s1) {
-                        job.append(
-                            &line_text[s0..s1],
-                            0.0,
-                            TextFormat { font_id: font.clone(), color: color_of(s.kind), ..Default::default() },
-                        );
+                        job.append(&line_text[s0..s1], 0.0, token_format(s.kind, font.clone(), color_of(s.kind)));
                         at = s1;
                     }
                 }

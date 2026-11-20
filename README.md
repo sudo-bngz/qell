@@ -4,17 +4,20 @@ A minimalist code editor in Rust. Think VSCodium's look, without the
 Electron: one native window, a file tree, highlighted code, a terminal at the
 bottom, and language-server completion for the languages you actually use.
 
-> Status: early. It opens, edits and saves files, highlights Rust, C, Go,
-> JavaScript, TypeScript and Terraform, completes code through LSP, and runs
-> your shell. Expect rough edges.
+> Status: early. It opens, edits and saves files, highlights about twenty
+> languages and config formats, completes code through LSP, shows git
+> status and runs your shells. Expect rough edges.
 
 ## Features
 
 - **Editor** — rope-backed buffer, multi-tab, undo/redo, word movement,
   auto-indent, selection, line/column status.
 - **Syntax highlighting** — tree-sitter grammars for Rust, C, Go,
-  JavaScript, TypeScript/TSX and HCL/Terraform. VCL opens as plain text until
-  a grammar exists.
+  JavaScript, TypeScript/TSX, HCL/Terraform, VCL (Varnish), Markdown, HTML,
+  CSS, JSON, TOML, YAML, XML, INI, shell scripts (including `.env` and
+  dotfiles like `.bashrc`), Makefiles and nginx config. Embedded code is
+  highlighted too: fenced code blocks in Markdown, `<script>`/`<style>` in
+  HTML, recipe lines in Makefiles.
 - **Completion & diagnostics** — a JSON-RPC LSP client that launches
   `rust-analyzer`, `clangd`, `gopls`, `typescript-language-server` or
   `terraform-ls` on demand. Errors are underlined; hover a line to read them.
