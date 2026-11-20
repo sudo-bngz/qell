@@ -94,6 +94,8 @@ bottom, and language-server completion for the languages you actually use.
   the pair at the cursor is boxed, and vertical guides mark each indentation
   level, with the block around the cursor highlighted. The indentation step
   (2, 4, tabs…) is detected per file. Both can be turned off in Settings.
+- **Session restore** — the files you had open come back when you reopen
+  the folder, with the cursor where you left it (Settings → Layout).
 - **Find and replace in the file** (`Ctrl/⌘+F`, `Ctrl+H` / `⌥⌘F`) — a bar
   over the editor with case, whole-word and regex toggles, every match
   highlighted, `Enter` / `Shift+Enter` (or `F3` / `Shift+F3`) to step

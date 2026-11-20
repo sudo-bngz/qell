@@ -39,6 +39,8 @@ pub struct Config {
     /// Folder levels searched for git repositories below the workspace
     /// (for a folder holding several repos). 0: only the workspace's own.
     pub git_scan_depth: usize,
+    /// Reopen the files that were open when Qell last closed.
+    pub restore_session: bool,
     /// Show the file tree on startup.
     pub show_sidebar: bool,
     /// Show the terminal panel on startup.
@@ -71,6 +73,7 @@ impl Default for Config {
             file_icons: true,
             git_status: true,
             git_scan_depth: 3,
+            restore_session: true,
             show_sidebar: true,
             show_terminal: true,
             shell: String::new(),
