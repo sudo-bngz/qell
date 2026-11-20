@@ -857,6 +857,13 @@ impl QellApp {
                 self.request_completion(None);
             }
             Command::ToggleSidebar => self.show_sidebar = !self.show_sidebar,
+            Command::ToggleWordWrap => {
+                self.config.word_wrap = !self.config.word_wrap;
+                self.save_config();
+                if let Some(d) = self.docs.get_mut(self.active) {
+                    d.scroll_to_cursor = true;
+                }
+            }
             Command::ShowExplorer => self.show_sidebar_view(SidebarView::Explorer),
             Command::ShowSearch => {
                 // Always shows (and focuses) Search, seeded with the selection.
@@ -1254,6 +1261,11 @@ impl QellApp {
             }
             if ctx.input_mut(|i| i.consume_shortcut(&sc)) {
                 self.pending_commands.push(cmd);
+                // On macOS ⌥<key> also types a character (⌥Z is "Ω"): the
+                // shortcut used the key, so drop the text too.
+                if sc.modifiers.alt {
+                    ctx.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Text(_))));
+                }
             }
         }
     }

@@ -20,6 +20,8 @@ pub struct Config {
     pub tab_size: usize,
     /// Ask language servers for completions while typing (not only on Ctrl+Space).
     pub auto_complete: bool,
+    /// Wrap long lines at the window's width instead of scrolling sideways.
+    pub word_wrap: bool,
     /// Colour bracket pairs by nesting depth, unmatched ones in red.
     pub bracket_pair_colors: bool,
     /// Vertical lines at each indentation level, the current block's brighter.
@@ -56,6 +58,7 @@ impl Default for Config {
             font_size: 14.0,
             tab_size: 4,
             auto_complete: true,
+            word_wrap: false,
             bracket_pair_colors: true,
             indent_guides: true,
             ui_scale: 1.0,

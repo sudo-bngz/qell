@@ -62,6 +62,9 @@ bottom, and language-server completion for the languages you actually use.
 - **Plugins** — WebAssembly modules loaded from `~/.config/qell/plugins`,
   sandboxed by Wasmtime, exposing commands to the palette. See
   [`plugins/hello`](plugins/hello).
+- **Word wrap** (`Alt+Z`, `⌥Z` on macOS, or Settings) — long lines wrap at
+  word boundaries to the window's width, continuation rows keep the line's
+  indentation, and Up/Down, the mouse and selections follow the wrapped rows.
 - **Bracket pairs and indent guides** — brackets are coloured by nesting
   depth (unmatched ones in red, brackets in strings and comments ignored),
   the pair at the cursor is boxed, and vertical guides mark each indentation
@@ -121,6 +124,7 @@ npm i -g typescript typescript-language-server
 | Undo / redo           | `Ctrl+Z` / `Ctrl+Y` |
 | Trigger completion    | `Ctrl+Space`       |
 | Toggle sidebar        | `Ctrl+B`           |
+| Toggle word wrap      | `Alt+Z`            |
 | Explorer / Source Control | `Ctrl+Shift+E` / `Ctrl+Shift+G` |
 | Toggle terminal       | `` Ctrl+` ``       |
 | New terminal          | `` Ctrl+Shift+` `` |

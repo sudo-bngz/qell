@@ -201,6 +201,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
     let tab_size = app.config.tab_size;
     let auto_complete = app.config.auto_complete;
     let bracket_colors = app.config.bracket_pair_colors;
+    let word_wrap = app.config.word_wrap;
     let indent_guides = app.config.indent_guides;
 
     let has_focus_before = app.focus == Focus::Editor && !app.modal_open();
@@ -252,6 +253,30 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                             doc.buffer.set_cursor(Position::new(target, 0), false);
                             doc.scroll_to_cursor = true;
                         }
+                        consumed_events.push(idx);
+                        continue;
+                    }
+                }
+                let vertical = matches!(
+                    ev,
+                    Event::Key { key: Key::ArrowUp | Key::ArrowDown | Key::PageUp | Key::PageDown, pressed: true, .. }
+                );
+                if !vertical && !matches!(ev, Event::PointerMoved(_) | Event::MouseMoved(_)) {
+                    doc.goal_col = None;
+                }
+                // Up/Down follow wrapped rows (when the layout is up to date).
+                let by_rows = doc.wrap.is_wrapped() && doc.wrap_is_current() && !app.completion.open;
+                if by_rows && vertical {
+                    if let Event::Key { key, modifiers, .. } = ev {
+                        let rows = match key {
+                            Key::ArrowUp => -1,
+                            Key::ArrowDown => 1,
+                            Key::PageUp => -(visible_rows as isize),
+                            _ => visible_rows as isize,
+                        };
+                        doc.move_rows(rows, modifiers.shift);
+                        doc.scroll_to_cursor = true;
+                        close_completion = true;
                         consumed_events.push(idx);
                         continue;
                     }
@@ -490,16 +515,29 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
     let color_of =
         |k: qell_core::TokenKind| token_colors.iter().find(|(kk, _)| *kk == k).map(|(_, c)| *c).unwrap_or(palette_text);
 
+    // Word wrap: as many columns as fit beside the gutter (minus the
+    // vertical scroll bar).
+    let wrap_cols = if word_wrap { ((ui.available_width() - text_x0 - 14.0) / char_width).floor().max(1.0) as usize } else { 0 };
+    app.docs[doc_idx].update_wrap(wrap_cols);
+    let row_total = app.docs[doc_idx].wrap.row_count();
+
     ui.spacing_mut().item_spacing.y = 0.0;
     let mut clicked_editor = false;
     let mut go_to_definition = false;
     let mut cursor_screen: Option<Pos2> = None;
 
     let scroll =
-        egui::ScrollArea::both().id_salt(id).auto_shrink([false, false]).show_rows(ui, row_height, line_count, |ui, range| {
+        egui::ScrollArea::both().id_salt(id).auto_shrink([false, false]).show_rows(ui, row_height, row_total, |ui, range| {
             let doc = &mut app.docs[doc_idx];
-            let max_cols = doc.buffer.rope().lines().map(|l| l.len_chars()).max().unwrap_or(0) as f32;
-            let content_w = (text_x0 + (max_cols + 4.0) * char_width).max(ui.available_width());
+            // Taken out for the frame (restored at the end) so it can be read
+            // while the buffer is changed by clicks.
+            let wl = std::mem::take(&mut doc.wrap);
+            let content_w = if wl.is_wrapped() {
+                ui.available_width()
+            } else {
+                let max_cols = doc.buffer.rope().lines().map(|l| l.len_chars()).max().unwrap_or(0) as f32;
+                (text_x0 + (max_cols + 4.0) * char_width).max(ui.available_width())
+            };
             let origin = ui.cursor().min;
             let rows_h = (range.end - range.start) as f32 * row_height;
             let (rect, resp) = ui.allocate_exact_size(Vec2::new(content_w, rows_h), Sense::click_and_drag());
@@ -507,23 +545,24 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
             let content_top = origin.y - range.start as f32 * row_height;
 
             // Mouse → cursor.
-            let pos_at = |p: Pos2| -> Position {
+            let pos_at = |b: &Buffer, p: Pos2| -> Position {
                 let row = ((p.y - content_top) / row_height).floor().max(0.0) as usize;
-                let row = row.min(line_count.saturating_sub(1));
-                let col = ((p.x - (origin.x + text_x0)) / char_width + 0.5).floor().max(0.0) as usize;
-                Position::new(row, col)
+                let x = ((p.x - (origin.x + text_x0)) / char_width + 0.5).floor().max(0.0) as usize;
+                wl.position_at(row.min(row_total.saturating_sub(1)), x, |l| b.line_len(l))
             };
             if resp.clicked() || resp.drag_started() {
                 clicked_editor = true;
                 if let Some(p) = resp.interact_pointer_pos() {
                     let shift = ui.input(|i| i.modifiers.shift);
+                    doc.goal_col = None;
                     if resp.double_clicked() {
-                        let at = pos_at(p);
+                        let at = pos_at(&doc.buffer, p);
                         doc.buffer.set_cursor(at, false);
                         doc.buffer.move_word(false, false);
                         doc.buffer.move_word(true, true);
                     } else {
-                        doc.buffer.set_cursor(pos_at(p), shift);
+                        let at = pos_at(&doc.buffer, p);
+                        doc.buffer.set_cursor(at, shift);
                     }
                     app.completion.open = false;
                     // ⌘-click / Ctrl-click: go to definition.
@@ -533,7 +572,8 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                 }
             } else if resp.dragged() {
                 if let Some(p) = resp.interact_pointer_pos() {
-                    doc.buffer.set_cursor(pos_at(p), true);
+                    let at = pos_at(&doc.buffer, p);
+                    doc.buffer.set_cursor(at, true);
                 }
             }
             if resp.hovered() {
@@ -542,11 +582,12 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
             // Holding ⌘ / Ctrl: underline the symbol under the mouse, like a
             // link, since clicking it goes to its definition.
             let link = resp.hover_pos().filter(|_| ui.input(|i| i.modifiers.command)).and_then(|p| {
-                let row = ((p.y - content_top) / row_height).floor().max(0.0) as usize;
-                let col = ((p.x - (origin.x + text_x0)) / char_width).floor().max(0.0) as usize;
-                if row >= line_count {
+                let vrow = ((p.y - content_top) / row_height).floor().max(0.0) as usize;
+                let x = ((p.x - (origin.x + text_x0)) / char_width).floor().max(0.0) as usize;
+                if vrow >= row_total {
                     return None;
                 }
+                let Position { line: row, col } = wl.position_at(vrow, x, |l| doc.buffer.line_len(l));
                 let line = doc.buffer.line(row);
                 let terraform = doc.buffer.language() == Some("terraform");
                 // Only when the mouse is on the word itself, not after it.
@@ -570,8 +611,22 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
             let unit = doc.indent_unit.max(1);
             let active = if indent_guides { active_guide(&line_indent, line_count, head.line, unit) } else { None };
 
-            for row in range.clone() {
-                let y = content_top + row as f32 * row_height;
+            for vrow in range.clone() {
+                // A row on screen: all of a line, or a piece of a wrapped one.
+                let vr = wl.row(vrow);
+                let row = vr.line;
+                let y = content_top + vrow as f32 * row_height;
+                let line_chars = doc.buffer.line_len(row);
+                let seg_end = vr.end.min(line_chars);
+                let last_seg = vr.end >= line_chars;
+                let in_seg = |c: usize| c >= vr.start && (c < seg_end || last_seg);
+                let xcol = |c: usize| origin.x + text_x0 + (vr.indent + c.saturating_sub(vr.start)) as f32 * char_width;
+                // Clip a column range of the line to this row ([s, e), the
+                // last row keeping anything past the end).
+                let clip = |c0: usize, c1: usize| {
+                    let (s, e) = (c0.max(vr.start), if last_seg { c1 } else { c1.min(seg_end) });
+                    (e > s).then_some((s, e))
+                };
                 let row_rect = Rect::from_min_size(Pos2::new(rect.left(), y), Vec2::new(rect.width(), row_height));
 
                 // Current line background.
@@ -599,9 +654,14 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                     let line_len = doc.buffer.line_len(row);
                     let c0 = if row == sel_start.line { sel_start.col } else { 0 };
                     let c1 = if row == sel_end.line { sel_end.col } else { line_len + 1 };
-                    let x0 = origin.x + text_x0 + c0 as f32 * char_width;
-                    let x1 = origin.x + text_x0 + c1 as f32 * char_width;
-                    painter.rect_filled(Rect::from_min_max(Pos2::new(x0, y), Pos2::new(x1, y + row_height)), 0.0, palette_sel);
+                    if let Some((c0, c1)) = clip(c0, c1) {
+                        let (x0, x1) = (xcol(c0), xcol(c1));
+                        painter.rect_filled(
+                            Rect::from_min_max(Pos2::new(x0, y), Pos2::new(x1, y + row_height)),
+                            0.0,
+                            palette_sel,
+                        );
+                    }
                 }
 
                 // Indent guides.
@@ -617,28 +677,32 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
 
                 // Matching bracket: a box around each of the pair.
                 if let Some((o, c)) = cursor_pair {
-                    for b in [o, c].iter().filter(|b| b.line == row) {
-                        let x = origin.x + text_x0 + b.col as f32 * char_width;
+                    for b in [o, c].iter().filter(|b| b.line == row && in_seg(b.col)) {
+                        let x = xcol(b.col);
                         let r = Rect::from_min_size(Pos2::new(x, y + 1.0), Vec2::new(char_width, row_height - 2.0));
                         painter.rect_filled(r, 1.0, BRACKET_MATCH_BG);
                         painter.rect_stroke(r, 1.0, Stroke::new(1.0_f32, BRACKET_MATCH_BORDER), egui::StrokeKind::Inside);
                     }
                 }
 
-                // Gutter.
-                let num_color = if row == head.line { palette_text } else { palette_gutter };
-                painter.text(
-                    Pos2::new(origin.x + gutter_w - GUTTER_PAD, y + row_height / 2.0),
-                    Align2::RIGHT_CENTER,
-                    row + 1,
-                    font_small.clone(),
-                    num_color,
-                );
+                // Gutter: the number on a line's first row only.
+                if vr.start == 0 {
+                    let num_color = if row == head.line { palette_text } else { palette_gutter };
+                    painter.text(
+                        Pos2::new(origin.x + gutter_w - GUTTER_PAD, y + row_height / 2.0),
+                        Align2::RIGHT_CENTER,
+                        row + 1,
+                        font_small.clone(),
+                        num_color,
+                    );
+                }
 
                 // Text with highlighting.
                 let line_start_byte = rope.line_to_byte(row);
                 let line_text = doc.buffer.line(row);
-                let line_end_byte = line_start_byte + line_text.len();
+                // This row's bytes of the line.
+                let byte_of = |c: usize| line_text.char_indices().nth(c).map_or(line_text.len(), |(b, _)| b);
+                let (bs, be) = (byte_of(vr.start), byte_of(seg_end));
                 // Brackets recoloured by depth: (byte in line, colour).
                 let recolor: Vec<(usize, Color32)> = if bracket_colors {
                     doc.brackets
@@ -653,11 +717,11 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                     Vec::new()
                 };
                 let mut job = LayoutJob::default();
-                let mut at = 0usize;
+                let mut at = bs;
                 let plain = TextFormat { font_id: font.clone(), color: palette_text, ..Default::default() };
-                for s in spans_in(&spans, line_start_byte, line_end_byte) {
-                    let s0 = s.start.max(line_start_byte) - line_start_byte;
-                    let s1 = s.end.min(line_end_byte) - line_start_byte;
+                for s in spans_in(&spans, line_start_byte + bs, line_start_byte + be) {
+                    let s0 = s.start.max(line_start_byte + bs) - line_start_byte;
+                    let s1 = s.end.min(line_start_byte + be) - line_start_byte;
                     if s0 > at && line_text.is_char_boundary(at) && line_text.is_char_boundary(s0) {
                         append_recolored(&mut job, &line_text, at, s0, &plain, &recolor);
                     }
@@ -667,17 +731,16 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                         at = s1;
                     }
                 }
-                if at < line_text.len() {
-                    append_recolored(&mut job, &line_text, at, line_text.len(), &plain, &recolor);
+                if at < be {
+                    append_recolored(&mut job, &line_text, at, be, &plain, &recolor);
                 }
                 let galley = ui.fonts_mut(|f| f.layout_job(job));
-                painter.galley(Pos2::new(origin.x + text_x0, y + 1.0), galley, palette_text);
+                painter.galley(Pos2::new(xcol(vr.start), y + 1.0), galley, palette_text);
 
                 // ⌘ / Ctrl held over a symbol: underline it as a link.
                 if let Some((lrow, ls, le)) = link {
-                    if lrow == row {
-                        let x0 = origin.x + text_x0 + ls as f32 * char_width;
-                        let x1 = origin.x + text_x0 + le as f32 * char_width;
+                    if let Some((ls, le)) = clip(ls, le).filter(|_| lrow == row) {
+                        let (x0, x1) = (xcol(ls), xcol(le));
                         painter.hline(x0..=x1, y + row_height - 2.0, Stroke::new(1.0_f32, Color32::from_rgb(0x4d, 0xaa, 0xfc)));
                     }
                 }
@@ -690,21 +753,20 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                     }
                     let c0 = if row == ds { from_lsp_position(&line_text, d.range.start).col } else { 0 };
                     let c1 = if row == de { from_lsp_position(&line_text, d.range.end).col } else { line_text.chars().count() };
-                    let c1 = c1.max(c0 + 1);
+                    let Some((c0, c1)) = clip(c0, c1.max(c0 + 1)) else { continue };
                     let color = match d.severity {
                         Some(DiagnosticSeverity::ERROR) => palette_err,
                         Some(DiagnosticSeverity::WARNING) => palette_warn,
                         _ => palette_gutter,
                     };
-                    let x0 = origin.x + text_x0 + c0 as f32 * char_width;
-                    let x1 = origin.x + text_x0 + c1 as f32 * char_width;
+                    let (x0, x1) = (xcol(c0), xcol(c1));
                     let yy = y + row_height - 2.0;
                     painter.line_segment([Pos2::new(x0, yy), Pos2::new(x1, yy)], Stroke::new(1.0_f32, color));
                 }
 
                 // Cursor.
-                if row == head.line && has_focus_before {
-                    let x = origin.x + text_x0 + head.col as f32 * char_width;
+                if row == head.line && has_focus_before && wl.row_of(head) == vrow {
+                    let x = xcol(head.col);
                     painter.rect_filled(
                         Rect::from_min_size(Pos2::new(x - 0.5, y + 1.0), Vec2::new(2.0, row_height - 2.0)),
                         0.0,
@@ -716,7 +778,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
 
             // Hover tooltip for diagnostics on the hovered line.
             if let Some(p) = resp.hover_pos() {
-                let at = pos_at(p);
+                let at = pos_at(&doc.buffer, p);
                 let msgs: Vec<String> = doc
                     .diagnostics
                     .iter()
@@ -734,14 +796,16 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
             // Keep the cursor in view.
             if doc.scroll_to_cursor {
                 doc.scroll_to_cursor = false;
-                let x = origin.x + text_x0 + head.col as f32 * char_width;
-                let y = content_top + head.line as f32 * row_height;
+                let hrow = wl.row_of(head);
+                let x = origin.x + text_x0 + wl.screen_col(hrow, head.col) as f32 * char_width;
+                let y = content_top + hrow as f32 * row_height;
                 let target = Rect::from_min_size(
                     Pos2::new(x - char_width * 2.0, y - row_height),
                     Vec2::new(char_width * 6.0, row_height * 3.0),
                 );
                 ui.scroll_to_rect(target, None);
             }
+            doc.wrap = wl;
         });
 
     if go_to_definition {
