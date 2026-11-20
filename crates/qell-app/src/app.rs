@@ -1,0 +1,492 @@
+//! Application state and the top-level frame layout.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use egui::{Context, Key, Modifiers};
+use qell_core::{LanguageRegistry, Position};
+use qell_lsp::lsp_types::{CompletionItem, Diagnostic};
+use qell_lsp::{convert, Event as LspEvent, Registry as LspRegistry, RequestId};
+use qell_plugins::{Action as PluginAction, EditorContext, Host as PluginHost};
+use qell_term::Terminal;
+
+use crate::commands::Command;
+use crate::config::{self, Config};
+use crate::document::Document;
+use crate::theme::Palette;
+use crate::views;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    Editor,
+    Terminal,
+}
+
+/// Completion popup state.
+#[derive(Default)]
+pub struct Completion {
+    pub open: bool,
+    pub request: Option<RequestId>,
+    pub items: Vec<CompletionItem>,
+    pub selected: usize,
+    /// Buffer position where the completed word starts.
+    pub word_start: Position,
+    /// Screen position (bottom-left of the cursor) to anchor the popup.
+    pub anchor: egui::Pos2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaletteMode {
+    Commands,
+    Files,
+    GoToLine,
+}
+
+/// Command palette / quick open / go-to-line overlay.
+pub struct CommandPalette {
+    pub open: bool,
+    pub mode: PaletteMode,
+    pub query: String,
+    pub selected: usize,
+    pub files: Vec<PathBuf>,
+    pub needs_focus: bool,
+}
+
+impl Default for CommandPalette {
+    fn default() -> Self {
+        Self {
+            open: false,
+            mode: PaletteMode::Commands,
+            query: String::new(),
+            selected: 0,
+            files: Vec::new(),
+            needs_focus: false,
+        }
+    }
+}
+
+pub struct Notification {
+    pub text: String,
+    pub at: Instant,
+    pub is_error: bool,
+}
+
+pub struct QellApp {
+    pub config: Config,
+    pub palette: Palette,
+    pub root: PathBuf,
+    pub docs: Vec<Document>,
+    pub active: usize,
+    pub focus: Focus,
+    pub languages: LanguageRegistry,
+    pub lsp: LspRegistry,
+    pub terminal: Option<Terminal>,
+    pub plugins: Option<PluginHost>,
+    pub plugin_commands: Vec<String>,
+    pub completion: Completion,
+    pub command_palette: CommandPalette,
+    pub notifications: Vec<Notification>,
+    pub show_sidebar: bool,
+    pub show_terminal: bool,
+    pub font_size: f32,
+    /// Cached directory listings for the file tree.
+    pub tree_cache: HashMap<PathBuf, Vec<views::sidebar::Entry>>,
+    pub pending_commands: Vec<Command>,
+    pub pending_plugin_commands: Vec<String>,
+}
+
+impl QellApp {
+    pub fn new(cc: &eframe::CreationContext<'_>, root: PathBuf, file: Option<PathBuf>) -> Self {
+        let config = Config::load();
+        let palette = Palette::dark();
+        palette.apply(&cc.egui_ctx);
+
+        let mut plugins = match PluginHost::new() {
+            Ok(h) => Some(h),
+            Err(e) => {
+                log::error!("plugin host unavailable: {e:#}");
+                None
+            }
+        };
+        let plugin_commands = plugins
+            .as_mut()
+            .map(|h| {
+                let loaded = h.load_dir(&config::plugins_dir());
+                for p in &loaded {
+                    log::info!("loaded plugin {} ({} commands)", p.name, p.commands.len());
+                }
+                h.commands()
+            })
+            .unwrap_or_default();
+
+        let mut lsp = LspRegistry::new(root.clone());
+        for (lang, cmd) in &config.lsp {
+            lsp.set_override(lang.clone(), cmd.clone());
+        }
+
+        let mut app = Self {
+            show_sidebar: config.show_sidebar,
+            show_terminal: config.show_terminal,
+            font_size: config.font_size,
+            config,
+            palette,
+            languages: LanguageRegistry::new(),
+            lsp,
+            root,
+            docs: Vec::new(),
+            active: 0,
+            focus: Focus::Editor,
+            terminal: None,
+            plugins,
+            plugin_commands,
+            completion: Completion::default(),
+            command_palette: CommandPalette::default(),
+            notifications: Vec::new(),
+            tree_cache: HashMap::new(),
+            pending_commands: Vec::new(),
+            pending_plugin_commands: Vec::new(),
+        };
+        match file {
+            Some(f) => app.open_file(f),
+            None => app.docs.push(Document::untitled()),
+        }
+        app
+    }
+
+    // ---- documents -------------------------------------------------------
+
+    pub fn active_doc(&mut self) -> Option<&mut Document> {
+        self.docs.get_mut(self.active)
+    }
+
+    pub fn open_file(&mut self, path: PathBuf) {
+        let path = std::fs::canonicalize(&path).unwrap_or(path);
+        if let Some(i) = self.docs.iter().position(|d| d.buffer.path() == Some(path.as_path())) {
+            self.active = i;
+            self.focus = Focus::Editor;
+            return;
+        }
+        match Document::open(path.clone()) {
+            Ok(doc) => {
+                // Replace a pristine untitled tab instead of piling up.
+                if self.docs.len() == 1 && self.docs[0].buffer.path().is_none() && !self.docs[0].buffer.is_dirty() {
+                    self.docs.clear();
+                }
+                self.docs.push(doc);
+                self.active = self.docs.len() - 1;
+                self.focus = Focus::Editor;
+            }
+            Err(e) => self.notify_error(format!("Cannot open {}: {e}", path.display())),
+        }
+    }
+
+    pub fn open_folder(&mut self, path: PathBuf) {
+        let path = std::fs::canonicalize(&path).unwrap_or(path);
+        self.lsp.shutdown_all();
+        self.lsp = LspRegistry::new(path.clone());
+        for (lang, cmd) in &self.config.lsp {
+            self.lsp.set_override(lang.clone(), cmd.clone());
+        }
+        self.root = path;
+        self.tree_cache.clear();
+        self.command_palette.files.clear();
+        self.terminal = None; // restarts in the new directory
+        self.notify(format!("Opened {}", self.root.display()));
+    }
+
+    fn save_active(&mut self, force_dialog: bool) {
+        let Some(doc) = self.docs.get_mut(self.active) else { return };
+        if doc.buffer.path().is_none() || force_dialog {
+            let Some(path) = rfd::FileDialog::new().set_directory(&self.root).save_file() else { return };
+            if let Err(e) = doc.buffer.save_as(path) {
+                self.notify_error(format!("Save failed: {e}"));
+                return;
+            }
+        } else if let Err(e) = doc.buffer.save() {
+            self.notify_error(format!("Save failed: {e}"));
+            return;
+        }
+        self.lsp.did_save(&doc.buffer);
+        let name = doc.buffer.file_name();
+        self.notify(format!("Saved {name}"));
+    }
+
+    fn close_active(&mut self) {
+        if self.docs.is_empty() {
+            return;
+        }
+        let doc = self.docs.remove(self.active);
+        self.lsp.did_close(&doc.buffer);
+        if self.docs.is_empty() {
+            self.docs.push(Document::untitled());
+        }
+        self.active = self.active.min(self.docs.len() - 1);
+        self.completion.open = false;
+    }
+
+    // ---- notifications ---------------------------------------------------
+
+    pub fn notify(&mut self, text: impl Into<String>) {
+        self.notifications.push(Notification { text: text.into(), at: Instant::now(), is_error: false });
+    }
+
+    pub fn notify_error(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        log::error!("{text}");
+        self.notifications.push(Notification { text, at: Instant::now(), is_error: true });
+    }
+
+    // ---- commands --------------------------------------------------------
+
+    pub fn execute(&mut self, cmd: Command, ctx: &Context) {
+        self.completion.open = false;
+        match cmd {
+            Command::NewFile => {
+                self.docs.push(Document::untitled());
+                self.active = self.docs.len() - 1;
+                self.focus = Focus::Editor;
+            }
+            Command::OpenFile => {
+                if let Some(p) = rfd::FileDialog::new().set_directory(&self.root).pick_file() {
+                    self.open_file(p);
+                }
+            }
+            Command::OpenFolder => {
+                if let Some(p) = rfd::FileDialog::new().set_directory(&self.root).pick_folder() {
+                    self.open_folder(p);
+                }
+            }
+            Command::Save => self.save_active(false),
+            Command::SaveAs => self.save_active(true),
+            Command::CloseTab => self.close_active(),
+            Command::NextTab => {
+                if !self.docs.is_empty() {
+                    self.active = (self.active + 1) % self.docs.len();
+                }
+            }
+            Command::PrevTab => {
+                if !self.docs.is_empty() {
+                    self.active = (self.active + self.docs.len() - 1) % self.docs.len();
+                }
+            }
+            Command::Undo => {
+                if let Some(d) = self.active_doc() {
+                    d.buffer.undo();
+                    d.scroll_to_cursor = true;
+                }
+            }
+            Command::Redo => {
+                if let Some(d) = self.active_doc() {
+                    d.buffer.redo();
+                    d.scroll_to_cursor = true;
+                }
+            }
+            Command::SelectAll => {
+                if let Some(d) = self.active_doc() {
+                    d.buffer.select_all();
+                }
+            }
+            Command::TriggerCompletion => self.request_completion(),
+            Command::ToggleSidebar => self.show_sidebar = !self.show_sidebar,
+            Command::ToggleTerminal => {
+                self.show_terminal = !self.show_terminal;
+                self.focus = if self.show_terminal { Focus::Terminal } else { Focus::Editor };
+            }
+            Command::FocusTerminal => {
+                self.show_terminal = true;
+                self.focus = Focus::Terminal;
+            }
+            Command::FocusEditor => self.focus = Focus::Editor,
+            Command::CommandPalette => self.open_palette(PaletteMode::Commands),
+            Command::QuickOpen => self.open_palette(PaletteMode::Files),
+            Command::GoToLine => self.open_palette(PaletteMode::GoToLine),
+            Command::ZoomIn => self.font_size = (self.font_size + 1.0).min(40.0),
+            Command::ZoomOut => self.font_size = (self.font_size - 1.0).max(6.0),
+            Command::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+        }
+    }
+
+    fn open_palette(&mut self, mode: PaletteMode) {
+        let p = &mut self.command_palette;
+        p.open = true;
+        p.mode = mode;
+        p.query.clear();
+        p.selected = 0;
+        p.needs_focus = true;
+        if mode == PaletteMode::Files && p.files.is_empty() {
+            p.files = views::palette::collect_files(&self.root, &self.config.ignore);
+        }
+    }
+
+    pub fn run_plugin_command(&mut self, name: &str) {
+        let Some(host) = self.plugins.as_mut() else { return };
+        let selection = self.docs.get(self.active).map(|d| d.buffer.selected_text()).unwrap_or_default();
+        match host.run(name, "", &EditorContext { selection }) {
+            Ok(actions) => {
+                for a in actions {
+                    match a {
+                        PluginAction::Notify(m) => self.notify(m),
+                        PluginAction::InsertText(t) => {
+                            if let Some(d) = self.docs.get_mut(self.active) {
+                                d.buffer.insert(&t);
+                                d.scroll_to_cursor = true;
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => self.notify_error(format!("{e:#}")),
+        }
+    }
+
+    // ---- LSP -------------------------------------------------------------
+
+    pub fn request_completion(&mut self) {
+        let Some(doc) = self.docs.get_mut(self.active) else { return };
+        let word = doc.buffer.word_before_cursor();
+        let head = doc.buffer.cursor.head();
+        self.completion.word_start = Position::new(head.line, head.col.saturating_sub(word.chars().count()));
+        self.completion.request = self.lsp.request_completion(&doc.buffer);
+        if self.completion.request.is_none() {
+            // No server: fall back to words from the buffer so completion
+            // still does something useful in plain-text files.
+            let items = views::editor::buffer_word_completions(&doc.buffer, &word);
+            self.completion.items = items;
+            self.completion.selected = 0;
+            self.completion.open = !self.completion.items.is_empty();
+        }
+    }
+
+    pub fn accept_completion(&mut self) {
+        let Some(item) = self.completion.items.get(self.completion.selected).cloned() else { return };
+        let Some(doc) = self.docs.get_mut(self.active) else { return };
+        let (start, end, text) = views::editor::completion_edit(&doc.buffer, &item, self.completion.word_start);
+        doc.buffer.replace_range(start, end, &text);
+        doc.scroll_to_cursor = true;
+        self.completion.open = false;
+    }
+
+    fn handle_lsp_events(&mut self) {
+        for ev in self.lsp.poll() {
+            match ev {
+                LspEvent::Ready { language } => self.notify(format!("{language} language server ready")),
+                LspEvent::Completion { id, items } => {
+                    if self.completion.request == Some(id) {
+                        self.completion.items = items;
+                        self.completion.selected = 0;
+                        self.completion.open = !self.completion.items.is_empty();
+                    }
+                }
+                LspEvent::Hover { .. } => {}
+                LspEvent::Diagnostics { uri, diagnostics } => {
+                    if let Some(path) = convert::uri_to_path(&uri) {
+                        self.set_diagnostics(&path, diagnostics);
+                    }
+                }
+                LspEvent::Error { message, .. } => log::warn!("lsp: {message}"),
+                LspEvent::Exited { language, reason } => {
+                    self.notify_error(format!("{language} language server unavailable: {reason}"));
+                }
+            }
+        }
+        // Keep the active document in sync (didOpen / didChange).
+        if let Some(doc) = self.docs.get_mut(self.active) {
+            self.lsp.sync(&self.languages, &mut doc.buffer);
+        }
+    }
+
+    fn set_diagnostics(&mut self, path: &Path, diagnostics: Vec<Diagnostic>) {
+        if let Some(d) = self.docs.iter_mut().find(|d| d.buffer.path() == Some(path)) {
+            d.diagnostics = diagnostics;
+        }
+    }
+
+    // ---- terminal --------------------------------------------------------
+
+    fn ensure_terminal(&mut self) {
+        if self.terminal.as_ref().is_some_and(|t| !t.has_exited()) {
+            return;
+        }
+        match Terminal::new(80, 24, Some(self.root.clone())) {
+            Ok(t) => self.terminal = Some(t),
+            Err(e) => {
+                self.notify_error(format!("Terminal unavailable: {e:#}"));
+                self.show_terminal = false;
+            }
+        }
+    }
+
+    // ---- shortcuts -------------------------------------------------------
+
+    fn handle_shortcuts(&mut self, ctx: &Context) {
+        // Inside the palette only Escape is global.
+        if self.command_palette.open {
+            if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+                self.command_palette.open = false;
+            }
+            return;
+        }
+        for cmd in Command::ALL {
+            let Some(sc) = cmd.shortcut() else { continue };
+            // In the terminal, Ctrl+<letter> belongs to the shell, except
+            // the few view commands people expect to keep working.
+            if self.focus == Focus::Terminal
+                && self.show_terminal
+                && !matches!(
+                    cmd,
+                    Command::ToggleTerminal
+                        | Command::CommandPalette
+                        | Command::QuickOpen
+                        | Command::ToggleSidebar
+                        | Command::Quit
+                )
+            {
+                continue;
+            }
+            if ctx.input_mut(|i| i.consume_shortcut(&sc)) {
+                self.pending_commands.push(*cmd);
+            }
+        }
+    }
+}
+
+impl eframe::App for QellApp {
+    fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        self.notifications.retain(|n| n.at.elapsed() < Duration::from_secs(if n.is_error { 8 } else { 4 }));
+        self.handle_lsp_events();
+        if self.show_terminal {
+            self.ensure_terminal();
+            if let Some(t) = self.terminal.as_mut() {
+                t.poll();
+            }
+        }
+        self.handle_shortcuts(ctx);
+
+        views::menu::show(self, ctx);
+        views::status::show(self, ctx);
+        if self.show_sidebar {
+            views::sidebar::show(self, ctx);
+        }
+        if self.show_terminal {
+            views::terminal::show(self, ctx);
+        }
+        views::editor::show_central(self, ctx);
+        views::palette::show(self, ctx);
+
+        for cmd in std::mem::take(&mut self.pending_commands) {
+            self.execute(cmd, ctx);
+        }
+        for name in std::mem::take(&mut self.pending_plugin_commands) {
+            self.run_plugin_command(&name);
+        }
+
+        // Language servers and the shell produce output without user input,
+        // so keep polling at a modest rate.
+        ctx.request_repaint_after(Duration::from_millis(if self.show_terminal { 33 } else { 100 }));
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.lsp.shutdown_all();
+    }
+}

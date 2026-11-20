@@ -1,0 +1,15 @@
+//! Qell editor core.
+//!
+//! This crate knows nothing about windows, pixels or language servers. It owns
+//! the text ([`Buffer`]), where the user is in it ([`Cursor`], [`Selection`]),
+//! how to undo what they did ([`history`]) and how to colour it
+//! ([`syntax`]). Everything else in Qell builds on top of these types.
+
+pub mod buffer;
+pub mod history;
+pub mod position;
+pub mod syntax;
+
+pub use buffer::Buffer;
+pub use position::{Cursor, Position, Selection};
+pub use syntax::{HighlightSpan, Language, LanguageRegistry, Theme, TokenKind};

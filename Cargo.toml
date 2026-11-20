@@ -1,0 +1,72 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/qell-core",
+    "crates/qell-lsp",
+    "crates/qell-term",
+    "crates/qell-plugins",
+    "crates/qell-app",
+]
+# The example plugin targets wasm32 and is built separately (see plugins/hello/README.md).
+exclude = ["plugins/hello"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sudo-bngz/qell"
+authors = ["Qell contributors"]
+
+[workspace.dependencies]
+qell-core = { path = "crates/qell-core" }
+qell-lsp = { path = "crates/qell-lsp" }
+qell-term = { path = "crates/qell-term" }
+qell-plugins = { path = "crates/qell-plugins" }
+
+anyhow = "1.0"
+thiserror = "2.0"
+log = "0.4"
+env_logger = "0.11"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "1.0"
+dirs = "7.0"
+crossbeam-channel = "0.5"
+parking_lot = "0.12"
+
+# core
+ropey = "1.6"
+tree-sitter = "0.27"
+tree-sitter-highlight = "0.27"
+tree-sitter-rust = "0.24"
+tree-sitter-c = "0.24"
+tree-sitter-go = "0.25"
+tree-sitter-javascript = "0.25"
+tree-sitter-typescript = "0.23"
+tree-sitter-hcl = "1.1"
+
+# lsp
+lsp-types = "0.97"
+url = "2"
+
+# terminal
+alacritty_terminal = "0.26"
+
+# plugins
+wasmtime = { version = "48", default-features = false, features = ["cranelift", "runtime", "std", "anyhow", "wat", "parallel-compilation"] }
+
+# ui
+egui = "0.33"
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+egui_extras = "0.33"
+rfd = "0.18"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.dev.package."*"]
+opt-level = 2
