@@ -55,6 +55,12 @@ fn defs() -> Vec<Def> {
         def("tab_size", "Editor", "Tab Size", "Spaces inserted by the Tab key."),
         def("auto_complete", "Editor", "Auto Complete", "Suggest completions while typing, not only on Ctrl+Space."),
         def(
+            "vim_mode",
+            "Editor",
+            "Vim Mode",
+            "Vim keys in the editor: Normal, Insert and Visual modes, and a command line for : commands and / search.",
+        ),
+        def(
             "word_wrap",
             "Editor",
             "Word Wrap",
@@ -132,6 +138,7 @@ fn is_modified(key: &str, c: &Config) -> bool {
         "font_size" => c.font_size != d.font_size,
         "tab_size" => c.tab_size != d.tab_size,
         "auto_complete" => c.auto_complete != d.auto_complete,
+        "vim_mode" => c.vim_mode != d.vim_mode,
         "word_wrap" => c.word_wrap != d.word_wrap,
         "minimap" => c.minimap != d.minimap,
         "bracket_pair_colors" => c.bracket_pair_colors != d.bracket_pair_colors,
@@ -156,6 +163,7 @@ fn reset(key: &str, c: &mut Config) {
         "font_size" => c.font_size = d.font_size,
         "tab_size" => c.tab_size = d.tab_size,
         "auto_complete" => c.auto_complete = d.auto_complete,
+        "vim_mode" => c.vim_mode = d.vim_mode,
         "word_wrap" => c.word_wrap = d.word_wrap,
         "minimap" => c.minimap = d.minimap,
         "bracket_pair_colors" => c.bracket_pair_colors = d.bracket_pair_colors,
@@ -238,6 +246,9 @@ fn control(ui: &mut egui::Ui, key: &str, c: &mut Config, drafts: &mut HashMap<St
         }
         "auto_complete" => {
             ui.checkbox(&mut c.auto_complete, "Enabled");
+        }
+        "vim_mode" => {
+            ui.checkbox(&mut c.vim_mode, "Enabled");
         }
         "word_wrap" => {
             ui.checkbox(&mut c.word_wrap, "Enabled");
@@ -424,6 +435,7 @@ mod tests {
                 "font_size" => c.font_size = 20.0,
                 "tab_size" => c.tab_size = 2,
                 "auto_complete" => c.auto_complete = false,
+                "vim_mode" => c.vim_mode = true,
                 "word_wrap" => c.word_wrap = true,
                 "minimap" => c.minimap = false,
                 "bracket_pair_colors" => c.bracket_pair_colors = false,

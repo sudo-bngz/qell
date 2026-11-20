@@ -2736,6 +2736,7 @@ dependencies = [
  "qell-lsp",
  "qell-plugins",
  "qell-term",
+ "regex",
  "rfd",
  "serde",
  "toml",

@@ -24,9 +24,83 @@ pub fn show_central(app: &mut QellApp, ctx: &Context) {
     let bg = app.palette.editor_bg;
     egui::CentralPanel::default().frame(egui::Frame::new().fill(bg)).show(ctx, |ui| {
         show_tabs(app, ui);
+        if app.config.vim_mode {
+            show_vim_bar(app, ui);
+        }
         show_editor(app, ui);
     });
     show_completion_popup(app, ctx);
+}
+
+/// Vim's last line: the command being typed, a message, or the mode.
+fn show_vim_bar(app: &mut QellApp, ui: &mut egui::Ui) {
+    let font = app.palette.mono(app.font_size * 0.95);
+    let height = ui.fonts_mut(|f| f.row_height(&font)).ceil() + 6.0;
+    let (text, dim, error, chrome) = (app.palette.text, app.palette.text_dim, app.palette.error, app.palette.chrome_bg);
+    egui::TopBottomPanel::bottom("vim_bar")
+        .exact_height(height)
+        .show_separator_line(false)
+        .frame(egui::Frame::new().fill(chrome).inner_margin(egui::Margin::symmetric(8, 0)))
+        .show_inside(ui, |ui| {
+            let rect = ui.max_rect();
+            let painter = ui.painter();
+            let left = rect.left_center();
+            let vim = &app.vim;
+            if let Some(cmd) = &vim.cmdline {
+                let r = painter.text(left, Align2::LEFT_CENTER, cmd, font.clone(), text);
+                // The command line's cursor.
+                let w = ui.fonts_mut(|f| f.glyph_width(&font, 'M'));
+                painter.rect_filled(
+                    Rect::from_min_size(r.right_top(), Vec2::new(w, r.height())),
+                    0.0,
+                    app.palette.cursor.gamma_multiply(0.7),
+                );
+            } else if !vim.message.is_empty() {
+                painter.text(left, Align2::LEFT_CENTER, &vim.message, font.clone(), if vim.error { error } else { text });
+            } else {
+                let color = if vim.mode == crate::vim::Mode::Normal { dim } else { text };
+                painter.text(left, Align2::LEFT_CENTER, vim.mode_label(), font.clone(), color);
+            }
+            // Keys of an unfinished command, as Vim's showcmd.
+            painter.text(rect.right_center() - Vec2::new(24.0, 0.0), Align2::RIGHT_CENTER, vim.pending(), font.clone(), dim);
+        });
+}
+
+/// An input event as a Vim key, if it is one.
+fn vim_key(ev: &Event, mods: egui::Modifiers) -> Option<crate::vim::VimKey> {
+    use crate::vim::VimKey;
+    match ev {
+        Event::Text(t) if !mods.ctrl && !mods.mac_cmd => {
+            let mut chars = t.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c), None) => Some(VimKey::Char(c)),
+                (Some(_), Some(_)) => Some(VimKey::Paste(t.clone())),
+                _ => None,
+            }
+        }
+        Event::Paste(t) => Some(VimKey::Paste(t.clone())),
+        Event::Key { key, pressed: true, modifiers, .. } => {
+            let plain = !modifiers.ctrl && !modifiers.mac_cmd && !modifiers.alt;
+            match key {
+                Key::Escape => Some(VimKey::Esc),
+                Key::Enter if plain => Some(VimKey::Enter),
+                Key::Backspace if plain => Some(VimKey::Backspace),
+                Key::Delete if plain => Some(VimKey::Char('x')),
+                Key::ArrowLeft if plain => Some(VimKey::Left),
+                Key::ArrowRight if plain => Some(VimKey::Right),
+                Key::ArrowUp if plain => Some(VimKey::Up),
+                Key::ArrowDown if plain => Some(VimKey::Down),
+                // Ctrl-D, Ctrl-U, Ctrl-R, Ctrl-[…
+                _ if modifiers.ctrl && !modifiers.shift && !modifiers.alt && !modifiers.mac_cmd => {
+                    let name = key.name();
+                    let c = name.chars().next().filter(|_| name.chars().count() == 1)?;
+                    Some(VimKey::Ctrl(c.to_ascii_lowercase()))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 /// What a tab's right-click menu asked for.
@@ -253,6 +327,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
     let auto_complete = app.config.auto_complete;
     let bracket_colors = app.config.bracket_pair_colors;
     let word_wrap = app.config.word_wrap;
+    let vim_on = app.config.vim_mode;
     let indent_guides = app.config.indent_guides;
 
     let has_focus_before = app.focus == Focus::Editor && !app.modal_open();
@@ -280,10 +355,40 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
     {
         let doc = &mut app.docs[doc_idx];
         line_count = doc.buffer.line_count();
+        if vim_on {
+            app.vim.sync(&mut doc.buffer);
+        }
         if has_focus_before {
             let events = ui.input(|i| i.events.clone());
             let read_only = doc.read_only;
             for (idx, ev) in events.iter().enumerate() {
+                if vim_on {
+                    let key = vim_key(ev, ui.input(|i| i.modifiers)).filter(|k| app.vim.wants(k));
+                    if let Some(key) = key {
+                        let version = doc.buffer.version();
+                        let vctx = crate::vim::Ctx { tab_size, page: visible_rows };
+                        app.pending_vim.extend(app.vim.key(&mut doc.buffer, key, &vctx));
+                        // A read-only view (a diff) takes motions, not changes.
+                        if read_only && doc.buffer.version() != version {
+                            app.vim.reset(&mut doc.buffer);
+                            doc.buffer.undo();
+                            app.vim.set_message("E21: Cannot make changes, this view is read-only", true);
+                        }
+                        doc.scroll_to_cursor = true;
+                        doc.goal_col = None;
+                        close_completion = true;
+                        app.snippet = None;
+                        consumed_events.push(idx);
+                        // The command bar is drawn before the editor: show the result now.
+                        ui.ctx().request_repaint();
+                        continue;
+                    }
+                    // Outside Insert mode nothing else types into the text.
+                    if app.vim.captures() && matches!(ev, Event::Key { .. } | Event::Text(_)) {
+                        consumed_events.push(idx);
+                        continue;
+                    }
+                }
                 // A diff can be navigated, selected and copied, not edited.
                 let edits = matches!(
                     ev,
@@ -682,6 +787,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
         let cursor = doc.buffer.cursor;
         let (sel_start, sel_end) = cursor.selection.ordered();
         let head = cursor.head();
+        let vim_block = if vim_on { app.vim.block_cursor(&doc.buffer) } else { None };
         doc.update_structure(&mut app.languages, tab_size);
         let spans = doc.spans(&mut app.languages).to_vec();
         let rope = doc.buffer.rope();
@@ -739,6 +845,16 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                 if let Some((c0, c1)) = clip(c0, c1) {
                     let (x0, x1) = (xcol(c0), xcol(c1));
                     painter.rect_filled(Rect::from_min_max(Pos2::new(x0, y), Pos2::new(x1, y + row_height)), 0.0, palette_sel);
+                }
+            }
+
+            // Vim: matches of the last search.
+            if vim_on {
+                for (c0, c1) in app.vim.matches_in(&doc.buffer.line(row)) {
+                    if let Some((c0, c1)) = clip(c0, c1) {
+                        let r = Rect::from_min_max(Pos2::new(xcol(c0), y), Pos2::new(xcol(c1), y + row_height));
+                        painter.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(0xea, 0x5c, 0x00, 0x55));
+                    }
                 }
             }
 
@@ -843,13 +959,20 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
             }
 
             // Cursor.
-            if row == head.line && has_focus_before && wl.row_of(head) == vrow {
-                let x = xcol(head.col);
-                painter.rect_filled(
-                    Rect::from_min_size(Pos2::new(x - 0.5, y + 1.0), Vec2::new(2.0, row_height - 2.0)),
-                    0.0,
-                    palette_cursor,
-                );
+            let at = vim_block.unwrap_or(head);
+            if row == at.line && has_focus_before && wl.row_of(at) == vrow {
+                let x = xcol(at.col);
+                if vim_block.is_some() {
+                    // Vim outside Insert mode: a block on the character.
+                    let block = Rect::from_min_size(Pos2::new(x, y + 1.0), Vec2::new(char_width, row_height - 2.0));
+                    painter.rect_filled(block, 0.0, palette_cursor.gamma_multiply(0.45));
+                } else {
+                    painter.rect_filled(
+                        Rect::from_min_size(Pos2::new(x - 0.5, y + 1.0), Vec2::new(2.0, row_height - 2.0)),
+                        0.0,
+                        palette_cursor,
+                    );
+                }
                 cursor_screen = Some(Pos2::new(x, y + row_height));
             }
         }

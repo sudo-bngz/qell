@@ -203,6 +203,9 @@ pub struct QellApp {
     pub searcher: qell_index::Searcher,
     pub search: views::search::SearchState,
     pub pending_nav: Option<(RequestId, NavRequest)>,
+    /// Vim mode state, and what its commands asked the app to do.
+    pub vim: crate::vim::Vim,
+    pub pending_vim: Vec<crate::vim::Action>,
     /// Rename / new file / new folder being typed in the file tree.
     pub tree_edit: Option<TreeEdit>,
     /// "Move to Trash?" asked for this path.
@@ -272,6 +275,8 @@ impl QellApp {
             searcher,
             search: Default::default(),
             pending_nav: None,
+            vim: crate::vim::Vim::new(),
+            pending_vim: Vec::new(),
             tree_edit: None,
             confirm_delete: None,
             nav_back: Vec::new(),
@@ -692,6 +697,108 @@ impl QellApp {
             || self.confirm_delete.is_some()
     }
 
+    // ---- Vim commands that need the app ---------------------------------------
+
+    fn vim_error(&mut self, text: &str) {
+        self.vim.set_message(text, true);
+    }
+
+    fn any_unsaved(&self) -> bool {
+        self.docs.iter().any(|d| d.buffer.is_dirty() && !d.read_only)
+    }
+
+    /// `:wa`: save every modified file that has a name.
+    fn save_all(&mut self) {
+        let active = self.active;
+        for i in 0..self.docs.len() {
+            if self.docs[i].buffer.is_dirty() && self.docs[i].buffer.path().is_some() && !self.docs[i].read_only {
+                self.active = i;
+                self.save_active(false);
+            }
+        }
+        self.active = active.min(self.docs.len().saturating_sub(1));
+    }
+
+    fn run_vim_action(&mut self, action: crate::vim::Action, ctx: &Context) {
+        use crate::vim::Action;
+        const UNSAVED: &str = "E37: No write since last change (add ! to override)";
+        let dirty = self.docs.get(self.active).is_some_and(|d| d.buffer.is_dirty() && !d.read_only);
+        match action {
+            Action::Save(None) => self.save_active(false),
+            Action::Save(Some(name)) => {
+                let path = if Path::new(&name).is_absolute() { PathBuf::from(&name) } else { self.root.join(&name) };
+                let Some(doc) = self.docs.get_mut(self.active) else { return };
+                match doc.buffer.save_as(path) {
+                    Ok(()) => {
+                        self.lsp.did_save(&doc.buffer);
+                        self.files_changed();
+                        self.vim.set_message(format!("\"{name}\" written"), false);
+                    }
+                    Err(e) => self.vim.set_message(format!("E212: Can't open file for writing: {e}"), true),
+                }
+            }
+            Action::Close { force } => {
+                if dirty && !force {
+                    self.vim_error(UNSAVED);
+                } else {
+                    self.close_active();
+                }
+            }
+            Action::SaveAndClose => {
+                if dirty {
+                    self.save_active(false);
+                }
+                // Still modified: the save was cancelled or failed.
+                if !self.docs.get(self.active).is_some_and(|d| d.buffer.is_dirty() && !d.read_only) {
+                    self.close_active();
+                }
+            }
+            Action::SaveAll => self.save_all(),
+            Action::QuitAll { force } => {
+                if self.any_unsaved() && !force {
+                    self.vim_error(UNSAVED);
+                } else {
+                    self.execute(Command::Quit, ctx);
+                }
+            }
+            Action::SaveAllAndQuit => {
+                self.save_all();
+                if self.any_unsaved() {
+                    self.vim_error("E141: Some files have no name: use :w name");
+                } else {
+                    self.execute(Command::Quit, ctx);
+                }
+            }
+            Action::Edit(name) => {
+                let path = if Path::new(&name).is_absolute() { PathBuf::from(&name) } else { self.root.join(&name) };
+                if path.is_dir() {
+                    self.vim_error(&format!("\"{name}\" is a directory"));
+                } else if path.exists() {
+                    self.open_file(path);
+                } else {
+                    // A new file: it exists once written, as in Vim.
+                    self.docs.push(Document::new(qell_core::Buffer::from_text("", Some(path))));
+                    self.active = self.docs.len() - 1;
+                    self.vim.set_message(format!("\"{name}\" [New]"), false);
+                }
+            }
+            Action::NextTab => self.execute(Command::NextTab, ctx),
+            Action::PrevTab => self.execute(Command::PrevTab, ctx),
+            Action::GoToDefinition => self.go_to_definition(),
+            Action::GoBack => self.navigate(true),
+            Action::Copy(text) => ctx.copy_text(text),
+            Action::SetWrap(on) => {
+                self.config.word_wrap = on;
+                self.save_config();
+            }
+            Action::Terminal => self.execute(Command::FocusTerminal, ctx),
+            Action::Explorer => {
+                self.sidebar_view = SidebarView::Explorer;
+                self.show_sidebar = true;
+            }
+        }
+    }
+
     // ---- file operations (file tree menu) -----------------------------------
 
     /// Something changed on disk: refresh the tree, file list, git and index.
@@ -1022,6 +1129,13 @@ impl QellApp {
                 self.request_completion(None);
             }
             Command::ToggleSidebar => self.show_sidebar = !self.show_sidebar,
+            Command::ToggleVimMode => {
+                self.config.vim_mode = !self.config.vim_mode;
+                self.save_config();
+                self.vim = crate::vim::Vim::new();
+                let on = if self.config.vim_mode { "on: Esc for Normal mode, : for commands" } else { "off" };
+                self.notify(format!("Vim mode {on}"));
+            }
             Command::ToggleMinimap => {
                 self.config.minimap = !self.config.minimap;
                 self.save_config();
@@ -1475,6 +1589,9 @@ impl eframe::App for QellApp {
         views::settings::show(self, ctx);
         views::sidebar::show_confirm_delete(self, ctx);
 
+        for action in std::mem::take(&mut self.pending_vim) {
+            self.run_vim_action(action, ctx);
+        }
         for cmd in std::mem::take(&mut self.pending_commands) {
             self.execute(cmd, ctx);
         }

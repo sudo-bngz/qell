@@ -14,6 +14,7 @@ mod native_menu;
 mod snippet;
 mod theme;
 mod views;
+mod vim;
 
 use std::path::PathBuf;
 
