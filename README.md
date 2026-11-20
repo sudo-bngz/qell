@@ -62,6 +62,18 @@ bottom, and language-server completion for the languages you actually use.
 - **Plugins** — WebAssembly modules loaded from `~/.config/qell/plugins`,
   sandboxed by Wasmtime, exposing commands to the palette. See
   [`plugins/hello`](plugins/hello).
+- **Search in files** (`Ctrl+Shift+F`) — the workspace is indexed in memory
+  in the background (respecting `.gitignore`), so results appear as you
+  type, even in large trees. Case, whole-word and regex toggles; click a
+  match to open it.
+- **Go to definition** — `Ctrl`/`⌘`+click a function, type, variable…
+  (the symbol is underlined while the key is held), or press `F12`.
+  Qell asks the language server when one is installed, and otherwise uses
+  its own index (tree-sitter tags for Rust, Go, C, JavaScript, TypeScript;
+  `var.`, `local.`, `module.`, `data.` and resource addresses for
+  Terraform). Several matches are listed in the Search view.
+  `Shift+F12` finds all references; `Alt+←` / `Alt+→` (`⌃-` / `⌃⇧-` on
+  macOS) go back and forward.
 - **Command palette** (`Ctrl+Shift+P`), **quick open** (`Ctrl+P`),
   **go to line** (`Ctrl+G`).
 
@@ -93,6 +105,10 @@ npm i -g typescript typescript-language-server
 | Command palette       | `Ctrl+Shift+P`     |
 | Go to file            | `Ctrl+P`           |
 | Go to line            | `Ctrl+G`           |
+| Search in files       | `Ctrl+Shift+F`     |
+| Go to definition      | `F12` / `Ctrl+click` |
+| Find all references   | `Shift+F12`        |
+| Back / forward        | `Alt+←` / `Alt+→` (`⌃-` / `⌃⇧-` on macOS) |
 | Save / Save as        | `Ctrl+S` / `Ctrl+Shift+S` |
 | Open file / folder    | `Ctrl+O` / `Ctrl+Shift+O` |
 | Close tab             | `Ctrl+W`           |
@@ -108,7 +124,7 @@ npm i -g typescript typescript-language-server
 | Settings              | `Ctrl+,`           |
 
 On macOS, `Ctrl` is `⌘` for the editor shortcuts, and Qell uses the native
-menu bar (Qell / File / Edit / View / Window, with About, Settings… `⌘,`,
+menu bar (Qell / File / Edit / View / Go / Window, with About, Settings… `⌘,`,
 Hide and Quit in the app menu) instead of the in-window one.
 
 ## Configuration
@@ -149,6 +165,7 @@ ignore = [".git", "target", "node_modules", ".terraform", "dist"]
 crates/
   qell-core      text buffer (ropey), cursor, undo, tree-sitter highlighting, themes
   qell-lsp       LSP client: process + JSON-RPC framing + document sync + completion
+  qell-index     workspace index: file text + trigrams for search, tree-sitter tags for definitions
   qell-term      PTY + VT emulation (alacritty_terminal) rendered as plain cell snapshots
   qell-plugins   Wasmtime host and the plugin ABI
   qell-app       the egui/eframe application: panels, keymap, palette

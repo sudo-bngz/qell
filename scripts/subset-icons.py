@@ -42,6 +42,8 @@ EXTRA = [
     0xEA93, 0xEA96, 0xEB63, 0xEB36, 0xEA83, 0xEB8D,
     # Git graph: commit, tag, remote branch.
     0xEAFC, 0xEA66, 0xEBAA,
+    # Search: search, case, whole word, regex, close, chevrons.
+    0xEA6D, 0xEAB1, 0xEB7E, 0xEB38, 0xEA76, 0xEAB6, 0xEAB4,
 ]
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

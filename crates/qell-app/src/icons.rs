@@ -24,6 +24,13 @@ pub const ADD: char = '\u{ea60}';
 pub const REMOVE: char = '\u{eb3b}';
 pub const CHECK: char = '\u{eab2}';
 pub const REFRESH: char = '\u{eb37}';
+pub const SEARCH: char = '\u{ea6d}';
+pub const CASE_SENSITIVE: char = '\u{eab1}';
+pub const WHOLE_WORD: char = '\u{eb7e}';
+pub const REGEX: char = '\u{eb38}';
+pub const CLOSE: char = '\u{ea76}';
+pub const CHEVRON_RIGHT: char = '\u{eab6}';
+pub const CHEVRON_DOWN: char = '\u{eab4}';
 
 /// Unknown file types (devicons' own fallback is a plain `*`).
 const DEFAULT_FILE: (char, Color32) = ('\u{e64e}', Color32::from_rgb(0x7e, 0x8e, 0xa8));

@@ -168,10 +168,9 @@ pub fn layout() -> Vec<(&'static str, Vec<Entry>)> {
             "View",
             vec![
                 Cmd(C::CommandPalette, Some("Command Palette…")),
-                Cmd(C::QuickOpen, Some("Go to File…")),
-                Cmd(C::GoToLine, Some("Go to Line…")),
                 Separator,
                 Cmd(C::ShowExplorer, Some("Explorer")),
+                Cmd(C::ShowSearch, Some("Search")),
                 Cmd(C::ShowSourceControl, Some("Source Control")),
                 Cmd(C::ToggleSidebar, Some("Toggle Sidebar")),
                 Separator,
@@ -182,6 +181,19 @@ pub fn layout() -> Vec<(&'static str, Vec<Entry>)> {
                 Cmd(C::ZoomOut, Some("Zoom Out")),
                 Separator,
                 Fullscreen,
+            ],
+        ),
+        (
+            "Go",
+            vec![
+                Cmd(C::GoBack, Some("Back")),
+                Cmd(C::GoForward, Some("Forward")),
+                Separator,
+                Cmd(C::QuickOpen, Some("Go to File…")),
+                Cmd(C::GoToLine, Some("Go to Line…")),
+                Separator,
+                Cmd(C::GoToDefinition, Some("Go to Definition")),
+                Cmd(C::FindReferences, Some("Find All References")),
             ],
         ),
         ("Window", vec![Minimize, Zoom, Separator, BringAllToFront]),
@@ -219,6 +231,11 @@ pub fn accelerator(sc: &KeyboardShortcut) -> Option<String> {
         Key::Comma | Key::Minus | Key::Period | Key::Space | Key::Tab | Key::Enter | Key::PageUp | Key::PageDown => {
             name.to_string()
         }
+        Key::ArrowLeft => "ArrowLeft".to_string(),
+        Key::ArrowRight => "ArrowRight".to_string(),
+        Key::ArrowUp => "ArrowUp".to_string(),
+        Key::ArrowDown => "ArrowDown".to_string(),
+        _ if name.len() >= 2 && name.starts_with('F') && name[1..].chars().all(|c| c.is_ascii_digit()) => name.to_string(),
         _ if name.len() == 1 && name.chars().all(|c| c.is_ascii_uppercase()) => format!("Key{name}"),
         _ if name.len() == 1 && name.chars().all(|c| c.is_ascii_digit()) => format!("Digit{name}"),
         _ => return None,
