@@ -18,7 +18,9 @@ bottom, and language-server completion for the languages you actually use.
   dotfiles like `.bashrc`), Makefiles, Dockerfiles and nginx config. Other
   `.conf`-style files (Apache, sshd, MySQL, systemd…) get a tolerant
   generic highlighter for comments, sections, keys, strings, numbers and
-  variables. Embedded code is highlighted too: fenced code blocks in
+  variables. [alea](https://github.com/sudo-bngz/alea) works (`.alea`) have
+  their own highlighter, which keeps colouring half-typed code. Embedded code
+  is highlighted too: fenced code blocks in
   Markdown, `<script>`/`<style>` in HTML, `RUN` in Dockerfiles, recipe lines
   in Makefiles.
 - **File icons** — brand icons and colours per file type in the tree and
