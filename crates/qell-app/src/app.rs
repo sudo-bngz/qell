@@ -209,6 +209,10 @@ pub struct QellApp {
     git_base_rx: std::sync::mpsc::Receiver<(PathBuf, Option<String>)>,
     /// Find and replace in the open file.
     pub find: views::find::FindState,
+    /// The tabs of each workspace, reopened on the next start.
+    session: crate::session::Store,
+    /// Paths and active tab the session was last written for.
+    session_key: (Vec<PathBuf>, usize),
     /// Vim mode state, and what its commands asked the app to do.
     pub vim: crate::vim::Vim,
     pub pending_vim: Vec<crate::vim::Action>,
@@ -285,6 +289,8 @@ impl QellApp {
             git_base_tx,
             git_base_rx,
             find: Default::default(),
+            session: crate::session::Store::load(),
+            session_key: (Vec::new(), 0),
             vim: crate::vim::Vim::new(),
             pending_vim: Vec::new(),
             tree_edit: None,
@@ -322,11 +328,65 @@ impl QellApp {
             git_status: None,
             was_focused: true,
         };
+        let restored = if app.config.restore_session { app.restore_session() } else { 0 };
         match file {
             Some(f) => app.open_file(f),
-            None => app.docs.push(Document::untitled()),
+            // Only an empty workspace opens on a blank tab.
+            None if restored == 0 => app.docs.push(Document::untitled()),
+            None => {}
         }
+        app.session_key = app.session_state().0;
         app
+    }
+
+    // ---- session ---------------------------------------------------------
+
+    /// The tabs to remember: saved files, in order, and which was in front.
+    fn session_state(&self) -> ((Vec<PathBuf>, usize), crate::session::Workspace) {
+        let mut ws = crate::session::Workspace::default();
+        let mut paths = Vec::new();
+        for (i, doc) in self.docs.iter().enumerate() {
+            // Untitled tabs and read-only diffs have nothing to reopen.
+            let Some(path) = doc.buffer.path().filter(|_| !doc.read_only) else { continue };
+            if i == self.active {
+                ws.active = ws.tabs.len();
+            }
+            let head = doc.buffer.cursor.head();
+            ws.tabs.push(crate::session::Tab { path: path.to_path_buf(), line: head.line, col: head.col });
+            paths.push(path.to_path_buf());
+        }
+        ((paths, ws.active), ws)
+    }
+
+    /// Write the session (tabs opened or closed, or Qell closing).
+    fn save_session(&mut self) {
+        if !self.config.restore_session {
+            return;
+        }
+        let (key, ws) = self.session_state();
+        self.session_key = key;
+        let root = self.root.clone();
+        self.session.save(&root, ws);
+    }
+
+    /// Reopen the tabs of this workspace. Returns how many opened.
+    fn restore_session(&mut self) -> usize {
+        let ws = self.session.take(&self.root);
+        for tab in &ws.tabs {
+            match Document::open(tab.path.clone()) {
+                Ok(mut doc) => {
+                    let p = doc.buffer.clamp(Position::new(tab.line, tab.col));
+                    doc.buffer.set_cursor(p, false);
+                    doc.scroll_to_cursor = true;
+                    self.docs.push(doc);
+                }
+                Err(e) => log::warn!("cannot reopen {}: {e}", tab.path.display()),
+            }
+        }
+        if !self.docs.is_empty() {
+            self.active = ws.active.min(self.docs.len() - 1);
+        }
+        self.docs.len()
     }
 
     // ---- documents -------------------------------------------------------
@@ -396,6 +456,8 @@ impl QellApp {
 
     pub fn open_folder(&mut self, path: PathBuf) {
         let path = std::fs::canonicalize(&path).unwrap_or(path);
+        // Keep the tabs of the folder being left.
+        self.save_session();
         self.lsp.shutdown_all();
         self.lsp = new_lsp(&self.egui_ctx, &path, &self.config);
         self.git.set_root(path.clone());
@@ -1663,6 +1725,10 @@ impl eframe::App for QellApp {
             self.run_plugin_command(&name);
         }
         self.handle_config(ctx);
+        // The tabs changed: remember them (cursors are saved again on exit).
+        if self.session_state().0 != self.session_key {
+            self.save_session();
+        }
 
         // Language servers and the shell produce output without user input,
         // so keep polling at a modest rate.
@@ -1673,6 +1739,8 @@ impl eframe::App for QellApp {
         if self.config_dirty_since.is_some() {
             self.save_config();
         }
+        // Again on the way out, for the cursor positions.
+        self.save_session();
         self.lsp.shutdown_all();
     }
 }
