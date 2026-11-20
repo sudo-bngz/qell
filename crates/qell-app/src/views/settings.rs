@@ -99,6 +99,12 @@ fn defs() -> Vec<Def> {
             "Folder levels searched for git repositories when the workspace holds several. 0 only uses the workspace's own.",
         ),
         def("restore_session", "Layout", "Restore Session", "Reopen the files that were open when Qell last closed, per folder."),
+        def(
+            "shortcuts",
+            "Layout",
+            "File Tree Shortcuts",
+            "How many often-used files to list above the file tree. 0 hides the section.",
+        ),
         def("show_sidebar", "Layout", "Show File Tree", "Show the file tree (also on startup)."),
         def("show_terminal", "Layout", "Show Terminal", "Show the terminal panel (also on startup)."),
         def(
@@ -149,6 +155,7 @@ fn is_modified(key: &str, c: &Config) -> bool {
         "git_status" => c.git_status != d.git_status,
         "git_scan_depth" => c.git_scan_depth != d.git_scan_depth,
         "restore_session" => c.restore_session != d.restore_session,
+        "shortcuts" => c.shortcuts != d.shortcuts,
         "show_sidebar" => c.show_sidebar != d.show_sidebar,
         "show_terminal" => c.show_terminal != d.show_terminal,
         "shell" => c.shell != d.shell,
@@ -175,6 +182,7 @@ fn reset(key: &str, c: &mut Config) {
         "git_status" => c.git_status = d.git_status,
         "git_scan_depth" => c.git_scan_depth = d.git_scan_depth,
         "restore_session" => c.restore_session = d.restore_session,
+        "shortcuts" => c.shortcuts = d.shortcuts,
         "show_sidebar" => c.show_sidebar = d.show_sidebar,
         "show_terminal" => c.show_terminal = d.show_terminal,
         "shell" => c.shell = d.shell,
@@ -276,6 +284,9 @@ fn control(ui: &mut egui::Ui, key: &str, c: &mut Config, drafts: &mut HashMap<St
         }
         "restore_session" => {
             ui.checkbox(&mut c.restore_session, "Enabled");
+        }
+        "shortcuts" => {
+            ui.add(egui::Slider::new(&mut c.shortcuts, 0..=15));
         }
         "show_sidebar" => {
             ui.checkbox(&mut c.show_sidebar, "Visible");
@@ -451,6 +462,7 @@ mod tests {
                 "git_status" => c.git_status = false,
                 "git_scan_depth" => c.git_scan_depth = 1,
                 "restore_session" => c.restore_session = false,
+                "shortcuts" => c.shortcuts = 10,
                 "show_sidebar" => c.show_sidebar = false,
                 "show_terminal" => c.show_terminal = false,
                 "shell" => c.shell = "zsh".into(),

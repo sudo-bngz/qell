@@ -213,6 +213,10 @@ pub struct QellApp {
     session: crate::session::Store,
     /// Paths and active tab the session was last written for.
     session_key: (Vec<PathBuf>, usize),
+    /// Files opened in each workspace, for the file tree's shortcuts.
+    pub recent: crate::recent::Recent,
+    /// Expand the tree down to this path and scroll to it.
+    pub reveal: Option<PathBuf>,
     /// Vim mode state, and what its commands asked the app to do.
     pub vim: crate::vim::Vim,
     pub pending_vim: Vec<crate::vim::Action>,
@@ -291,6 +295,8 @@ impl QellApp {
             find: Default::default(),
             session: crate::session::Store::load(),
             session_key: (Vec::new(), 0),
+            recent: crate::recent::Recent::load(),
+            reveal: None,
             vim: crate::vim::Vim::new(),
             pending_vim: Vec::new(),
             tree_edit: None,
@@ -397,6 +403,7 @@ impl QellApp {
 
     pub fn open_file(&mut self, path: PathBuf) {
         let path = std::fs::canonicalize(&path).unwrap_or(path);
+        self.recent.record(&self.root, &path);
         if let Some(i) = self.docs.iter().position(|d| d.buffer.path() == Some(path.as_path())) {
             self.active = i;
             self.focus = Focus::Editor;
@@ -1083,7 +1090,7 @@ impl QellApp {
         self.config_dirty_since = Some(Instant::now());
     }
 
-    fn save_config(&mut self) {
+    pub fn save_config(&mut self) {
         self.config_dirty_since = None;
         if let Err(e) = self.config.save() {
             self.notify_error(format!("Cannot save settings to {}: {e}", config::config_path().display()));
@@ -1714,6 +1721,7 @@ impl eframe::App for QellApp {
         views::palette::show(self, ctx);
         views::settings::show(self, ctx);
         views::sidebar::show_confirm_delete(self, ctx);
+        self.recent.save_if_dirty();
 
         for action in std::mem::take(&mut self.pending_vim) {
             self.run_vim_action(action, ctx);

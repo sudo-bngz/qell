@@ -41,6 +41,10 @@ pub struct Config {
     pub git_scan_depth: usize,
     /// Reopen the files that were open when Qell last closed.
     pub restore_session: bool,
+    /// Shortcuts at the top of the file tree: how many to show (0: none).
+    pub shortcuts: usize,
+    /// Order them by last opened rather than by how often they are used.
+    pub shortcuts_recent: bool,
     /// Show the file tree on startup.
     pub show_sidebar: bool,
     /// Show the terminal panel on startup.
@@ -74,6 +78,8 @@ impl Default for Config {
             git_status: true,
             git_scan_depth: 3,
             restore_session: true,
+            shortcuts: 6,
+            shortcuts_recent: false,
             show_sidebar: true,
             show_terminal: true,
             shell: String::new(),
