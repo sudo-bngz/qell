@@ -1,13 +1,15 @@
 //! The minimap: the whole file in miniature beside the editor, like VS
-//! Code's. Each character is a 1×2 point block in its syntax colour; a
-//! slider shows the part on screen, and clicking or dragging scrolls.
+//! Code's. Each character is drawn as a tiny 2×4-texel version of its glyph
+//! (shrunk from the editor's own font) in its syntax colour; a slider shows
+//! the part on screen, and clicking or dragging scrolls.
 //!
-//! The picture is a texture rebuilt when the text (or the wrap width)
-//! changes, at most a few times a second while typing.
+//! Only the rows the minimap shows are drawn, into a texture rebuilt when
+//! they change (scrolling, editing). Long files are never squeezed into
+//! one picture, so they stay sharp.
 
-use std::time::{Duration, Instant};
+use std::sync::OnceLock;
 
-use egui::{Color32, ColorImage, Id, Pos2, Rect, Sense, TextureHandle, TextureOptions, Ui, Vec2};
+use egui::{Color32, ColorImage, FontFamily, FontId, Id, Pos2, Rect, Sense, TextureHandle, TextureOptions, Ui, Vec2};
 use qell_core::{HighlightSpan, TokenKind};
 
 use crate::document::Document;
@@ -16,25 +18,102 @@ use crate::document::Document;
 const MAX_COLS: usize = 100;
 /// Width of the minimap, in points (one per character, plus a margin).
 pub const WIDTH: f32 = MAX_COLS as f32 + 8.0;
-/// Height of one text row in the minimap.
+/// Height of one text row in the minimap, in points.
 const ROW_PX: f32 = 2.0;
-/// Texture rows at most (GPU size limits); longer files are sampled.
-const MAX_TEX_ROWS: usize = 6000;
-/// Rebuild at most this often while the text keeps changing.
-const REBUILD_EVERY: Duration = Duration::from_millis(150);
+/// Texels per character: 2 wide, 4 tall (one per pixel on a Retina screen,
+/// which is what VS Code draws).
+const CELL_W: usize = 2;
+const CELL_H: usize = 4;
 
 /// Per-document minimap state.
 #[derive(Default)]
 pub struct Minimap {
     tex: Option<TextureHandle>,
-    /// (buffer version, wrap width, rows) the texture shows.
-    key: Option<(i32, usize, usize)>,
-    built: Option<Instant>,
+    /// (buffer version, wrap width, first row, row count) the texture shows.
+    key: Option<(i32, usize, usize, usize)>,
     /// Editor scroll offset and viewport height, from the last frame.
     pub scroll_y: f32,
     pub view_h: f32,
     /// Drag in progress: (pointer y, scroll offset) when it started.
     drag_from: Option<(f32, f32)>,
+}
+
+// ---- tiny glyphs ---------------------------------------------------------------
+
+/// Coverage (0–255) of each of the 2×4 cells of a character, row by row.
+type Mask = [u8; CELL_W * CELL_H];
+
+/// Masks of the printable ASCII characters (`!` to `~`), from the editor's
+/// monospace font.
+pub struct Glyphs {
+    ascii: [Mask; 94],
+}
+
+/// For characters outside ASCII: a plain block in the middle of the cell.
+const OTHER: Mask = [0, 0, 150, 150, 150, 150, 0, 0];
+
+impl Glyphs {
+    fn mask(&self, c: char) -> Option<&Mask> {
+        match c {
+            '!'..='~' => Some(&self.ascii[c as usize - '!' as usize]),
+            c if c.is_whitespace() => None,
+            _ => Some(&OTHER),
+        }
+    }
+
+    /// Shrink each glyph of the monospace font to 2×4 cells: lay the
+    /// characters out large, then average the atlas pixels falling in each
+    /// cell.
+    fn build(ctx: &egui::Context) -> Self {
+        let font = FontId::new(32.0, FontFamily::Monospace);
+        let chars: String = ('!'..='~').collect();
+        let galley = ctx.fonts_mut(|f| f.layout_no_wrap(chars, font, Color32::WHITE));
+        let atlas = ctx.fonts(|f| f.image());
+        let mut ascii = [[0u8; CELL_W * CELL_H]; 94];
+        let Some(row) = galley.rows.first() else { return Self { ascii } };
+        let row_h = row.rect().height().max(1.0);
+        let top = row.rect().top();
+        for (i, g) in row.glyphs.iter().enumerate().take(94) {
+            let uv = g.uv_rect;
+            let (w, h) = ((uv.max[0] - uv.min[0]) as usize, (uv.max[1] - uv.min[1]) as usize);
+            if w == 0 || h == 0 {
+                continue;
+            }
+            // Atlas texels per point.
+            let scale = w as f32 / uv.size.x.max(0.001);
+            let mut sum = [0f32; CELL_W * CELL_H];
+            let mut count = [0f32; CELL_W * CELL_H];
+            // Every cell counts all its area (empty parts included).
+            let cell_area = (g.advance_width / CELL_W as f32) * (row_h / CELL_H as f32) * scale * scale;
+            for ty in 0..h {
+                for tx in 0..w {
+                    let a = atlas[(uv.min[0] as usize + tx, uv.min[1] as usize + ty)].a() as f32;
+                    // Where this texel is, in points within the glyph's cell.
+                    let x = uv.offset.x + tx as f32 / scale;
+                    let y = g.pos.y + uv.offset.y + ty as f32 / scale - top;
+                    let cx = ((x / g.advance_width) * CELL_W as f32).floor();
+                    let cy = ((y / row_h) * CELL_H as f32).floor();
+                    if (0.0..CELL_W as f32).contains(&cx) && (0.0..CELL_H as f32).contains(&cy) {
+                        let k = cy as usize * CELL_W + cx as usize;
+                        sum[k] += a;
+                        count[k] += 1.0;
+                    }
+                }
+            }
+            for k in 0..CELL_W * CELL_H {
+                let _ = count[k];
+                // Thin strokes cover little of a cell: boost so they show.
+                ascii[i][k] = (sum[k] / cell_area.max(1.0) * 2.2).min(255.0) as u8;
+            }
+        }
+        Self { ascii }
+    }
+}
+
+/// The glyph masks, built once from the font.
+pub fn glyphs(ctx: &egui::Context) -> &'static Glyphs {
+    static GLYPHS: OnceLock<Glyphs> = OnceLock::new();
+    GLYPHS.get_or_init(|| Glyphs::build(ctx))
 }
 
 /// Where things are in the minimap, in points from its top.
@@ -96,114 +175,120 @@ pub fn input(ui: &Ui, rect: Rect, id: Id, mm: &mut Minimap, rows: usize, row_hei
     None
 }
 
-/// Rebuild the texture if the text changed (throttled while typing).
-pub fn update(
-    ctx: &egui::Context,
+/// Draw the minimap: the visible rows of the miniature, the cursor's row
+/// and the slider. The texture is rebuilt when those rows or the text change.
+#[allow(clippy::too_many_arguments)]
+pub fn show(
+    ui: &Ui,
+    rect: Rect,
     doc: &mut Document,
     spans: &[HighlightSpan],
     color_of: &dyn Fn(TokenKind) -> Color32,
     text: Color32,
+    row_height: f32,
+    border: Color32,
 ) {
-    let key = (doc.buffer.version(), doc.wrap.width(), doc.wrap.row_count());
-    let mm = &doc.minimap;
-    if mm.key == Some(key) && mm.tex.is_some() {
-        return;
-    }
-    if let Some(t) = mm.built.filter(|_| mm.tex.is_some()) {
-        if t.elapsed() < REBUILD_EVERY {
-            ctx.request_repaint_after(REBUILD_EVERY - t.elapsed());
-            return;
+    let rows = doc.wrap.row_count();
+    let g = geometry(rows, row_height, doc.minimap.scroll_y, doc.minimap.view_h, rect.height());
+    // The rows in view, and how far the first one sits above the top.
+    let first = (g.offset / ROW_PX).floor() as usize;
+    let count = ((rect.height() / ROW_PX).ceil() as usize + 1).min(rows.saturating_sub(first)).max(1);
+    let key = (doc.buffer.version(), doc.wrap.width(), first, count);
+    if doc.minimap.key != Some(key) || doc.minimap.tex.is_none() {
+        let image = image(ui.ctx(), doc, spans, color_of, text, first, count);
+        // One texel per pixel on a 2× (Retina) screen: sample exactly there,
+        // smooth the scaling anywhere else.
+        let ppp = ui.ctx().pixels_per_point();
+        let filter = if (ppp - 2.0).abs() < 0.01 { TextureOptions::NEAREST } else { TextureOptions::LINEAR };
+        let mm = &mut doc.minimap;
+        match &mut mm.tex {
+            Some(t) => t.set(image, filter),
+            None => mm.tex = Some(ui.ctx().load_texture("minimap", image, filter)),
         }
+        mm.key = Some(key);
     }
-    let image = image(doc, spans, color_of, text);
-    let mm = &mut doc.minimap;
-    match &mut mm.tex {
-        Some(t) => t.set(image, TextureOptions::LINEAR),
-        None => mm.tex = Some(ctx.load_texture("minimap", image, TextureOptions::LINEAR)),
-    }
-    mm.key = Some(key);
-    mm.built = Some(Instant::now());
-}
 
-/// The miniature: one texel per character, two per row (the second fainter,
-/// which separates the lines).
-fn image(doc: &Document, spans: &[HighlightSpan], color_of: &dyn Fn(TokenKind) -> Color32, text: Color32) -> ColorImage {
-    let wrap = &doc.wrap;
-    let rows = wrap.row_count();
-    let step = rows.div_ceil(MAX_TEX_ROWS).max(1);
-    let tex_rows = rows.div_ceil(step).max(1);
-    let mut img = ColorImage::filled([MAX_COLS, tex_rows * 2], Color32::TRANSPARENT);
-    let rope = doc.buffer.rope();
-    let mut colors: Vec<Option<Color32>> = Vec::new();
-    for line in 0..doc.buffer.line_count() {
-        let row_range = wrap.rows_of_line(line);
-        // Skip lines none of whose rows are sampled.
-        if !row_range.clone().any(|r| r % step == 0) {
-            continue;
-        }
-        let text_of_line = doc.buffer.line(line);
-        let line_start = rope.line_to_byte(line);
-        // Colour of each char (None for whitespace).
-        colors.clear();
-        let mut si = spans.partition_point(|s| s.end <= line_start);
-        for (b, ch) in text_of_line.char_indices() {
-            if ch.is_whitespace() {
-                colors.push(None);
-                continue;
-            }
-            let at = line_start + b;
-            while si < spans.len() && spans[si].end <= at {
-                si += 1;
-            }
-            let c = spans.get(si).filter(|s| s.start <= at).map_or(text, |s| color_of(s.kind));
-            colors.push(Some(c));
-        }
-        for r in row_range {
-            if r % step != 0 {
-                continue;
-            }
-            let row = wrap.row(r);
-            let y = (r / step) * 2;
-            let end = row.end.min(colors.len());
-            for (i, c) in colors[row.start.min(end)..end].iter().enumerate() {
-                let x = row.indent + i;
-                if x >= MAX_COLS {
-                    break;
-                }
-                if let Some(c) = c {
-                    img[(x, y)] = c.gamma_multiply(0.85);
-                    img[(x, y + 1)] = c.gamma_multiply(0.35);
-                }
-            }
-        }
-    }
-    img
-}
-
-/// Draw the miniature and the slider.
-pub fn paint(ui: &Ui, rect: Rect, mm: &Minimap, rows: usize, row_height: f32, cursor_row: usize, border: Color32) {
     let painter = ui.painter_at(rect);
     painter.vline(rect.left(), rect.y_range(), egui::Stroke::new(1.0_f32, border));
-    let g = geometry(rows, row_height, mm.scroll_y, mm.view_h, rect.height());
-    let left = rect.left() + 4.0;
-    if let Some(tex) = &mm.tex {
-        let shown = g.total.min(rect.height());
-        if g.total > 0.0 {
-            let uv = Rect::from_min_max(Pos2::new(0.0, g.offset / g.total), Pos2::new(1.0, (g.offset + shown) / g.total));
-            let r = Rect::from_min_size(Pos2::new(left, rect.top()), Vec2::new(MAX_COLS as f32, shown));
-            painter.image(tex.id(), r, uv, Color32::WHITE);
-        }
+    let top = rect.top() - (g.offset - first as f32 * ROW_PX);
+    if let Some(tex) = &doc.minimap.tex {
+        // On whole pixels, so each texel lands on one.
+        let ppp = ui.ctx().pixels_per_point();
+        let snap = |v: f32| (v * ppp).round() / ppp;
+        let r =
+            Rect::from_min_size(Pos2::new(snap(rect.left() + 4.0), snap(top)), Vec2::new(MAX_COLS as f32, count as f32 * ROW_PX));
+        painter.image(tex.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
     }
     // The cursor's row, as a thin line.
+    let cursor_row = doc.wrap.row_of(doc.buffer.cursor.head());
     let cy = rect.top() + cursor_row as f32 * ROW_PX - g.offset;
     if (rect.top()..rect.bottom()).contains(&cy) {
         painter.hline(rect.left() + 1.0..=rect.right(), cy + 0.5, egui::Stroke::new(1.0_f32, Color32::from_white_alpha(40)));
     }
     // The visible part.
-    let hot = ui.rect_contains_pointer(rect) || mm.drag_from.is_some();
+    let hot = ui.rect_contains_pointer(rect) || doc.minimap.drag_from.is_some();
     let slider =
         Rect::from_min_size(Pos2::new(rect.left() + 1.0, rect.top() + g.slider_top), Vec2::new(rect.width() - 1.0, g.slider_h));
     painter.rect_filled(slider, 0.0, Color32::from_white_alpha(if hot { 26 } else { 14 }));
+}
+
+/// Rows `first..first + count` of the miniature: each character a 2×4
+/// texel glyph in its syntax colour.
+fn image(
+    ctx: &egui::Context,
+    doc: &Document,
+    spans: &[HighlightSpan],
+    color_of: &dyn Fn(TokenKind) -> Color32,
+    text: Color32,
+    first: usize,
+    count: usize,
+) -> ColorImage {
+    let glyphs = glyphs(ctx);
+    let wrap = &doc.wrap;
+    let rope = doc.buffer.rope();
+    let mut img = ColorImage::filled([MAX_COLS * CELL_W, count * CELL_H], Color32::TRANSPARENT);
+    // Characters and colours of the line being drawn (rows of one line share it).
+    let mut cached: Option<(usize, Vec<(char, Color32)>)> = None;
+    for i in 0..count {
+        let row = wrap.row(first + i);
+        if first + i >= wrap.row_count() {
+            break;
+        }
+        if cached.as_ref().is_none_or(|(l, _)| *l != row.line) {
+            let line = doc.buffer.line(row.line);
+            let start = rope.line_to_byte(row.line);
+            let mut si = spans.partition_point(|s| s.end <= start);
+            let chars = line
+                .char_indices()
+                .map(|(b, ch)| {
+                    let at = start + b;
+                    while si < spans.len() && spans[si].end <= at {
+                        si += 1;
+                    }
+                    (ch, spans.get(si).filter(|s| s.start <= at).map_or(text, |s| color_of(s.kind)))
+                })
+                .collect();
+            cached = Some((row.line, chars));
+        }
+        let chars = &cached.as_ref().expect("just set").1;
+        let end = row.end.min(chars.len());
+        for (j, &(ch, color)) in chars[row.start.min(end)..end].iter().enumerate() {
+            let col = row.indent + j;
+            if col >= MAX_COLS {
+                break;
+            }
+            let Some(mask) = glyphs.mask(ch) else { continue };
+            for cy in 0..CELL_H {
+                for cx in 0..CELL_W {
+                    let a = mask[cy * CELL_W + cx];
+                    if a > 0 {
+                        img[(col * CELL_W + cx, i * CELL_H + cy)] = color.gamma_multiply(a as f32 / 255.0);
+                    }
+                }
+            }
+        }
+    }
+    img
 }
 
 #[cfg(test)]
@@ -218,6 +303,24 @@ mod tests {
         let g = geometry(100, 20.0, 1600.0, 400.0, 600.0);
         assert_eq!(g.slider_top, 160.0);
         assert_eq!(g.max_scroll, 1600.0);
+    }
+
+    #[test]
+    fn glyphs_look_like_their_characters() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        let g = Glyphs::build(&ctx);
+        let m = |c| *g.mask(c).unwrap();
+        let ink = |mask: Mask, row: usize| mask[row * CELL_W] as u32 + mask[row * CELL_W + 1] as u32;
+        // '_' sits at the bottom, '^' and '\'' at the top, '.' low, '|' all the way.
+        assert!(ink(m('_'), 3) > ink(m('_'), 0), "{:?}", m('_'));
+        assert!(ink(m('^'), 0) + ink(m('^'), 1) > ink(m('^'), 3), "{:?}", m('^'));
+        assert!(ink(m('.'), 2) + ink(m('.'), 3) > ink(m('.'), 0), "{:?}", m('.'));
+        assert!((1..3).all(|r| ink(m('|'), r) > 0), "{:?}", m('|'));
+        // Heavier letters have more ink than light punctuation.
+        let total = |mask: Mask| mask.iter().map(|&a| a as u32).sum::<u32>();
+        assert!(total(m('M')) > total(m('.')));
+        assert!(g.mask(' ').is_none());
     }
 
     #[test]

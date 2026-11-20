@@ -891,9 +891,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
         doc.minimap.scroll_y = scroll.state.offset.y;
         doc.minimap.view_h = scroll.inner_rect.height();
         let spans = doc.spans(&mut app.languages).to_vec();
-        super::minimap::update(outer.ctx(), doc, &spans, &color_of, palette_text);
-        let cursor_row = doc.wrap.row_of(doc.buffer.cursor.head());
-        super::minimap::paint(outer, mm_rect, &doc.minimap, row_total, row_height, cursor_row, app.palette.border);
+        super::minimap::show(outer, mm_rect, doc, &spans, &color_of, palette_text, row_height, app.palette.border);
     }
     outer.allocate_rect(full, Sense::hover());
 
