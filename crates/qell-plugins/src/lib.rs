@@ -87,10 +87,23 @@ pub struct Host {
 
 impl Host {
     pub fn new() -> Result<Self> {
-        let engine = Engine::default();
+        let mut config = wasmtime::Config::new();
+        // On macOS Wasmtime catches guest faults with a Mach exception-port
+        // thread that aborts the process if any signal interrupts its wait.
+        // The terminal installs a SIGCHLD handler and every finished child
+        // process (git, language servers) sends one, so sooner or later one
+        // lands on that thread. Plain signal handlers have no such thread.
+        config.macos_use_mach_ports(false);
+        let engine = Engine::new(&config).map_err(|e| anyhow!("{e}"))?;
         let mut linker = Linker::new(&engine);
         define_host_api(&mut linker)?;
         Ok(Self { engine, linker, plugins: Vec::new(), commands: BTreeMap::new() })
+    }
+
+    /// Whether `dir` holds any plugin. The editor only starts the plugin
+    /// runtime when it does.
+    pub fn has_plugins(dir: &Path) -> bool {
+        std::fs::read_dir(dir).map(|rd| rd.flatten().any(|e| e.path().extension().is_some_and(|x| x == "wasm"))).unwrap_or(false)
     }
 
     /// Load every `*.wasm` in `dir`. Missing dir is fine; a broken plugin is

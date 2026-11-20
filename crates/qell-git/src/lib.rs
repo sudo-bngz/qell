@@ -347,23 +347,42 @@ pub fn discover(root: &Path, opts: &ScanOptions) -> Vec<PathBuf> {
     found
 }
 
-/// `git status` for every repository, in parallel. `None` when there is
-/// no repository at all.
+/// Most `git status` processes run at once.
+const PARALLEL: usize = 4;
+
+/// `git status` for every repository, a few at a time. `None` when there
+/// is no repository at all.
 pub fn workspace_status(root: &Path, repos: &[PathBuf]) -> Option<WorkspaceStatus> {
     if repos.is_empty() {
         return None;
     }
+    let next = std::sync::atomic::AtomicUsize::new(0);
     let results: Vec<(PathBuf, RepoStatus)> = thread::scope(|s| {
-        let handles: Vec<_> = repos
-            .iter()
-            .map(|rel| {
-                let dir = root.join(rel);
-                s.spawn(move || status(&dir).map(|st| (rel.clone(), st)))
+        let workers: Vec<_> = (0..PARALLEL.min(repos.len()))
+            .map(|_| {
+                s.spawn(|| {
+                    let mut out = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(rel) = repos.get(i) else { break };
+                        if let Some(st) = status(&root.join(rel)) {
+                            out.push((rel.clone(), st));
+                        }
+                    }
+                    out
+                })
             })
             .collect();
-        handles.into_iter().filter_map(|h| h.join().ok().flatten()).collect()
+        workers.into_iter().flat_map(|w| w.join().unwrap_or_default()).collect()
     });
     (!results.is_empty()).then(|| WorkspaceStatus::merge(results))
+}
+
+/// Time between refreshes: 3 s for a handful of repositories, longer for
+/// many, so a folder of 60 clones doesn't run git non-stop.
+fn interval_for(repos: usize) -> Duration {
+    let rounds = repos.div_ceil(PARALLEL * 2).max(1) as u32;
+    (INTERVAL * rounds).min(MAX_INTERVAL)
 }
 
 enum Request {
@@ -383,6 +402,7 @@ pub struct Watcher {
 
 /// How often the status is refreshed when nothing asks for it.
 const INTERVAL: Duration = Duration::from_secs(3);
+const MAX_INTERVAL: Duration = Duration::from_secs(20);
 /// Repositories are looked for again every this many refreshes (and on
 /// every explicit refresh), so a new clone shows up on its own.
 const REDISCOVER_EVERY: u32 = 10;
@@ -411,7 +431,8 @@ impl Watcher {
                         }
                         last = Some(st);
                     }
-                    let first = match req_rx.recv_timeout(INTERVAL) {
+                    let wait = interval_for(repos.as_ref().map_or(0, Vec::len));
+                    let first = match req_rx.recv_timeout(wait) {
                         Ok(r) => Some(r),
                         Err(RecvTimeoutError::Timeout) => None,
                         Err(RecvTimeoutError::Disconnected) => return,
@@ -540,6 +561,14 @@ mod tests {
         assert_eq!(st.branch, None);
         let st = RepoStatus::parse(b"## feat/x...origin/feat/x\0", "");
         assert_eq!(st.branch.as_deref(), Some("feat/x"));
+    }
+
+    #[test]
+    fn refresh_slows_down_with_many_repositories() {
+        assert_eq!(interval_for(0), INTERVAL);
+        assert_eq!(interval_for(5), INTERVAL);
+        assert!(interval_for(30) > INTERVAL);
+        assert_eq!(interval_for(64), MAX_INTERVAL);
     }
 
     #[test]

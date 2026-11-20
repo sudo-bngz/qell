@@ -140,11 +140,16 @@ impl QellApp {
         crate::icons::install(&cc.egui_ctx);
         cc.egui_ctx.set_zoom_factor(config.ui_scale);
 
-        let mut plugins = match PluginHost::new() {
-            Ok(h) => Some(h),
-            Err(e) => {
-                log::error!("plugin host unavailable: {e:#}");
-                None
+        // No plugins installed: don't start the WebAssembly runtime at all.
+        let mut plugins = if !PluginHost::has_plugins(&config::plugins_dir()) {
+            None
+        } else {
+            match PluginHost::new() {
+                Ok(h) => Some(h),
+                Err(e) => {
+                    log::error!("plugin host unavailable: {e:#}");
+                    None
+                }
             }
         };
         let plugin_commands = plugins
