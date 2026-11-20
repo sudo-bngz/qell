@@ -33,3 +33,4 @@ tree-sitter-xml.workspace = true
 tree-sitter-vcl.workspace = true
 tree-sitter-nginx.workspace = true
 tree-sitter-make.workspace = true
+arborium-dockerfile.workspace = true

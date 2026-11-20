@@ -9,6 +9,7 @@ mod app;
 mod commands;
 mod config;
 mod document;
+mod icons;
 mod theme;
 mod views;
 

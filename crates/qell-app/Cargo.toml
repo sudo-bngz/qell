@@ -21,6 +21,7 @@ egui.workspace = true
 eframe.workspace = true
 egui_extras.workspace = true
 rfd.workspace = true
+devicons.workspace = true
 qell-core.workspace = true
 qell-lsp.workspace = true
 qell-term.workspace = true

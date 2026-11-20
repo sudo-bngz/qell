@@ -188,6 +188,8 @@ pub struct Language {
     pub aliases: &'static [&'static str],
     /// Command line of the language server, if one is known.
     pub lsp: Option<&'static [&'static str]>,
+    /// Hand-written highlighter for languages without a tree-sitter grammar.
+    pub lexer: Option<fn(&str) -> Vec<HighlightSpan>>,
     /// Internal languages (Markdown's inline grammar) are only reachable
     /// through injections, never picked for a file.
     pub hidden: bool,
@@ -437,6 +439,27 @@ pub fn builtin_languages() -> Vec<Language> {
             grammar: Some(Grammar::new(tree_sitter_nginx::LANGUAGE.into(), include_str!("../queries/nginx-highlights.scm"))),
             ..Default::default()
         },
+        Language {
+            id: "dockerfile",
+            name: "Dockerfile",
+            extensions: &["dockerfile", "containerfile"],
+            filenames: &["Dockerfile", "Containerfile", "dockerfile"],
+            aliases: &["docker"],
+            grammar: Some(
+                Grammar::new(arborium_dockerfile::language().into(), arborium_dockerfile::HIGHLIGHTS_QUERY)
+                    .injections(include_str!("../queries/dockerfile-injections.scm")),
+            ),
+            ..Default::default()
+        },
+        Language {
+            id: "conf",
+            name: "Config",
+            extensions: &["conf", "cnf", "cf", "config", "rc"],
+            filenames: &["sshd_config", "ssh_config", "hosts", "fstab", "crontab", "inputrc", ".tmux.conf", ".wgetrc", ".curlrc"],
+            aliases: &["apacheconf", "config"],
+            lexer: Some(crate::conf::highlight),
+            ..Default::default()
+        },
         Language { id: "plaintext", name: "Plain Text", extensions: &["txt", "log"], ..Default::default() },
     ]
 }
@@ -452,6 +475,15 @@ pub fn language_for_path(path: &Path) -> Option<String> {
     // .env.local, .env.production, …
     if name.starts_with(".env.") {
         return Some("shellscript".into());
+    }
+    // Dockerfile.dev, prod.Dockerfile, …
+    if name.starts_with("Dockerfile.") || name.starts_with("Containerfile.") {
+        return Some("dockerfile".into());
+    }
+    // *.conf under an nginx directory (sites-available/, conf.d/) is nginx.
+    let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
+    if ext.as_deref() == Some("conf") && path.components().any(|c| c.as_os_str().to_str().is_some_and(|c| c.contains("nginx"))) {
+        return Some("nginx".into());
     }
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     languages.into_iter().find(|l| !l.hidden && l.extensions.contains(&ext.as_str())).map(|l| l.id.to_string())
@@ -509,7 +541,12 @@ impl LanguageRegistry {
     /// Highlight `source` as language `lang_id`. Unknown or grammar-less
     /// languages return an empty list, which the UI renders as plain text.
     pub fn highlight(&mut self, lang_id: &str, source: &str) -> Vec<HighlightSpan> {
-        let Some(cfg) = self.configs.get(lang_id) else { return Vec::new() };
+        let Some(cfg) = self.configs.get(lang_id) else {
+            return match self.get(lang_id).and_then(|l| l.lexer) {
+                Some(lex) => lex(source),
+                None => Vec::new(),
+            };
+        };
         let configs = &self.configs;
         let names = &self.names;
         // Injected languages (a ```sh fence, <script> in HTML) are named by
@@ -667,6 +704,9 @@ mod tests {
             ("vcl", "vcl 4.1;\nsub vcl_recv {\n  return (pass);\n}\n", "sub", &[Keyword]),
             ("nginx", "server {\n  listen 80;\n}\n", "listen", &[Keyword, Property, Function, Variable]),
             ("markdown", "# Title\n\nSome *em* text.\n", "Title", &[Heading]),
+            ("dockerfile", "FROM rust:1.95 AS build\nRUN if true; then cargo build; fi\n", "FROM", &[Keyword]),
+            ("dockerfile", "FROM rust:1.95 AS build\nRUN if true; then cargo build; fi\n", "if", &[Keyword]),
+            ("conf", "[mysqld]\nport = 3306\n", "port", &[Property]),
             ("markdown", "# Title\n\nSome *em* text.\n", "em", &[Emphasis]),
         ];
         let mut failures = Vec::new();
@@ -709,6 +749,13 @@ mod tests {
         assert_eq!(id("tsconfig.json").as_deref(), Some("json"));
         assert_eq!(id("/etc/nginx/nginx.conf").as_deref(), Some("nginx"));
         assert_eq!(id(".gitconfig").as_deref(), Some("ini"));
+        assert_eq!(id("Dockerfile").as_deref(), Some("dockerfile"));
+        assert_eq!(id("Dockerfile.dev").as_deref(), Some("dockerfile"));
+        assert_eq!(id("app.dockerfile").as_deref(), Some("dockerfile"));
+        assert_eq!(id("/etc/nginx/sites-available/default.conf").as_deref(), Some("nginx"));
+        assert_eq!(id("/etc/apache2/apache2.conf").as_deref(), Some("conf"));
+        assert_eq!(id("/etc/ssh/sshd_config").as_deref(), Some("conf"));
+        assert_eq!(id("my.cnf").as_deref(), Some("conf"));
     }
 
     #[test]

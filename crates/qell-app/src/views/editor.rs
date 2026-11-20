@@ -54,7 +54,15 @@ fn show_tabs(app: &mut QellApp, ui: &mut egui::Ui) {
                     let inner = egui::Frame::new().fill(fill).inner_margin(egui::Margin::symmetric(12, 7)).show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 8.0;
-                            ui.label(egui::RichText::new(title).size(13.0).color(color));
+                            match doc.buffer.path() {
+                                Some(p) => {
+                                    let (icon, icon_color) = crate::icons::for_file(p);
+                                    ui.label(crate::views::sidebar::icon_label(icon, icon_color, &title, color));
+                                }
+                                None => {
+                                    ui.label(egui::RichText::new(title).size(13.0).color(color));
+                                }
+                            }
                             ui.small_button("×").rect
                         })
                         .inner

@@ -6,6 +6,7 @@
 //! ([`syntax`]). Everything else in Qell builds on top of these types.
 
 pub mod buffer;
+pub mod conf;
 pub mod history;
 pub mod position;
 pub mod syntax;

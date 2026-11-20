@@ -129,6 +129,7 @@ impl QellApp {
         let config = Config::load();
         let palette = Palette::dark();
         palette.apply(&cc.egui_ctx);
+        crate::icons::install(&cc.egui_ctx);
 
         let mut plugins = match PluginHost::new() {
             Ok(h) => Some(h),

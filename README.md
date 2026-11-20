@@ -15,9 +15,15 @@ bottom, and language-server completion for the languages you actually use.
 - **Syntax highlighting** — tree-sitter grammars for Rust, C, Go,
   JavaScript, TypeScript/TSX, HCL/Terraform, VCL (Varnish), Markdown, HTML,
   CSS, JSON, TOML, YAML, XML, INI, shell scripts (including `.env` and
-  dotfiles like `.bashrc`), Makefiles and nginx config. Embedded code is
-  highlighted too: fenced code blocks in Markdown, `<script>`/`<style>` in
-  HTML, recipe lines in Makefiles.
+  dotfiles like `.bashrc`), Makefiles, Dockerfiles and nginx config. Other
+  `.conf`-style files (Apache, sshd, MySQL, systemd…) get a tolerant
+  generic highlighter for comments, sections, keys, strings, numbers and
+  variables. Embedded code is highlighted too: fenced code blocks in
+  Markdown, `<script>`/`<style>` in HTML, `RUN` in Dockerfiles, recipe lines
+  in Makefiles.
+- **File icons** — brand icons and colours per file type in the tree and
+  tabs (Terraform, Rust, Go, Docker, JSON…), from a small bundled subset of
+  Nerd Fonts; nothing to install.
 - **Completion & diagnostics** — a JSON-RPC LSP client that launches
   `rust-analyzer`, `clangd`, `gopls`, `typescript-language-server` or
   `terraform-ls` on demand. Errors are underlined; hover a line to read them.

@@ -59,6 +59,7 @@ tree-sitter-xml = "0.7"
 tree-sitter-vcl = "0.4"
 tree-sitter-nginx = "1.0"
 tree-sitter-make = "1.1"
+arborium-dockerfile = "2.18"
 
 # lsp
 lsp-types = "0.97"
@@ -75,6 +76,7 @@ egui = "0.33"
 eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 egui_extras = "0.33"
 rfd = "0.18"
+devicons = "0.6"
 
 [profile.release]
 opt-level = 3
