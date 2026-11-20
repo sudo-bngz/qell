@@ -10,6 +10,7 @@ pub mod buffer;
 pub mod conf;
 pub mod history;
 pub mod position;
+pub mod structure;
 pub mod syntax;
 
 pub use buffer::Buffer;
