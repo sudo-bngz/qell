@@ -50,8 +50,10 @@ bottom, and language-server completion for the languages you actually use.
   a commit box (`Ctrl+Enter`). Commits run your hooks and signing in the
   background; a failing hook shows its message. The activity bar badge
   counts changed files. A **Graph** section draws the history of HEAD and
-  its upstream (branches, merges, tags; hover for details, click to copy
-  a hash).
+  its upstream (branches, merges, tags). Click a commit to list the files
+  it changed, click a file to open its diff (read-only, inline, with
+  syntax colours; `F7` / `Shift+F7` jump between changes). Right-click a
+  commit to copy its hash or message.
 - **Integrated terminals** — the Alacritty terminal core in a panel
   (`` Ctrl+` ``), with 256/true colour, scrollback and application-cursor mode.
   Run several shells as tabs: `` Ctrl+Shift+` `` opens a new one,

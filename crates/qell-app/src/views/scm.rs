@@ -39,6 +39,10 @@ pub struct ScmState {
     rx: Receiver<JobResult>,
     /// Repository whose history the Graph shows (picked by the user).
     pub graph_repo: Option<PathBuf>,
+    /// Commits expanded in the graph to list their files.
+    expanded: HashSet<String>,
+    /// Files changed by each expanded commit, by hash.
+    commit_files: HashMap<String, Result<Vec<qell_git::graph::ChangedFile>, String>>,
     graphs: HashMap<PathBuf, GraphState>,
     #[allow(clippy::type_complexity)]
     graph_tx: Sender<(PathBuf, String, Result<Vec<qell_git::graph::Commit>, String>)>,
@@ -57,6 +61,8 @@ impl Default for ScmState {
             tx,
             rx,
             graph_repo: None,
+            expanded: HashSet::new(),
+            commit_files: HashMap::new(),
             graphs: HashMap::new(),
             graph_tx,
             graph_rx,
@@ -572,45 +578,158 @@ fn show_graph(app: &mut QellApp, ui: &mut egui::Ui, repos: &[(PathBuf, RepoStatu
         g.commits.iter().find(|c| c.refs.iter().any(|r| r == "HEAD" || r.starts_with("HEAD -> "))).map(|c| c.hash.clone());
     let lanes = g.rows.iter().map(|r| r.width).max().unwrap_or(1).min(MAX_LANES + 1);
     let graph_w = 10.0 + lanes as f32 * LANE_W;
-    let mut copied = None;
+    let mut toggle: Option<qell_git::graph::Commit> = None;
+    let mut open: Option<(qell_git::graph::Commit, qell_git::graph::ChangedFile)> = None;
+    let mut copy: Option<(String, &'static str)> = None;
     ui.spacing_mut().item_spacing.y = 0.0;
     for (c, row) in g.commits.iter().zip(&g.rows) {
+        let expanded = app.scm.expanded.contains(&c.hash);
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), GRAPH_ROW), egui::Sense::click());
-        if !ui.is_rect_visible(rect) {
-            continue;
-        }
-        let p = ui.painter_at(rect);
-        if resp.hovered() {
-            p.rect_filled(rect, 0.0, hover_bg);
-        }
-        let is_head = head_hash.as_deref() == Some(c.hash.as_str());
-        paint_graph_row(&p, rect, row, c.parents.len() > 1, is_head, if resp.hovered() { hover_bg } else { bg });
+        if ui.is_rect_visible(rect) {
+            let p = ui.painter_at(rect);
+            let row_bg = if resp.hovered() || expanded { hover_bg } else { bg };
+            if row_bg != bg {
+                p.rect_filled(rect, 0.0, row_bg);
+            }
+            if expanded {
+                p.rect_stroke(
+                    rect.shrink(0.5),
+                    2.0,
+                    egui::Stroke::new(1.0_f32, accent.gamma_multiply(0.7)),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            let is_head = head_hash.as_deref() == Some(c.hash.as_str());
+            paint_graph_row(&p, rect, row, c.parents.len() > 1, is_head, row_bg);
 
-        let mut job = egui::text::LayoutJob::default();
-        ref_badges(&mut job, &c.refs, accent, dim);
-        job.append(
-            &c.subject,
-            0.0,
-            egui::TextFormat { font_id: egui::FontId::proportional(12.5), color: text, ..Default::default() },
-        );
-        job.wrap = egui::text::TextWrapping::truncate_at_width(rect.width() - graph_w - 4.0);
-        let galley = ui.fonts_mut(|f| f.layout_job(job));
-        p.galley(egui::pos2(rect.left() + graph_w, rect.center().y - galley.size().y / 2.0), galley, text);
-
+            let mut job = egui::text::LayoutJob::default();
+            ref_badges(&mut job, &c.refs, accent, dim);
+            job.append(
+                &c.subject,
+                0.0,
+                egui::TextFormat { font_id: egui::FontId::proportional(12.5), color: text, ..Default::default() },
+            );
+            job.wrap = egui::text::TextWrapping::truncate_at_width(rect.width() - graph_w - 4.0);
+            let galley = ui.fonts_mut(|f| f.layout_job(job));
+            p.galley(egui::pos2(rect.left() + graph_w, rect.center().y - galley.size().y / 2.0), galley, text);
+        }
+        let files_note = match app.scm.commit_files.get(&c.hash) {
+            Some(Ok(files)) => format!("{} file{} changed", files.len(), if files.len() == 1 { "" } else { "s" }),
+            _ => "Click to see the files it changed".to_string(),
+        };
         let resp = resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_ui(|ui| {
             ui.label(RichText::new(&c.subject).strong());
             ui.label(RichText::new(format!("{} · {} · {}", c.short_hash(), c.author, time_ago(c.time))).color(dim));
             if !c.refs.is_empty() {
                 ui.label(RichText::new(c.refs.join(", ")).size(11.0).color(dim));
             }
-            ui.label(RichText::new("Click to copy the commit hash").size(11.0).color(dim));
+            ui.label(RichText::new(files_note).size(11.0).color(dim));
+        });
+        resp.context_menu(|ui| {
+            if ui.button("Copy Commit Hash").clicked() {
+                copy = Some((c.hash.clone(), "hash"));
+                ui.close();
+            }
+            if ui.button("Copy Commit Message").clicked() {
+                copy = Some((c.subject.clone(), "message"));
+                ui.close();
+            }
         });
         if resp.clicked() {
-            copied = Some(c.short_hash().to_string());
+            toggle = Some(c.clone());
+        }
+
+        // The commit's files, under it, with the graph's lines running past.
+        if !expanded {
+            continue;
+        }
+        let through: Vec<(usize, usize)> =
+            row.segments.iter().filter(|s| s.half == qell_git::graph::Half::Bottom).map(|s| (s.to, s.color)).collect();
+        let rows: Vec<Result<&qell_git::graph::ChangedFile, &str>> = match app.scm.commit_files.get(&c.hash) {
+            Some(Ok(files)) if files.is_empty() => vec![Err("No file changes.")],
+            Some(Ok(files)) => files.iter().map(Ok).collect(),
+            Some(Err(e)) => vec![Err(e.as_str())],
+            None => vec![Err("Loading…")],
+        };
+        for item in rows {
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), GRAPH_ROW), egui::Sense::click());
+            if !ui.is_rect_visible(rect) {
+                continue;
+            }
+            let p = ui.painter_at(rect);
+            if resp.hovered() && item.is_ok() {
+                p.rect_filled(rect, 0.0, hover_bg);
+            }
+            for (lane, color) in &through {
+                let x = rect.left() + 7.0 + (*lane).min(MAX_LANES) as f32 * LANE_W;
+                let stroke = egui::Stroke::new(1.6_f32, LANE_COLORS[color % LANE_COLORS.len()]);
+                p.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())], stroke);
+            }
+            let x0 = rect.left() + graph_w + 8.0;
+            match item {
+                Ok(f) => {
+                    let color = app.palette.git_color(f.status);
+                    let name = f.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    let dir = f.path.parent().map(|d| d.display().to_string()).unwrap_or_default();
+                    let icon = app.config.file_icons.then(|| icons::for_file(&f.path));
+                    let name_color = if f.status == FileStatus::Deleted { dim } else { text };
+                    let mut job = super::sidebar::icon_label(icon, &name, name_color);
+                    if f.status == FileStatus::Deleted {
+                        if let Some(s) = job.sections.last_mut() {
+                            s.format.strikethrough = egui::Stroke::new(1.0_f32, dim);
+                        }
+                    }
+                    if !dir.is_empty() {
+                        job.append(
+                            &dir,
+                            6.0,
+                            egui::TextFormat { font_id: egui::FontId::proportional(11.0), color: dim, ..Default::default() },
+                        );
+                    }
+                    job.wrap = egui::text::TextWrapping::truncate_at_width(rect.right() - x0 - 22.0);
+                    let galley = ui.fonts_mut(|fo| fo.layout_job(job));
+                    p.galley(egui::pos2(x0, rect.center().y - galley.size().y / 2.0), galley, text);
+                    p.text(
+                        rect.right_center() - egui::vec2(8.0, 0.0),
+                        egui::Align2::RIGHT_CENTER,
+                        f.status.badge(),
+                        egui::FontId::proportional(12.0),
+                        color,
+                    );
+                    let resp = resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(match &f.old_path {
+                        Some(old) => format!("{} → {}\nClick to open the changes", old.display(), f.path.display()),
+                        None => format!("{}\nClick to open the changes", f.path.display()),
+                    });
+                    if resp.clicked() {
+                        open = Some((c.clone(), f.clone()));
+                    }
+                }
+                Err(msg) => {
+                    p.text(
+                        egui::pos2(x0, rect.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        msg,
+                        egui::FontId::proportional(12.0),
+                        dim,
+                    );
+                }
+            }
         }
     }
-    if let Some(h) = copied {
-        ui.ctx().copy_text(h.clone());
-        app.notify(format!("Copied {h}"));
+    if let Some(c) = toggle {
+        if !app.scm.expanded.remove(&c.hash) {
+            app.scm.expanded.insert(c.hash.clone());
+            if !app.scm.commit_files.contains_key(&c.hash) {
+                let files = qell_git::graph::changed_files(&app.root.join(&repo), &c);
+                app.scm.commit_files.insert(c.hash.clone(), files);
+            }
+        }
+    }
+    if let Some((c, f)) = open {
+        app.open_commit_diff(&repo, &c, &f);
+    }
+    if let Some((value, what)) = copy {
+        ui.ctx().copy_text(value);
+        app.notify(format!("Copied commit {what}"));
     }
 }

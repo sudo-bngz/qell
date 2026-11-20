@@ -13,6 +13,7 @@ use qell_lsp::lsp_types::{CompletionItem, CompletionItemKind, CompletionTextEdit
 
 use crate::app::{Focus, QellApp};
 use crate::commands::Command;
+use crate::document::LineMark;
 
 const GUTTER_PAD: f32 = 12.0;
 const TEXT_PAD: f32 = 8.0;
@@ -113,6 +114,19 @@ fn token_format(kind: qell_core::TokenKind, font_id: egui::FontId, color: Color3
     }
 }
 
+/// First line of the next (or previous) block of changed lines in a diff,
+/// wrapping around. `None` when nothing changed.
+fn next_change(marks: &[LineMark], from: usize, forward: bool) -> Option<usize> {
+    let changed = |i: usize| marks.get(i).is_some_and(|m| *m != LineMark::Context);
+    // Starts of change blocks.
+    let starts: Vec<usize> = (0..marks.len()).filter(|&i| changed(i) && (i == 0 || !changed(i - 1))).collect();
+    if forward {
+        starts.iter().copied().find(|&s| s > from).or(starts.first().copied())
+    } else {
+        starts.iter().rev().copied().find(|&s| s < from).or(starts.last().copied())
+    }
+}
+
 /// Per-line view of the highlight spans: binary search for the first span
 /// that could overlap a byte range.
 fn spans_in(spans: &[HighlightSpan], start: usize, end: usize) -> &[HighlightSpan] {
@@ -156,7 +170,32 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
         line_count = doc.buffer.line_count();
         if has_focus_before {
             let events = ui.input(|i| i.events.clone());
+            let read_only = doc.read_only;
             for (idx, ev) in events.iter().enumerate() {
+                // A diff can be navigated, selected and copied, not edited.
+                let edits = matches!(
+                    ev,
+                    Event::Text(_)
+                        | Event::Paste(_)
+                        | Event::Cut
+                        | Event::Key { key: Key::Backspace | Key::Delete | Key::Enter | Key::Tab, pressed: true, .. }
+                );
+                if read_only && edits {
+                    consumed_events.push(idx);
+                    continue;
+                }
+                // F7 / Shift+F7: next / previous change of a diff, like VS Code.
+                if let Event::Key { key: Key::F7, pressed: true, modifiers, .. } = ev {
+                    if !doc.line_marks.is_empty() {
+                        let line = doc.buffer.cursor.head().line;
+                        if let Some(target) = next_change(&doc.line_marks, line, !modifiers.shift) {
+                            doc.buffer.set_cursor(Position::new(target, 0), false);
+                            doc.scroll_to_cursor = true;
+                        }
+                        consumed_events.push(idx);
+                        continue;
+                    }
+                }
                 let b = &mut doc.buffer;
                 let mut used = true;
                 match ev {
@@ -449,6 +488,21 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                 // Current line background.
                 if row == head.line && cursor.selection.is_empty() {
                     painter.rect_filled(row_rect, 0.0, palette_cur_line);
+                }
+
+                // Inline diff: added / removed line backgrounds (VS Code's
+                // diffEditor colours) and a bar in the gutter.
+                let mark = doc.line_marks.get(row).copied().unwrap_or(LineMark::Context);
+                if mark != LineMark::Context {
+                    let (bg, bar) = match mark {
+                        LineMark::Added => {
+                            (Color32::from_rgba_unmultiplied(0x9b, 0xb9, 0x55, 0x33), Color32::from_rgb(0x48, 0x7e, 0x02))
+                        }
+                        _ => (Color32::from_rgba_unmultiplied(0xff, 0x00, 0x00, 0x33), Color32::from_rgb(0xf8, 0x51, 0x49)),
+                    };
+                    painter.rect_filled(row_rect, 0.0, bg);
+                    let bar_rect = Rect::from_min_size(Pos2::new(origin.x + 2.0, y), Vec2::new(3.0, row_height));
+                    painter.rect_filled(bar_rect, 0.0, bar);
                 }
 
                 // Selection.
@@ -887,6 +941,18 @@ fn show_completion_popup(app: &mut QellApp, ctx: &Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn change_navigation_wraps() {
+        use LineMark::*;
+        let marks = [Context, Removed, Added, Context, Context, Added, Context];
+        assert_eq!(next_change(&marks, 0, true), Some(1));
+        assert_eq!(next_change(&marks, 1, true), Some(5));
+        assert_eq!(next_change(&marks, 5, true), Some(1));
+        assert_eq!(next_change(&marks, 5, false), Some(1));
+        assert_eq!(next_change(&marks, 1, false), Some(5));
+        assert_eq!(next_change(&[Context, Context], 0, true), None);
+    }
 
     #[test]
     fn buffer_words() {

@@ -271,6 +271,44 @@ impl QellApp {
         }
     }
 
+    /// Open (or switch to) a read-only inline diff of one file in a commit.
+    pub fn open_commit_diff(&mut self, repo: &Path, commit: &qell_git::graph::Commit, file: &qell_git::graph::ChangedFile) {
+        let name = file.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let label = format!("{name} ({})", commit.short_hash());
+        if let Some(i) = self.docs.iter().position(|d| d.label.as_deref() == Some(label.as_str())) {
+            self.active = i;
+            self.focus = Focus::Editor;
+            return;
+        }
+        match qell_git::graph::file_diff(&self.root.join(repo), commit, file) {
+            Ok(diff) => {
+                use qell_git::graph::LineKind;
+                let marks = diff
+                    .kinds
+                    .iter()
+                    .map(|k| match k {
+                        LineKind::Added => crate::document::LineMark::Added,
+                        LineKind::Removed => crate::document::LineMark::Removed,
+                        LineKind::Context => crate::document::LineMark::Context,
+                    })
+                    .collect();
+                // Replace a pristine untitled tab instead of piling up.
+                if self.docs.len() == 1
+                    && self.docs[0].buffer.path().is_none()
+                    && self.docs[0].label.is_none()
+                    && !self.docs[0].buffer.is_dirty()
+                {
+                    self.docs.clear();
+                }
+                self.docs.push(Document::diff(label, &file.path, &diff.text, marks));
+                self.active = self.docs.len() - 1;
+                self.focus = Focus::Editor;
+                self.notify(format!("{}: +{} −{} in {}", file.path.display(), diff.added, diff.removed, commit.short_hash()));
+            }
+            Err(e) => self.notify_error(format!("Cannot show the diff: {e}")),
+        }
+    }
+
     pub fn open_folder(&mut self, path: PathBuf) {
         let path = std::fs::canonicalize(&path).unwrap_or(path);
         self.lsp.shutdown_all();
@@ -288,6 +326,10 @@ impl QellApp {
 
     fn save_active(&mut self, force_dialog: bool) {
         let Some(doc) = self.docs.get_mut(self.active) else { return };
+        if doc.read_only {
+            self.notify("This is a read-only view.");
+            return;
+        }
         if doc.buffer.path().is_none() || force_dialog {
             let Some(path) = rfd::FileDialog::new().set_directory(&self.root).save_file() else { return };
             if let Err(e) = doc.buffer.save_as(path) {
