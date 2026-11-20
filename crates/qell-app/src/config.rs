@@ -22,6 +22,8 @@ pub struct Config {
     pub auto_complete: bool,
     /// Wrap long lines at the window's width instead of scrolling sideways.
     pub word_wrap: bool,
+    /// Show the whole file in miniature on the right of the editor.
+    pub minimap: bool,
     /// Colour bracket pairs by nesting depth, unmatched ones in red.
     pub bracket_pair_colors: bool,
     /// Vertical lines at each indentation level, the current block's brighter.
@@ -59,6 +61,7 @@ impl Default for Config {
             tab_size: 4,
             auto_complete: true,
             word_wrap: false,
+            minimap: true,
             bracket_pair_colors: true,
             indent_guides: true,
             ui_scale: 1.0,

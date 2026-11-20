@@ -72,6 +72,12 @@ fn defs() -> Vec<Def> {
             "Indent Guides",
             "Vertical lines at each indentation level; the block around the cursor is highlighted.",
         ),
+        def(
+            "minimap",
+            "Appearance",
+            "Minimap",
+            "The whole file in miniature on the right of the editor; click or drag it to scroll.",
+        ),
         def("ui_scale", "Appearance", "UI Scale", "Size of the whole interface."),
         def("file_icons", "Appearance", "File Icons", "Show file-type icons in the file tree and tabs."),
         def(
@@ -127,6 +133,7 @@ fn is_modified(key: &str, c: &Config) -> bool {
         "tab_size" => c.tab_size != d.tab_size,
         "auto_complete" => c.auto_complete != d.auto_complete,
         "word_wrap" => c.word_wrap != d.word_wrap,
+        "minimap" => c.minimap != d.minimap,
         "bracket_pair_colors" => c.bracket_pair_colors != d.bracket_pair_colors,
         "indent_guides" => c.indent_guides != d.indent_guides,
         "ui_scale" => c.ui_scale != d.ui_scale,
@@ -150,6 +157,7 @@ fn reset(key: &str, c: &mut Config) {
         "tab_size" => c.tab_size = d.tab_size,
         "auto_complete" => c.auto_complete = d.auto_complete,
         "word_wrap" => c.word_wrap = d.word_wrap,
+        "minimap" => c.minimap = d.minimap,
         "bracket_pair_colors" => c.bracket_pair_colors = d.bracket_pair_colors,
         "indent_guides" => c.indent_guides = d.indent_guides,
         "ui_scale" => c.ui_scale = d.ui_scale,
@@ -233,6 +241,9 @@ fn control(ui: &mut egui::Ui, key: &str, c: &mut Config, drafts: &mut HashMap<St
         }
         "word_wrap" => {
             ui.checkbox(&mut c.word_wrap, "Enabled");
+        }
+        "minimap" => {
+            ui.checkbox(&mut c.minimap, "Visible");
         }
         "bracket_pair_colors" => {
             ui.checkbox(&mut c.bracket_pair_colors, "Enabled");
@@ -414,6 +425,7 @@ mod tests {
                 "tab_size" => c.tab_size = 2,
                 "auto_complete" => c.auto_complete = false,
                 "word_wrap" => c.word_wrap = true,
+                "minimap" => c.minimap = false,
                 "bracket_pair_colors" => c.bracket_pair_colors = false,
                 "indent_guides" => c.indent_guides = false,
                 "ui_scale" => c.ui_scale = 1.5,

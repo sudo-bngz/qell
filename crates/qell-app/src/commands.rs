@@ -23,6 +23,7 @@ pub enum Command {
     TriggerCompletion,
     ToggleSidebar,
     ToggleWordWrap,
+    ToggleMinimap,
     ShowExplorer,
     ShowSearch,
     ShowSourceControl,
@@ -63,6 +64,7 @@ impl Command {
         Command::TriggerCompletion,
         Command::ToggleSidebar,
         Command::ToggleWordWrap,
+        Command::ToggleMinimap,
         Command::ShowExplorer,
         Command::ShowSearch,
         Command::ShowSourceControl,
@@ -103,6 +105,7 @@ impl Command {
             Command::TriggerCompletion => "Edit: Trigger Completion",
             Command::ToggleSidebar => "View: Toggle Sidebar",
             Command::ToggleWordWrap => "View: Toggle Word Wrap",
+            Command::ToggleMinimap => "View: Toggle Minimap",
             Command::ShowExplorer => "View: Show Explorer",
             Command::ShowSearch => "View: Search in Files",
             Command::GoToDefinition => "Go: Go to Definition",
@@ -152,6 +155,8 @@ impl Command {
             Command::ToggleSidebar => s(cmd, Key::B),
             // Alt+Z everywhere (⌥Z on macOS), as in VS Code.
             Command::ToggleWordWrap => s(Modifiers::ALT, Key::Z),
+            // No default shortcut, like VS Code (it's in View and the palette).
+            Command::ToggleMinimap => None,
             Command::ShowExplorer => s(Modifiers::CTRL | Modifiers::SHIFT, Key::E),
             Command::ShowSearch => s(cmd_shift, Key::F),
             Command::GoToDefinition => s(Modifiers::NONE, Key::F12),

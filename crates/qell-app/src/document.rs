@@ -35,6 +35,8 @@ pub struct Document {
     /// Screen column Up/Down aim for across wrapped rows of different
     /// lengths; reset by any other move.
     pub goal_col: Option<usize>,
+    /// The miniature beside the editor.
+    pub minimap: crate::views::minimap::Minimap,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +67,7 @@ impl Document {
             wrap: WrapLayout::plain(1),
             wrap_key: None,
             goal_col: None,
+            minimap: Default::default(),
         }
     }
 
