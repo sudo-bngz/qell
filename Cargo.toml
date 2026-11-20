@@ -6,6 +6,7 @@ members = [
     "crates/qell-term",
     "crates/qell-plugins",
     "crates/qell-git",
+    "crates/qell-index",
     "crates/qell-app",
 ]
 # The example plugin targets wasm32 and is built separately (see plugins/hello/README.md).
@@ -25,6 +26,7 @@ qell-lsp = { path = "crates/qell-lsp" }
 qell-term = { path = "crates/qell-term" }
 qell-plugins = { path = "crates/qell-plugins" }
 qell-git = { path = "crates/qell-git" }
+qell-index = { path = "crates/qell-index" }
 
 anyhow = "1.0"
 thiserror = "2.0"

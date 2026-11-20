@@ -124,9 +124,10 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
         .width_range(160.0..=600.0)
         .frame(egui::Frame::new().fill(bg).inner_margin(egui::Margin::symmetric(4, 6)))
         .show(ctx, |ui| {
-            if app.sidebar_view == SidebarView::SourceControl {
-                super::scm::show_contents(app, ui);
-                return;
+            match app.sidebar_view {
+                SidebarView::SourceControl => return super::scm::show_contents(app, ui),
+                SidebarView::Search => return super::search::show_contents(app, ui),
+                SidebarView::Explorer => {}
             }
             ui.horizontal(|ui| {
                 let title = app.root.file_name().map(|n| n.to_string_lossy().to_uppercase()).unwrap_or_default();
@@ -159,6 +160,7 @@ pub fn show_activity_bar(app: &mut QellApp, ctx: &Context) {
             ui.vertical_centered(|ui| {
                 for (view, icon, tip) in [
                     (SidebarView::Explorer, icons::EXPLORER, "Explorer (Ctrl+Shift+E)"),
+                    (SidebarView::Search, icons::SEARCH, "Search (Ctrl+Shift+F)"),
                     (SidebarView::SourceControl, icons::SOURCE_CONTROL, "Source Control (Ctrl+Shift+G)"),
                 ] {
                     let active = app.show_sidebar && app.sidebar_view == view;

@@ -127,6 +127,34 @@ fn next_change(marks: &[LineMark], from: usize, forward: bool) -> Option<usize> 
     }
 }
 
+/// The symbol around char column `col` of `line` (touching it from either
+/// side): an identifier, or for Terraform an address like
+/// `aws_s3_bucket.logs.arn`. Char range.
+pub fn word_range(line: &str, col: usize, terraform: bool) -> Option<(usize, usize)> {
+    let chars: Vec<char> = line.chars().collect();
+    let is_word = |c: char| c.is_alphanumeric() || c == '_' || (terraform && (c == '.' || c == '-'));
+    let col = col.min(chars.len());
+    // On the word, or just after it (cursor at its end).
+    let at = if chars.get(col).is_some_and(|c| is_word(*c)) {
+        col
+    } else if col > 0 && is_word(chars[col - 1]) {
+        col - 1
+    } else {
+        return None;
+    };
+    let start = (0..=at).rev().take_while(|&i| is_word(chars[i])).last()?;
+    let end = (at..chars.len()).take_while(|&i| is_word(chars[i])).last()? + 1;
+    // Trim dots at the edges ("var.region." → "var.region").
+    let (mut s, mut e) = (start, end);
+    while s < e && chars[s] == '.' {
+        s += 1;
+    }
+    while e > s && chars[e - 1] == '.' {
+        e -= 1;
+    }
+    (e > s).then_some((s, e))
+}
+
 /// Per-line view of the highlight spans: binary search for the first span
 /// that could overlap a byte range.
 fn spans_in(spans: &[HighlightSpan], start: usize, end: usize) -> &[HighlightSpan] {
@@ -432,6 +460,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
 
     ui.spacing_mut().item_spacing.y = 0.0;
     let mut clicked_editor = false;
+    let mut go_to_definition = false;
     let mut cursor_screen: Option<Pos2> = None;
 
     let scroll =
@@ -465,6 +494,10 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                         doc.buffer.set_cursor(pos_at(p), shift);
                     }
                     app.completion.open = false;
+                    // ⌘-click / Ctrl-click: go to definition.
+                    if resp.clicked() && ui.input(|i| i.modifiers.command) {
+                        go_to_definition = true;
+                    }
                 }
             } else if resp.dragged() {
                 if let Some(p) = resp.interact_pointer_pos() {
@@ -473,6 +506,22 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
             }
             if resp.hovered() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
+            }
+            // Holding ⌘ / Ctrl: underline the symbol under the mouse, like a
+            // link, since clicking it goes to its definition.
+            let link = resp.hover_pos().filter(|_| ui.input(|i| i.modifiers.command)).and_then(|p| {
+                let row = ((p.y - content_top) / row_height).floor().max(0.0) as usize;
+                let col = ((p.x - (origin.x + text_x0)) / char_width).floor().max(0.0) as usize;
+                if row >= line_count {
+                    return None;
+                }
+                let line = doc.buffer.line(row);
+                let terraform = doc.buffer.language() == Some("terraform");
+                // Only when the mouse is on the word itself, not after it.
+                word_range(&line, col + 1, terraform).filter(|(s, e)| col >= *s && col < *e).map(|(s, e)| (row, s, e))
+            });
+            if link.is_some() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
 
             let cursor = doc.buffer.cursor;
@@ -556,6 +605,15 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                 let galley = ui.fonts_mut(|f| f.layout_job(job));
                 painter.galley(Pos2::new(origin.x + text_x0, y + 1.0), galley, palette_text);
 
+                // ⌘ / Ctrl held over a symbol: underline it as a link.
+                if let Some((lrow, ls, le)) = link {
+                    if lrow == row {
+                        let x0 = origin.x + text_x0 + ls as f32 * char_width;
+                        let x1 = origin.x + text_x0 + le as f32 * char_width;
+                        painter.hline(x0..=x1, y + row_height - 2.0, Stroke::new(1.0_f32, Color32::from_rgb(0x4d, 0xaa, 0xfc)));
+                    }
+                }
+
                 // Diagnostics underline.
                 for d in &doc.diagnostics {
                     let (ds, de) = (d.range.start.line as usize, d.range.end.line as usize);
@@ -618,6 +676,9 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
             }
         });
 
+    if go_to_definition {
+        app.go_to_definition();
+    }
     if clicked_editor
         || scroll.inner_rect.contains(ui.input(|i| i.pointer.interact_pos().unwrap_or(Pos2::ZERO)))
             && ui.input(|i| i.pointer.any_pressed())
@@ -952,6 +1013,18 @@ mod tests {
         assert_eq!(next_change(&marks, 5, false), Some(1));
         assert_eq!(next_change(&marks, 1, false), Some(5));
         assert_eq!(next_change(&[Context, Context], 0, true), None);
+    }
+
+    #[test]
+    fn word_under_cursor() {
+        let l = "    let p = make_point(1, 2);";
+        assert_eq!(word_range(l, 13, false), Some((12, 22))); // inside
+        assert_eq!(word_range(l, 22, false), Some((12, 22))); // just after
+        assert_eq!(word_range(l, 3, false), None); // in the indentation
+        let tf = "  bucket = aws_s3_bucket.logs.arn";
+        assert_eq!(word_range(tf, 20, true), Some((11, 33)));
+        assert_eq!(word_range(tf, 20, false), Some((11, 24)));
+        assert_eq!(word_range("x = var.region.", 10, true), Some((4, 14)));
     }
 
     #[test]

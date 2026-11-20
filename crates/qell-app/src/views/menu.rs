@@ -45,15 +45,26 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
             });
             ui.menu_button("View", |ui| {
                 item(ui, app, Command::CommandPalette);
-                item(ui, app, Command::QuickOpen);
-                item(ui, app, Command::GoToLine);
                 ui.separator();
+                item(ui, app, Command::ShowExplorer);
+                item(ui, app, Command::ShowSearch);
+                item(ui, app, Command::ShowSourceControl);
                 item(ui, app, Command::ToggleSidebar);
                 item(ui, app, Command::ToggleTerminal);
                 item(ui, app, Command::NewTerminal);
                 ui.separator();
                 item(ui, app, Command::ZoomIn);
                 item(ui, app, Command::ZoomOut);
+            });
+            ui.menu_button("Go", |ui| {
+                item(ui, app, Command::GoBack);
+                item(ui, app, Command::GoForward);
+                ui.separator();
+                item(ui, app, Command::QuickOpen);
+                item(ui, app, Command::GoToLine);
+                ui.separator();
+                item(ui, app, Command::GoToDefinition);
+                item(ui, app, Command::FindReferences);
             });
             if !app.plugin_commands.is_empty() {
                 ui.menu_button("Plugins", |ui| {

@@ -23,7 +23,34 @@ use crate::views;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarView {
     Explorer,
+    Search,
     SourceControl,
+}
+
+/// A go-to-definition or find-references request waiting for a server.
+#[derive(Debug, Clone)]
+pub enum NavRequest {
+    Definition { word: String, lang: String },
+    References { word: String },
+}
+
+/// Char range of `word` in `preview`, for highlighting.
+fn preview_range(preview: &str, _chars: &str, word: &str) -> (usize, usize) {
+    let last = word.rsplit('.').next().unwrap_or(word);
+    match preview.find(last).or_else(|| preview.find(word)) {
+        Some(b) => {
+            let s = preview[..b].chars().count();
+            (s, s + last.chars().count())
+        }
+        None => (0, 0),
+    }
+}
+
+/// Where the cursor was, for Go Back / Go Forward.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NavPoint {
+    pub path: PathBuf,
+    pub pos: Position,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,6 +181,14 @@ pub struct QellApp {
     /// The Settings window.
     pub settings: views::settings::SettingsState,
     pub sidebar_view: SidebarView,
+    /// In-memory index of the workspace, for search and definitions.
+    pub indexer: qell_index::Indexer,
+    pub searcher: qell_index::Searcher,
+    pub search: views::search::SearchState,
+    pub pending_nav: Option<(RequestId, NavRequest)>,
+    /// Go Back / Go Forward stacks.
+    pub nav_back: Vec<NavPoint>,
+    pub nav_forward: Vec<NavPoint>,
     pub snippet: Option<SnippetSession>,
     /// For waking the UI from background threads.
     pub egui_ctx: Context,
@@ -201,11 +236,23 @@ impl QellApp {
         let lsp = new_lsp(&cc.egui_ctx, &root, &config);
 
         let git = GitWatcher::new(root.clone(), config.git_scan());
+        let wake: qell_index::Waker = {
+            let ctx = cc.egui_ctx.clone();
+            std::sync::Arc::new(move || ctx.request_repaint())
+        };
+        let indexer = qell_index::Indexer::new(root.clone(), config.ignore.clone(), Some(wake.clone()));
+        let searcher = qell_index::Searcher::new(indexer.index(), Some(wake));
         let mut app = Self {
             applied_config: config.clone(),
             config_dirty_since: None,
             settings: Default::default(),
             sidebar_view: SidebarView::Explorer,
+            indexer,
+            searcher,
+            search: Default::default(),
+            pending_nav: None,
+            nav_back: Vec::new(),
+            nav_forward: Vec::new(),
             snippet: None,
             egui_ctx: cc.egui_ctx.clone(),
             native_menu: None,
@@ -314,6 +361,10 @@ impl QellApp {
         self.lsp.shutdown_all();
         self.lsp = new_lsp(&self.egui_ctx, &path, &self.config);
         self.git.set_root(path.clone());
+        self.indexer.set_root(path.clone());
+        self.search = Default::default();
+        self.nav_back.clear();
+        self.nav_forward.clear();
         self.git_status = None;
         self.root = path;
         self.tree_cache.clear();
@@ -342,6 +393,7 @@ impl QellApp {
         }
         self.lsp.did_save(&doc.buffer);
         self.git.refresh();
+        self.indexer.refresh();
         let name = doc.buffer.file_name();
         let saved_config = doc.buffer.path().is_some_and(|p| same_file(p, &config::config_path()));
         self.notify(format!("Saved {name}"));
@@ -424,11 +476,216 @@ impl QellApp {
         }
     }
 
+    // ---- go to definition / references ------------------------------------
+
+    /// Language and symbol (word, or Terraform address) at the cursor.
+    fn symbol_at_cursor(&self) -> Option<(String, String)> {
+        let doc = self.docs.get(self.active)?;
+        let lang = doc.buffer.language().unwrap_or("").to_string();
+        let head = doc.buffer.cursor.head();
+        let line = doc.buffer.line(head.line);
+        let (s, e) = views::editor::word_range(&line, head.col, lang == "terraform")?;
+        Some((lang, line.chars().skip(s).take(e - s).collect()))
+    }
+
+    /// F12 / Cmd+click: jump to where the symbol at the cursor is defined.
+    /// Asks the language server when there is one; otherwise (or when it
+    /// finds nothing) uses Qell's own index.
+    pub fn go_to_definition(&mut self) {
+        let Some((lang, word)) = self.symbol_at_cursor() else { return };
+        let Some(doc) = self.docs.get_mut(self.active) else { return };
+        match self.lsp.request_definition(&self.languages, &mut doc.buffer) {
+            Some(id) => self.pending_nav = Some((id, NavRequest::Definition { word, lang })),
+            None => self.builtin_definition(&word, &lang),
+        }
+    }
+
+    /// Shift+F12: every reference to the symbol at the cursor.
+    pub fn find_references(&mut self) {
+        let Some((_, word)) = self.symbol_at_cursor() else { return };
+        let Some(doc) = self.docs.get_mut(self.active) else { return };
+        match self.lsp.request_references(&self.languages, &mut doc.buffer) {
+            Some(id) => self.pending_nav = Some((id, NavRequest::References { word })),
+            None => self.text_search_for(&word),
+        }
+    }
+
+    /// Without a server: a whole-word search for `word`, in the Search view.
+    fn text_search_for(&mut self, word: &str) {
+        self.sidebar_view = SidebarView::Search;
+        self.show_sidebar = true;
+        self.search.whole_word = !word.contains('.');
+        self.search.regex = false;
+        self.search.case_sensitive = true;
+        self.search.start(Some(word.to_string()));
+        self.focus = Focus::Editor;
+    }
+
+    /// Definitions from the index: tree-sitter tags, Terraform blocks.
+    fn builtin_definition(&mut self, word: &str, lang: &str) {
+        let current = self.docs.get(self.active).and_then(|d| d.buffer.path()).map(Path::to_path_buf);
+        let terraform = lang == "terraform";
+        let index = self.indexer.index();
+        let index = index.read().unwrap();
+        let names = if terraform { qell_index::terraform_candidates(word) } else { vec![word.to_string()] };
+        let mut defs = names.iter().map(|n| index.definitions(n)).find(|d| !d.is_empty()).unwrap_or_default();
+        drop(index);
+        if defs.is_empty() {
+            if self.indexer.status().indexing {
+                self.notify(format!("Still indexing the workspace: try again in a moment to find {word}."));
+            } else {
+                self.notify(format!("No definition found for {word}: showing where it appears."));
+                self.text_search_for(word);
+            }
+            return;
+        }
+        // Closest first: same file, same folder, then by path.
+        let dir = current.as_ref().and_then(|p| p.parent()).map(Path::to_path_buf);
+        defs.sort_by_key(|d| (Some(&d.path) != current.as_ref(), d.path.parent() != dir.as_deref(), d.rel.clone(), d.line));
+        // Terraform resolves names within a module, i.e. a folder.
+        if terraform && defs.iter().any(|d| d.path.parent() == dir.as_deref()) {
+            defs.retain(|d| d.path.parent() == dir.as_deref());
+        }
+        let items: Vec<views::search::ListItem> = defs
+            .into_iter()
+            .map(|d| views::search::ListItem {
+                preview_range: preview_range(&d.preview, &d.preview.chars().collect::<String>(), word),
+                path: d.path,
+                rel: d.rel,
+                line: d.line,
+                col: d.col,
+                end_col: d.end_col,
+                preview: d.preview,
+            })
+            .collect();
+        self.show_locations(format!("Definitions of {word}"), items, true);
+    }
+
+    /// One place: go there. Several: list them in the Search view (and go
+    /// to the first when `jump_first`).
+    fn show_locations(&mut self, title: String, items: Vec<views::search::ListItem>, jump_first: bool) {
+        match items.as_slice() {
+            [] => {}
+            [one] => self.open_location(&one.path.clone(), one.line, one.col, one.end_col),
+            [first, ..] => {
+                if jump_first {
+                    self.open_location(&first.path.clone(), first.line, first.col, first.end_col);
+                }
+                self.sidebar_view = SidebarView::Search;
+                self.show_sidebar = true;
+                self.search.list = Some(views::search::LocationList { title: format!("{title} ({})", items.len()), items });
+            }
+        }
+    }
+
+    /// Text of a file: the open buffer, the index, or the disk.
+    fn file_text(&self, path: &Path) -> Option<String> {
+        if let Some(d) = self.docs.iter().find(|d| d.buffer.path() == Some(path)) {
+            return Some(d.buffer.text());
+        }
+        if let Some(t) = self.indexer.index().read().unwrap().text(path) {
+            return Some(t.to_string());
+        }
+        std::fs::read_to_string(path).ok()
+    }
+
+    /// A language server's locations, as list items (UTF-16 → chars).
+    fn lsp_items(&self, locations: Vec<qell_lsp::lsp_types::Location>) -> Vec<views::search::ListItem> {
+        let mut texts: HashMap<PathBuf, Option<String>> = HashMap::new();
+        locations
+            .into_iter()
+            .filter_map(|l| {
+                let path = convert::uri_to_path(&l.uri)?;
+                let text = texts.entry(path.clone()).or_insert_with(|| self.file_text(&path)).clone()?;
+                let line_text = text.lines().nth(l.range.start.line as usize).unwrap_or("");
+                let start = from_lsp_position(line_text, l.range.start);
+                let end = if l.range.end.line == l.range.start.line { from_lsp_position(line_text, l.range.end) } else { start };
+                let lead = line_text.chars().take_while(|c| c.is_whitespace()).count();
+                let preview: String = line_text.trim().chars().take(200).collect();
+                let rel = path.strip_prefix(&self.root).unwrap_or(&path).to_path_buf();
+                Some(views::search::ListItem {
+                    preview_range: (start.col.saturating_sub(lead), end.col.max(start.col).saturating_sub(lead)),
+                    path,
+                    rel,
+                    line: start.line,
+                    col: start.col,
+                    end_col: end.col.max(start.col),
+                    preview,
+                })
+            })
+            .collect()
+    }
+
+    fn handle_locations(&mut self, id: RequestId, locations: Vec<qell_lsp::lsp_types::Location>) {
+        let Some((pending, req)) = self.pending_nav.take() else { return };
+        if pending != id {
+            self.pending_nav = Some((pending, req));
+            return;
+        }
+        let items = self.lsp_items(locations);
+        match req {
+            // The server found nothing: Qell's own index may.
+            NavRequest::Definition { word, lang } if items.is_empty() => self.builtin_definition(&word, &lang),
+            NavRequest::Definition { word, .. } => self.show_locations(format!("Definitions of {word}"), items, true),
+            NavRequest::References { word } if items.is_empty() => self.notify(format!("No references to {word}.")),
+            NavRequest::References { word } => self.show_locations(format!("References to {word}"), items, false),
+        }
+    }
+
     // ---- settings --------------------------------------------------------
 
     /// The Settings window or the palette has the keyboard.
     pub fn modal_open(&self) -> bool {
-        self.command_palette.open || self.settings.open || self.scm.typing
+        self.command_palette.open || self.settings.open || self.scm.typing || self.search.typing
+    }
+
+    /// Where the cursor is now, for navigation history.
+    fn here(&self) -> Option<NavPoint> {
+        let doc = self.docs.get(self.active)?;
+        Some(NavPoint { path: doc.buffer.path()?.to_path_buf(), pos: doc.buffer.cursor.head() })
+    }
+
+    /// Open `path` with `line:col..end_col` selected (0-based, chars),
+    /// remembering where we were for Go Back.
+    pub fn open_location(&mut self, path: &Path, line: usize, col: usize, end_col: usize) {
+        let from = self.here();
+        self.open_file(path.to_path_buf());
+        let Some(doc) = self.docs.get_mut(self.active) else { return };
+        if doc.buffer.path().map(|p| std::fs::canonicalize(p).unwrap_or(p.to_path_buf()))
+            != Some(std::fs::canonicalize(path).unwrap_or(path.to_path_buf()))
+        {
+            return; // didn't open
+        }
+        let start = doc.buffer.clamp(Position::new(line, col));
+        let end = doc.buffer.clamp(Position::new(line, end_col.max(col)));
+        doc.buffer.set_cursor(start, false);
+        doc.buffer.set_cursor(end, true);
+        doc.scroll_to_cursor = true;
+        self.focus = Focus::Editor;
+        if let Some(from) = from.filter(|f| f.path != path || f.pos.line != line) {
+            self.nav_back.push(from);
+            self.nav_back.truncate(100);
+            self.nav_forward.clear();
+        }
+    }
+
+    fn navigate(&mut self, back: bool) {
+        let target = if back { self.nav_back.pop() } else { self.nav_forward.pop() };
+        let Some(target) = target else { return };
+        if let Some(here) = self.here() {
+            if back {
+                self.nav_forward.push(here)
+            } else {
+                self.nav_back.push(here)
+            }
+        }
+        self.open_file(target.path.clone());
+        if let Some(doc) = self.docs.get_mut(self.active) {
+            let p = doc.buffer.clamp(target.pos);
+            doc.buffer.set_cursor(p, false);
+            doc.scroll_to_cursor = true;
+        }
+        self.focus = Focus::Editor;
     }
 
     /// Re-read config.toml after the user edited it by hand.
@@ -466,6 +723,7 @@ impl QellApp {
         }
         if new.ignore != old.ignore {
             self.command_palette.files.clear();
+            self.indexer.set_ignore(new.ignore.clone());
         }
         if new.git_scan() != old.git_scan() {
             self.git.set_options(new.git_scan());
@@ -523,6 +781,8 @@ impl QellApp {
         }
         self.was_focused = focused;
         if let Some(st) = self.git.poll() {
+            // Files changed on disk (git noticed): bring the index up to date.
+            self.indexer.refresh();
             // Something changed on disk; new or removed files must show up
             // in the tree too.
             self.tree_cache.clear();
@@ -598,6 +858,17 @@ impl QellApp {
             }
             Command::ToggleSidebar => self.show_sidebar = !self.show_sidebar,
             Command::ShowExplorer => self.show_sidebar_view(SidebarView::Explorer),
+            Command::ShowSearch => {
+                // Always shows (and focuses) Search, seeded with the selection.
+                let selection = self.docs.get(self.active).map(|d| d.buffer.selected_text());
+                self.sidebar_view = SidebarView::Search;
+                self.show_sidebar = true;
+                self.search.start(selection);
+            }
+            Command::GoToDefinition => self.go_to_definition(),
+            Command::FindReferences => self.find_references(),
+            Command::GoBack => self.navigate(true),
+            Command::GoForward => self.navigate(false),
             Command::ShowSourceControl => self.show_sidebar_view(SidebarView::SourceControl),
             Command::ToggleTerminal => {
                 self.show_terminal = !self.show_terminal;
@@ -827,6 +1098,7 @@ impl QellApp {
                         c.open = !c.items.is_empty();
                     }
                 }
+                LspEvent::Locations { id, locations } => self.handle_locations(id, locations),
                 LspEvent::CompletionResolved { id, item } => {
                     if let Some((rid, i)) = self.completion.resolving {
                         if rid == id && i < self.completion.items.len() {
@@ -942,9 +1214,9 @@ impl QellApp {
             }
             return;
         }
-        // In Settings or the commit box, text fields own the keyboard: only
-        // Escape, the settings shortcut itself and Quit go through.
-        if self.settings.open || self.scm.typing {
+        // In Settings, the commit box or the search box, text fields own the
+        // keyboard: only Escape, the settings shortcut itself and Quit go through.
+        if self.settings.open || self.scm.typing || self.search.typing {
             if self.settings.open && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
                 self.settings.open = false;
             }
@@ -994,6 +1266,7 @@ impl eframe::App for QellApp {
         self.handle_lsp_events();
         self.handle_git(ctx);
         self.handle_scm_jobs();
+        views::search::update(self, ctx);
         self.poll_terminals();
         self.handle_shortcuts(ctx);
 
