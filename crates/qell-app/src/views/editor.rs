@@ -14,7 +14,7 @@ use qell_lsp::lsp_types::{CompletionItem, CompletionItemKind, CompletionTextEdit
 
 use crate::app::{Focus, QellApp};
 use crate::commands::Command;
-use crate::document::LineMark;
+use crate::document::{DiskChange, LineMark};
 
 const GUTTER_PAD: f32 = 12.0;
 const TEXT_PAD: f32 = 8.0;
@@ -24,12 +24,47 @@ pub fn show_central(app: &mut QellApp, ctx: &Context) {
     let bg = app.palette.editor_bg;
     egui::CentralPanel::default().frame(egui::Frame::new().fill(bg)).show(ctx, |ui| {
         show_tabs(app, ui);
+        show_disk_bar(app, ui);
         if app.config.vim_mode {
             show_vim_bar(app, ui);
         }
         show_editor(app, ui);
     });
     show_completion_popup(app, ctx);
+}
+
+/// The file changed outside Qell and you have unsaved edits: a strip
+/// above the text asking which version to keep.
+fn show_disk_bar(app: &mut QellApp, ui: &mut egui::Ui) {
+    let Some(conflict) = app.docs.get(app.active).and_then(|d| d.conflict) else { return };
+    let name = app.docs[app.active].buffer.file_name();
+    let (text, warn) = (app.palette.text, app.palette.warning);
+    let deleted = conflict == DiskChange::Deleted;
+    let mut choice: Option<bool> = None;
+    egui::TopBottomPanel::top("disk_bar")
+        .show_separator_line(false)
+        .frame(egui::Frame::new().fill(warn.gamma_multiply(0.22)).inner_margin(egui::Margin::symmetric(10, 5)))
+        .show_inside(ui, |ui| {
+            ui.horizontal(|ui| {
+                let what = if deleted { "was deleted on disk" } else { "changed on disk" };
+                ui.label(egui::RichText::new(format!("{name} {what}, and you have unsaved changes.")).color(text));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let keep = if deleted { "Keep mine (save to recreate)" } else { "Keep mine" };
+                    if ui.button(keep).on_hover_text("Leave the editor as it is; saving overwrites the file").clicked() {
+                        choice = Some(false);
+                    }
+                    if !deleted && ui.button("Reload").on_hover_text("Take the file from disk (undo brings yours back)").clicked()
+                    {
+                        choice = Some(true);
+                    }
+                });
+            });
+        });
+    match choice {
+        Some(true) => app.reload_active(),
+        Some(false) => app.keep_mine(),
+        None => {}
+    }
 }
 
 /// Vim's last line: the command being typed, a message, or the mode.

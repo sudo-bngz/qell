@@ -99,6 +99,10 @@ bottom, and language-server completion for the languages you actually use.
   the pair at the cursor is boxed, and vertical guides mark each indentation
   level, with the block around the cursor highlighted. The indentation step
   (2, 4, tabs…) is detected per file. Both can be turned off in Settings.
+- **Files changed outside Qell** — a `git checkout`, a `terraform fmt` or
+  another editor is noticed: an untouched file is reloaded quietly, and one
+  with unsaved edits asks whether to reload or keep yours. Saving never
+  silently overwrites a change made elsewhere.
 - **Session restore** — the files you had open come back when you reopen
   the folder, with the cursor where you left it (Settings → Layout).
 - **Find and replace in the file** (`Ctrl/⌘+F`, `Ctrl+H` / `⌥⌘F`) — a bar
