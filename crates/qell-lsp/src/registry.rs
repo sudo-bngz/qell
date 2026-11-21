@@ -260,6 +260,16 @@ impl Registry {
         client.supports_code_actions().then(|| client.code_actions(uri, range, diagnostics))
     }
 
+    /// Ask what the file defines. `None` when no ready server for the
+    /// language can say.
+    pub fn request_symbols(&mut self, languages: &LanguageRegistry, buffer: &mut Buffer) -> Option<RequestId> {
+        self.sync(languages, buffer);
+        let lang = buffer.language()?;
+        let uri = buffer.path().and_then(path_to_uri)?;
+        let client = self.clients.get(lang).filter(|c| c.is_ready())?;
+        client.supports_document_symbols().then(|| client.document_symbols(uri))
+    }
+
     /// Fill in the edit of an action the server sent without one.
     pub fn resolve_code_action(&self, lang_id: &str, action: &lsp_types::CodeAction) -> Option<RequestId> {
         let client = self.clients.get(lang_id).filter(|c| c.is_ready())?;

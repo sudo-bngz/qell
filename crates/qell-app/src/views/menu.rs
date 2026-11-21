@@ -74,6 +74,7 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                 item(ui, app, Command::QuickOpen);
                 item(ui, app, Command::GoToLine);
                 ui.separator();
+                item(ui, app, Command::GoToSymbol);
                 item(ui, app, Command::GoToDefinition);
                 item(ui, app, Command::FindReferences);
             });

@@ -99,6 +99,11 @@ bottom, and language-server completion for the languages you actually use.
   the pair at the cursor is boxed, and vertical guides mark each indentation
   level, with the block around the cursor highlighted. The indentation step
   (2, 4, tabs…) is detected per file. Both can be turned off in Settings.
+- **Go to symbol in the file** (`Ctrl/⌘+Shift+O`) — everything the open file
+  defines, in one list you can type into: Terraform blocks as `local.env` or
+  `aws_s3_bucket.logs`, functions, types and methods elsewhere. Qell reads
+  the file itself for the languages it knows and asks the language server
+  for the rest.
 - **Rename a symbol** (`F2`) through the language server, across every file
   it is used in. The files it touches open as tabs with unsaved changes, so
   nothing is written until you save them.
@@ -178,6 +183,7 @@ npm i -g typescript typescript-language-server
 | Go to file            | `Ctrl+P`           |
 | Go to line            | `Ctrl+G`           |
 | Toggle comment        | `Ctrl+/`           |
+| Go to symbol in file  | `Ctrl+Shift+O`     |
 | Rename symbol         | `F2`               |
 | Quick fix             | `Ctrl+.`           |
 | Add cursor at next occurrence | `Ctrl+D`     |
@@ -190,7 +196,7 @@ npm i -g typescript typescript-language-server
 | Find all references   | `Shift+F12`        |
 | Back / forward        | `Alt+←` / `Alt+→` (`⌃-` / `⌃⇧-` on macOS) |
 | Save / Save as        | `Ctrl+S` / `Ctrl+Shift+S` |
-| Open file / folder    | `Ctrl+O` / `Ctrl+Shift+O` |
+| Open file / folder    | `Ctrl+O` / `Ctrl+Alt+O` |
 | Close tab             | `Ctrl+W`           |
 | Next / previous tab   | `Ctrl+Tab` / `Ctrl+Shift+Tab` |
 | Undo / redo           | `Ctrl+Z` / `Ctrl+Y` |

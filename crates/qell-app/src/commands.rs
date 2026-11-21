@@ -42,6 +42,7 @@ pub enum Command {
     FindReferences,
     RenameSymbol,
     QuickFix,
+    GoToSymbol,
     GoBack,
     GoForward,
     ToggleTerminal,
@@ -96,6 +97,7 @@ impl Command {
         Command::FindReferences,
         Command::RenameSymbol,
         Command::QuickFix,
+        Command::GoToSymbol,
         Command::GoBack,
         Command::GoForward,
         Command::ToggleTerminal,
@@ -149,6 +151,7 @@ impl Command {
             Command::FindReferences => "Go: Find All References",
             Command::RenameSymbol => "Rename Symbol",
             Command::QuickFix => "Quick Fix",
+            Command::GoToSymbol => "Go: Go to Symbol in File",
             Command::GoBack => "Go: Back",
             Command::GoForward => "Go: Forward",
             Command::ShowSourceControl => "View: Show Source Control",
@@ -179,7 +182,8 @@ impl Command {
         match self {
             Command::NewFile => s(cmd, Key::N),
             Command::OpenFile => s(cmd, Key::O),
-            Command::OpenFolder => s(cmd_shift, Key::O),
+            // Ctrl/Cmd+Shift+O goes to a symbol, as everywhere else.
+            Command::OpenFolder => s(cmd | Modifiers::ALT, Key::O),
             Command::Save => s(cmd, Key::S),
             Command::SaveAs => s(cmd_shift, Key::S),
             Command::CloseTab => s(cmd, Key::W),
@@ -222,6 +226,7 @@ impl Command {
             Command::FindReferences => s(Modifiers::SHIFT, Key::F12),
             Command::RenameSymbol => s(Modifiers::NONE, Key::F2),
             Command::QuickFix => s(cmd, Key::Period),
+            Command::GoToSymbol => s(cmd | Modifiers::SHIFT, Key::O),
             // VS Code: ⌃- / ⌃⇧- on macOS, Alt+Left / Alt+Right elsewhere.
             Command::GoBack if cfg!(target_os = "macos") => s(Modifiers::CTRL, Key::Minus),
             Command::GoBack => s(Modifiers::ALT, Key::ArrowLeft),

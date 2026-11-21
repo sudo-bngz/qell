@@ -51,6 +51,12 @@ pub enum Event {
         id: RequestId,
         edit: Box<lsp_types::WorkspaceEdit>,
     },
+    /// Answer to a document-symbol request: what the file defines, as
+    /// (name, kind, line, start column, end column), outermost first.
+    Symbols {
+        id: RequestId,
+        symbols: Vec<FileSymbol>,
+    },
     /// Answer to a code-action request: what the server can do here.
     CodeActions {
         id: RequestId,
@@ -101,6 +107,7 @@ enum Pending {
     Formatting,
     Hover,
     Rename,
+    Symbols,
     CodeActions,
     ResolveAction,
     Other,
@@ -260,6 +267,10 @@ impl Client {
                     }),
                     definition: Some(GotoCapability { dynamic_registration: None, link_support: Some(true) }),
                     rename: Some(RenameClientCapabilities { prepare_support: Some(false), ..Default::default() }),
+                    document_symbol: Some(DocumentSymbolClientCapabilities {
+                        hierarchical_document_symbol_support: Some(true),
+                        ..Default::default()
+                    }),
                     code_action: Some(CodeActionClientCapabilities {
                         // Ask for whole code actions, not bare commands.
                         code_action_literal_support: Some(CodeActionLiteralSupport {
@@ -482,6 +493,25 @@ impl Client {
         )
     }
 
+    /// Whether the server lists what a file defines.
+    pub fn supports_document_symbols(&self) -> bool {
+        let caps = self.capabilities.lock().unwrap();
+        caps.as_ref().and_then(|c| c.document_symbol_provider.as_ref()).is_some_and(|p| !matches!(p, OneOf::Left(false)))
+    }
+
+    /// Everything the file defines.
+    pub fn document_symbols(&self, uri: Uri) -> RequestId {
+        self.request(
+            "textDocument/documentSymbol",
+            DocumentSymbolParams {
+                text_document: TextDocumentIdentifier { uri },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            },
+            Pending::Symbols,
+        )
+    }
+
     /// What the server can do over `range`, given the diagnostics there.
     pub fn code_actions(&self, uri: Uri, range: Range, diagnostics: Vec<Diagnostic>) -> RequestId {
         self.request(
@@ -544,6 +574,52 @@ impl Client {
 impl Drop for Client {
     fn drop(&mut self) {
         let _ = self.child.kill();
+    }
+}
+
+/// One thing a file defines, as the Go to Symbol list shows it.
+#[derive(Debug, Clone)]
+pub struct FileSymbol {
+    pub name: String,
+    /// "function", "struct", "variable"…
+    pub kind: String,
+    /// What it sits in ("impl Buffer", a class), empty at the top level.
+    pub container: String,
+    /// Where the name is, in UTF-16 units.
+    pub range: Range,
+}
+
+/// A symbol tree, depth first, each child naming its parent.
+fn flatten_symbols(tree: &[DocumentSymbol], container: &str, out: &mut Vec<FileSymbol>) {
+    for s in tree {
+        out.push(FileSymbol {
+            name: s.name.clone(),
+            kind: kind_name(s.kind).to_string(),
+            container: container.to_string(),
+            range: s.selection_range,
+        });
+        if let Some(children) = &s.children {
+            flatten_symbols(children, &s.name, out);
+        }
+    }
+}
+
+fn kind_name(kind: SymbolKind) -> &'static str {
+    match kind {
+        SymbolKind::FILE => "file",
+        SymbolKind::MODULE | SymbolKind::NAMESPACE | SymbolKind::PACKAGE => "module",
+        SymbolKind::CLASS => "class",
+        SymbolKind::METHOD => "method",
+        SymbolKind::PROPERTY | SymbolKind::FIELD => "field",
+        SymbolKind::CONSTRUCTOR => "constructor",
+        SymbolKind::ENUM | SymbolKind::ENUM_MEMBER => "enum",
+        SymbolKind::INTERFACE => "interface",
+        SymbolKind::FUNCTION => "function",
+        SymbolKind::VARIABLE => "variable",
+        SymbolKind::CONSTANT => "constant",
+        SymbolKind::STRUCT => "struct",
+        SymbolKind::TYPE_PARAMETER => "type",
+        _ => "symbol",
     }
 }
 
@@ -666,6 +742,26 @@ fn dispatch(
         Some(Pending::Rename) => {
             let edit = parse::<WorkspaceEdit>(result).unwrap_or_default();
             let _ = events.send(Event::WorkspaceEdit { id, edit: Box::new(edit) });
+        }
+        Some(Pending::Symbols) => {
+            let symbols = match parse::<DocumentSymbolResponse>(result) {
+                Some(DocumentSymbolResponse::Nested(tree)) => {
+                    let mut out = Vec::new();
+                    flatten_symbols(&tree, "", &mut out);
+                    out
+                }
+                Some(DocumentSymbolResponse::Flat(flat)) => flat
+                    .into_iter()
+                    .map(|s| FileSymbol {
+                        name: s.name,
+                        kind: kind_name(s.kind).to_string(),
+                        container: s.container_name.unwrap_or_default(),
+                        range: s.location.range,
+                    })
+                    .collect(),
+                None => Vec::new(),
+            };
+            let _ = events.send(Event::Symbols { id, symbols });
         }
         Some(Pending::CodeActions) => {
             let actions = parse::<Vec<CodeActionOrCommand>>(result).unwrap_or_default();
