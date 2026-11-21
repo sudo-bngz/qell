@@ -2125,7 +2125,12 @@ impl QellApp {
             }
             Command::ToggleTerminal => {
                 self.show_terminal = !self.show_terminal;
-                self.focus = if self.show_terminal { Focus::Terminal } else { Focus::Editor };
+                // Closing it hands the keyboard back to whatever is behind.
+                self.focus = match (self.show_terminal, self.k8s.open) {
+                    (true, _) => Focus::Terminal,
+                    (false, true) => Focus::K8s,
+                    (false, false) => Focus::Editor,
+                };
             }
             Command::NewTerminal => {
                 self.show_terminal = true;

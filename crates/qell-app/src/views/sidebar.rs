@@ -503,6 +503,37 @@ pub fn show_activity_bar(app: &mut QellApp, ctx: &Context) {
                         app.show_sidebar_view(view);
                     }
                 }
+                cluster_button(app, ui);
             });
         });
+}
+
+/// The Kubernetes helm, under the git icon: opens and closes the cluster
+/// view. Drawn rather than taken from the icon font, which has no helm.
+fn cluster_button(app: &mut QellApp, ui: &mut egui::Ui) {
+    let open = app.k8s.open;
+    let color = if open { app.palette.text } else { app.palette.text_dim };
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(44.0, 44.0), egui::Sense::click());
+    let resp = resp.on_hover_text("Kubernetes Cluster (Ctrl+Shift+K)").on_hover_cursor(egui::CursorIcon::PointingHand);
+    let painter = ui.painter_at(rect);
+    let centre = rect.center();
+    let r = 11.0;
+    // Seven corners, like the wheel on the Kubernetes logo.
+    let corner = |i: usize, radius: f32| {
+        let a = std::f32::consts::TAU * (i as f32 / 7.0) - std::f32::consts::FRAC_PI_2;
+        centre + egui::vec2(a.cos(), a.sin()) * radius
+    };
+    let stroke = egui::Stroke::new(if open { 1.6_f32 } else { 1.3_f32 }, color);
+    let points: Vec<egui::Pos2> = (0..7).map(|i| corner(i, r)).collect();
+    painter.add(egui::Shape::closed_line(points, stroke));
+    for i in 0..7 {
+        painter.line_segment([corner(i, r * 0.42), corner(i, r * 0.88)], stroke);
+    }
+    painter.circle_stroke(centre, r * 0.42, stroke);
+    if open {
+        painter.vline(rect.left() + 1.0, rect.y_range().shrink(6.0), egui::Stroke::new(2.0_f32, app.palette.accent));
+    }
+    if resp.clicked() {
+        app.pending_commands.push(crate::commands::Command::ToggleCluster);
+    }
 }
