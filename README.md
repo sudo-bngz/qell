@@ -167,6 +167,16 @@ bottom, and language-server completion for the languages you actually use.
   Terraform). Several matches are listed in the Search view.
   `Shift+F12` finds all references; `Alt+←` / `Alt+→` (`⌃-` / `⌃⇧-` on
   macOS) go back and forward.
+- **Pictures, video and sound** open as a tab of their own: a PNG, JPEG,
+  GIF, WebP, BMP or TIFF is decoded and shown fitted to the window, `1`
+  for its own size and `f` back to fitted. A video shows a frame with a
+  slider to move through it, the arrows stepping a second at a time (ten
+  with shift), and the bar above says the size, dimensions, duration,
+  frame rate and codecs; a sound file says the same of itself. `o` hands
+  the file to whatever you normally open it with. Video and sound are read
+  through `ffprobe` and `ffmpeg` if you have them — Qell plays nothing
+  itself and installs nothing; without them it says so and what to type.
+  SVG opens as code, which is more useful.
 - **Command palette** (`Ctrl+Shift+P`), **quick open** (`Ctrl+P`),
   **go to line** (`Ctrl+G`).
 - **Kubernetes cluster view** (`Ctrl/⌘+Shift+K`) — a k9s-style table where

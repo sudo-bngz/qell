@@ -12,6 +12,7 @@ mod document;
 mod format;
 mod icons;
 mod native_menu;
+mod preview;
 mod recent;
 mod session;
 mod snippet;

@@ -29,6 +29,10 @@ pub fn show_central(app: &mut QellApp, ctx: &Context) {
             return;
         }
         show_tabs(app, ui);
+        // A picture or a video is looked at, not edited.
+        if super::media::show(app, ui, ctx) {
+            return;
+        }
         show_manifest_bar(app, ui);
         show_disk_bar(app, ui);
         if app.config.vim_mode {
