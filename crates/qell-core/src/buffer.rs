@@ -32,6 +32,9 @@ pub struct Buffer {
     path: Option<PathBuf>,
     language: Option<String>,
     pub cursor: Cursor,
+    /// Cursors besides the main one, in document order. Empty nearly
+    /// always; typing, deleting and moving happen at every one of them.
+    extra: Vec<Cursor>,
     history: History,
     version: i32,
     dirty: bool,
@@ -52,6 +55,7 @@ impl Buffer {
             path,
             language,
             cursor: Cursor::default(),
+            extra: Vec::new(),
             history: History::new(),
             version: 0,
             dirty: false,
@@ -202,24 +206,176 @@ impl Buffer {
         }
     }
 
-    /// Insert text at the cursor, replacing the selection if there is one.
+    // ---- several cursors at once -----------------------------------------
+
+    /// Every cursor, the main one included, in document order.
+    pub fn cursors(&self) -> Vec<Cursor> {
+        let mut all = self.extra.clone();
+        all.push(self.cursor);
+        all.sort_by_key(|c| c.selection.ordered().0);
+        all
+    }
+
+    pub fn extra_cursors(&self) -> &[Cursor] {
+        &self.extra
+    }
+
+    pub fn has_extra_cursors(&self) -> bool {
+        !self.extra.is_empty()
+    }
+
+    /// Add a cursor, or remove the one already there (⌥-click twice).
+    /// The last cursor left standing becomes the main one.
+    pub fn toggle_cursor(&mut self, c: Cursor) {
+        let head = c.head();
+        if self.cursor.head() == head {
+            // Removing the main one: another takes over.
+            if let Some(next) = self.extra.pop() {
+                self.cursor = next;
+            }
+            return;
+        }
+        match self.extra.iter().position(|e| e.head() == head) {
+            Some(i) => {
+                self.extra.remove(i);
+            }
+            None => self.extra.push(std::mem::replace(&mut self.cursor, c)),
+        }
+    }
+
+    /// Replace the whole set; the last one given leads.
+    pub fn set_cursors(&mut self, mut cursors: Vec<Cursor>) {
+        // Two cursors in the same place are one cursor.
+        cursors.dedup_by(|a, b| a.selection == b.selection);
+        match cursors.pop() {
+            Some(main) => {
+                self.cursor = main;
+                self.extra = cursors;
+            }
+            None => self.extra.clear(),
+        }
+    }
+
+    /// Back to one cursor (Escape, or a plain click).
+    pub fn clear_extra_cursors(&mut self) {
+        self.extra.clear();
+    }
+
+    /// Do something at every cursor: `make` says what each one replaces
+    /// and with what, in char offsets. The edits are applied from the end
+    /// of the file backwards, so the offsets of the ones still to come
+    /// stay valid, and the cursors end up after their own new text.
+    fn edit_each(&mut self, mut make: impl FnMut(&Buffer, &Cursor) -> Option<(usize, usize, String)>) -> bool {
+        let cursors = self.cursors();
+        let mut edits: Vec<(usize, usize, String)> = cursors.iter().filter_map(|c| make(self, c)).collect();
+        edits.sort_by_key(|(s, e, _)| (*s, *e));
+        // Cursors whose edits overlap act as one.
+        edits.dedup_by(|b, a| b.0 < a.1 || (b.0 == a.0 && b.1 == a.1));
+        if edits.is_empty() {
+            return false;
+        }
+        // One keystroke at many cursors is one undo step.
+        let merge = edits.iter().all(|(s, e, t)| s == e && t.chars().count() == 1 && !t.chars().all(char::is_whitespace));
+        self.history.begin_keystroke(merge);
+        for (s, e, text) in edits.iter().rev() {
+            self.apply(*s, e - s, text, true);
+        }
+        self.history.end_keystroke(merge);
+        let mut shift: isize = 0;
+        let mut cursors = Vec::with_capacity(edits.len());
+        for (s, e, text) in &edits {
+            let len = text.chars().count();
+            let at = (*s as isize + shift) as usize + len;
+            cursors.push(Cursor::at(self.char_to_pos(at)));
+            shift += len as isize - (*e - *s) as isize;
+        }
+        self.set_cursors(cursors);
+        true
+    }
+
+    /// Move every cursor the same way, with the single-cursor code.
+    fn move_each(&mut self, mut step: impl FnMut(&mut Self)) {
+        if self.extra.is_empty() {
+            step(self);
+            return;
+        }
+        let cursors = self.cursors();
+        self.extra.clear();
+        let mut moved = Vec::with_capacity(cursors.len());
+        for c in cursors {
+            self.cursor = c;
+            step(self);
+            moved.push(self.cursor);
+        }
+        moved.sort_by_key(|c| c.selection.ordered().0);
+        self.set_cursors(moved);
+    }
+
+    /// Insert text at every cursor, replacing any selections.
     pub fn insert(&mut self, text: &str) {
-        let (s, e) = self.cursor.selection.ordered();
-        let start = self.pos_to_char(s);
-        let end = self.pos_to_char(e);
-        self.apply(start, end - start, text, true);
+        if self.extra.is_empty() {
+            let (s, e) = self.cursor.selection.ordered();
+            let start = self.pos_to_char(s);
+            let end = self.pos_to_char(e);
+            self.apply(start, end - start, text, true);
+            return;
+        }
+        let text = text.to_string();
+        self.edit_each(|buf, c| {
+            let (s, e) = c.selection.ordered();
+            Some((buf.pos_to_char(s), buf.pos_to_char(e), text.clone()))
+        });
+    }
+
+    /// Paste at every cursor: as many lines as cursors gives each cursor
+    /// its own line, as in VS Code; otherwise they all get the lot.
+    pub fn insert_pasted(&mut self, text: &str) {
+        let lines: Vec<&str> = text.split_inclusive('\n').collect();
+        let count = self.extra.len() + 1;
+        if count < 2 || lines.len() != count {
+            self.insert(text);
+            return;
+        }
+        let mut i = 0;
+        let parts: Vec<String> = lines.iter().map(|l| l.trim_end_matches('\n').to_string()).collect();
+        self.edit_each(move |buf, c| {
+            let (s, e) = c.selection.ordered();
+            let text = parts.get(i).cloned().unwrap_or_default();
+            i += 1;
+            Some((buf.pos_to_char(s), buf.pos_to_char(e), text))
+        });
     }
 
     /// Insert a newline, copying the current line's leading whitespace.
     pub fn insert_newline(&mut self) {
-        let line = self.line(self.cursor.head().line);
-        let indent: String = line.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
         self.history.commit();
-        self.insert(&format!("\n{indent}"));
+        if self.extra.is_empty() {
+            let line = self.line(self.cursor.head().line);
+            let indent: String = line.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+            self.insert(&format!("\n{indent}"));
+        } else {
+            // Each cursor keeps the indentation of its own line.
+            self.edit_each(|buf, c| {
+                let (s, e) = c.selection.ordered();
+                let line = buf.line(s.line);
+                let indent: String = line.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+                Some((buf.pos_to_char(s), buf.pos_to_char(e), format!("\n{indent}")))
+            });
+        }
         self.history.commit();
     }
 
     pub fn delete_selection(&mut self) -> bool {
+        if !self.extra.is_empty() {
+            if self.cursors().iter().all(|c| c.selection.is_empty()) {
+                return false;
+            }
+            self.history.commit();
+            return self.edit_each(|buf, c| {
+                let (s, e) = c.selection.ordered();
+                (s != e).then(|| (buf.pos_to_char(s), buf.pos_to_char(e), String::new()))
+            });
+        }
         if self.cursor.selection.is_empty() {
             return false;
         }
@@ -232,6 +388,17 @@ impl Buffer {
     }
 
     pub fn backspace(&mut self) {
+        if !self.extra.is_empty() {
+            if self.delete_selection() {
+                return;
+            }
+            self.history.commit();
+            self.edit_each(|buf, c| {
+                let at = buf.pos_to_char(c.head());
+                (at > 0).then(|| (at - 1, at, String::new()))
+            });
+            return;
+        }
         if self.delete_selection() {
             return;
         }
@@ -244,6 +411,18 @@ impl Buffer {
     }
 
     pub fn delete_forward(&mut self) {
+        if !self.extra.is_empty() {
+            if self.delete_selection() {
+                return;
+            }
+            self.history.commit();
+            let len = self.rope.len_chars();
+            self.edit_each(move |buf, c| {
+                let at = buf.pos_to_char(c.head());
+                (at < len).then(|| (at, at + 1, String::new()))
+            });
+            return;
+        }
         if self.delete_selection() {
             return;
         }
@@ -263,9 +442,20 @@ impl Buffer {
         self.history.commit();
     }
 
+    /// The selected text; with several cursors, one line per selection.
     pub fn selected_text(&self) -> String {
-        let (s, e) = self.cursor.selection.ordered();
-        self.rope.slice(self.pos_to_char(s)..self.pos_to_char(e)).to_string()
+        if self.extra.is_empty() {
+            let (s, e) = self.cursor.selection.ordered();
+            return self.rope.slice(self.pos_to_char(s)..self.pos_to_char(e)).to_string();
+        }
+        self.cursors()
+            .iter()
+            .map(|c| {
+                let (s, e) = c.selection.ordered();
+                self.rope.slice(self.pos_to_char(s)..self.pos_to_char(e)).to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     pub fn select_all(&mut self) {
@@ -283,6 +473,8 @@ impl Buffer {
     }
 
     pub fn undo(&mut self) -> bool {
+        // The old cursors belong to the text as it was.
+        self.extra.clear();
         let Some(edits) = self.history.pop_undo() else { return false };
         for e in edits {
             self.apply(e.start, e.old.chars().count(), &e.new, false);
@@ -292,6 +484,8 @@ impl Buffer {
     }
 
     pub fn redo(&mut self) -> bool {
+        // The old cursors belong to the text as it was.
+        self.extra.clear();
         let Some(edits) = self.history.pop_redo() else { return false };
         for e in edits {
             self.apply(e.start, e.old.chars().count(), &e.new, false);
@@ -303,6 +497,10 @@ impl Buffer {
     // ---- cursor movement -------------------------------------------------
 
     pub fn move_left(&mut self, extend: bool) {
+        self.move_each(|b| b.move_left_one(extend));
+    }
+
+    fn move_left_one(&mut self, extend: bool) {
         self.history.commit();
         let p = self.cursor.head();
         let np = if p.col > 0 {
@@ -317,6 +515,10 @@ impl Buffer {
     }
 
     pub fn move_right(&mut self, extend: bool) {
+        self.move_each(|b| b.move_right_one(extend));
+    }
+
+    fn move_right_one(&mut self, extend: bool) {
         self.history.commit();
         let p = self.cursor.head();
         let np = if p.col < self.line_len(p.line) {
@@ -331,6 +533,10 @@ impl Buffer {
     }
 
     pub fn move_vertical(&mut self, delta: isize, extend: bool) {
+        self.move_each(|b| b.move_vertical_one(delta, extend));
+    }
+
+    fn move_vertical_one(&mut self, delta: isize, extend: bool) {
         self.history.commit();
         let p = self.cursor.head();
         let goal = self.cursor.goal_col.unwrap_or(p.col);
@@ -342,6 +548,10 @@ impl Buffer {
 
     /// Home: jump to first non-blank, or column 0 if already there.
     pub fn move_home(&mut self, extend: bool) {
+        self.move_each(|b| b.move_home_one(extend));
+    }
+
+    fn move_home_one(&mut self, extend: bool) {
         self.history.commit();
         let p = self.cursor.head();
         let first_non_blank = self.line(p.line).chars().take_while(|c| c.is_whitespace()).count();
@@ -351,6 +561,10 @@ impl Buffer {
     }
 
     pub fn move_end(&mut self, extend: bool) {
+        self.move_each(|b| b.move_end_one(extend));
+    }
+
+    fn move_end_one(&mut self, extend: bool) {
         self.history.commit();
         let p = self.cursor.head();
         self.cursor.set_head(Position::new(p.line, self.line_len(p.line)), extend);
@@ -358,6 +572,10 @@ impl Buffer {
     }
 
     pub fn move_word(&mut self, forward: bool, extend: bool) {
+        self.move_each(|b| b.move_word_one(forward, extend));
+    }
+
+    fn move_word_one(&mut self, forward: bool, extend: bool) {
         self.history.commit();
         let mut idx = self.pos_to_char(self.cursor.head());
         let len = self.rope.len_chars();
@@ -395,7 +613,9 @@ impl Buffer {
         self.cursor.goal_col = None;
     }
 
+    /// Put the one cursor here (any others are dropped).
     pub fn set_cursor(&mut self, p: Position, extend: bool) {
+        self.extra.clear();
         self.history.commit();
         let p = self.clamp(p);
         self.cursor.set_head(p, extend);
@@ -484,5 +704,148 @@ mod tests {
         assert_eq!(ch[0].start, Position::new(0, 1));
         assert_eq!(ch[0].text, "X");
         assert!(b.take_changes().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod multi_cursor_tests {
+    use super::*;
+
+    /// A buffer with a cursor at each given (line, col).
+    fn with_cursors(text: &str, at: &[(usize, usize)]) -> Buffer {
+        let mut b = Buffer::from_text(text, None);
+        let cursors: Vec<Cursor> = at.iter().map(|&(l, c)| Cursor::at(Position::new(l, c))).collect();
+        b.set_cursors(cursors);
+        b
+    }
+
+    fn heads(b: &Buffer) -> Vec<(usize, usize)> {
+        b.cursors().iter().map(|c| (c.head().line, c.head().col)).collect()
+    }
+
+    #[test]
+    fn typing_happens_at_every_cursor() {
+        let mut b = with_cursors("a\nb\nc\n", &[(0, 1), (1, 1), (2, 1)]);
+        b.insert("!");
+        assert_eq!(b.text(), "a!\nb!\nc!\n");
+        assert_eq!(heads(&b), vec![(0, 2), (1, 2), (2, 2)]);
+        // One undo takes back the whole keystroke.
+        assert!(b.undo());
+        assert_eq!(b.text(), "a\nb\nc\n");
+    }
+
+    #[test]
+    fn a_word_typed_at_several_cursors_undoes_in_one_go() {
+        let mut b = with_cursors("a\nb\n", &[(0, 1), (1, 1)]);
+        for c in "xyz".chars() {
+            b.insert(&c.to_string());
+        }
+        assert_eq!(b.text(), "axyz\nbxyz\n");
+        assert!(b.undo());
+        assert_eq!(b.text(), "a\nb\n");
+        assert!(b.redo());
+        assert_eq!(b.text(), "axyz\nbxyz\n");
+    }
+
+    #[test]
+    fn replacing_selections_then_typing_undoes_cleanly() {
+        let mut b = Buffer::from_text("foo 1\nfoo 2\n", None);
+        let sel = |l: usize| {
+            let mut c = Cursor::at(Position::new(l, 0));
+            c.set_head(Position::new(l, 3), true);
+            c
+        };
+        b.set_cursors(vec![sel(0), sel(1)]);
+        for c in "bar".chars() {
+            b.insert(&c.to_string());
+        }
+        assert_eq!(b.text(), "bar 1\nbar 2\n");
+        // The typing, then the replacement: two steps, nothing half-done.
+        assert!(b.undo());
+        assert!(b.undo());
+        assert_eq!(b.text(), "foo 1\nfoo 2\n");
+    }
+
+    #[test]
+    fn backspace_and_delete_at_every_cursor() {
+        let mut b = with_cursors("one\ntwo\n", &[(0, 3), (1, 3)]);
+        b.backspace();
+        assert_eq!(b.text(), "on\ntw\n");
+        b.delete_forward();
+        assert_eq!(b.text(), "ontw");
+        // At the very start there is nothing to delete.
+        let mut b = with_cursors("ab\n", &[(0, 0)]);
+        b.backspace();
+        assert_eq!(b.text(), "ab\n");
+    }
+
+    #[test]
+    fn selections_are_replaced_at_every_cursor() {
+        let mut b = Buffer::from_text("foo = 1\nfoo = 2\n", None);
+        let sel = |l: usize| {
+            let mut c = Cursor::at(Position::new(l, 0));
+            c.set_head(Position::new(l, 3), true);
+            c
+        };
+        b.set_cursors(vec![sel(0), sel(1)]);
+        assert_eq!(b.selected_text(), "foo\nfoo");
+        b.insert("bar");
+        assert_eq!(b.text(), "bar = 1\nbar = 2\n");
+    }
+
+    #[test]
+    fn newline_keeps_each_line_indentation() {
+        let mut b = with_cursors("    a\n  b\n", &[(0, 5), (1, 3)]);
+        b.insert_newline();
+        assert_eq!(b.text(), "    a\n    \n  b\n  \n");
+    }
+
+    #[test]
+    fn moving_moves_every_cursor_and_merges_them() {
+        let mut b = with_cursors("abc\ndef\n", &[(0, 1), (1, 1)]);
+        b.move_right(false);
+        assert_eq!(heads(&b), vec![(0, 2), (1, 2)]);
+        b.move_home(false);
+        assert_eq!(heads(&b), vec![(0, 0), (1, 0)]);
+        // Both cursors on one line collapse into one.
+        let mut b = with_cursors("abc\n", &[(0, 0), (0, 1)]);
+        b.move_end(false);
+        assert_eq!(heads(&b), vec![(0, 3)]);
+        assert!(!b.has_extra_cursors());
+    }
+
+    #[test]
+    fn adding_and_removing_cursors() {
+        let mut b = Buffer::from_text("abc\n", None);
+        assert!(!b.has_extra_cursors());
+        b.toggle_cursor(Cursor::at(Position::new(0, 2)));
+        assert_eq!(heads(&b), vec![(0, 0), (0, 2)]);
+        // ⌥-clicking the same spot again takes it away.
+        b.toggle_cursor(Cursor::at(Position::new(0, 2)));
+        assert_eq!(heads(&b), vec![(0, 0)]);
+        b.toggle_cursor(Cursor::at(Position::new(0, 3)));
+        b.clear_extra_cursors();
+        assert_eq!(b.cursors().len(), 1);
+    }
+
+    #[test]
+    fn paste_spreads_matching_lines_over_the_cursors() {
+        let mut b = with_cursors("a: \nb: \n", &[(0, 3), (1, 3)]);
+        b.insert_pasted("one\ntwo\n");
+        assert_eq!(b.text(), "a: one\nb: two\n");
+        // A different number of lines goes in whole at each cursor.
+        let mut b = with_cursors("a\nb\n", &[(0, 1), (1, 1)]);
+        b.insert_pasted("x\ny\nz\n");
+        assert_eq!(b.text(), "ax\ny\nz\n\nbx\ny\nz\n\n");
+    }
+
+    #[test]
+    fn overlapping_cursors_edit_once() {
+        // Two cursors next to each other both deleting the same character.
+        let b = with_cursors("abc\n", &[(0, 1), (0, 1)]);
+        assert_eq!(b.cursors().len(), 1);
+        let mut b = with_cursors("abcd\n", &[(0, 2), (0, 3)]);
+        b.backspace();
+        assert_eq!(b.text(), "ad\n");
     }
 }

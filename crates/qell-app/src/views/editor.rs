@@ -503,7 +503,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                         }
                     }
                     Event::Paste(t) => {
-                        b.insert(t);
+                        b.insert_pasted(t);
                         doc.scroll_to_cursor = true;
                         close_completion = true;
                     }
@@ -639,6 +639,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                             }
                             Key::Escape => {
                                 let h = b.cursor.head();
+                                b.clear_extra_cursors();
                                 b.set_cursor(h, false);
                                 close_completion = true;
                                 app.snippet = None;
@@ -674,11 +675,13 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
         let col = doc.buffer.cursor.head().col;
         doc.buffer.insert(&" ".repeat(tab_size - (col % tab_size)));
     }
-    if accept {
+    // Completions don't follow several cursors around.
+    let many_cursors = app.docs[doc_idx].buffer.has_extra_cursors();
+    if accept && !many_cursors {
         app.accept_completion();
-    } else if want_completion {
+    } else if want_completion && !many_cursors {
         app.request_completion(trigger);
-    } else if close_completion {
+    } else if close_completion || many_cursors {
         app.completion.open = false;
     }
 
@@ -759,27 +762,38 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
         if resp.clicked() || resp.drag_started() {
             clicked_editor = true;
             if let Some(p) = resp.interact_pointer_pos() {
-                let shift = ui.input(|i| i.modifiers.shift);
+                let (shift, alt) = ui.input(|i| (i.modifiers.shift, i.modifiers.alt));
                 doc.goal_col = None;
-                if resp.double_clicked() {
+                // ⌥-click puts another cursor there (or takes it away).
+                let add_cursor = alt && !shift;
+                if add_cursor {
                     let at = pos_at(&doc.buffer, p);
-                    // The word under the pointer, on this line only (word
-                    // jumps would run on past the line's end).
-                    let line = doc.buffer.line(at.line);
-                    if let Some((s, e)) = word_range(&line, at.col, false) {
-                        doc.buffer.set_cursor(Position::new(at.line, s), false);
-                        doc.buffer.set_cursor(Position::new(at.line, e), true);
-                    } else {
-                        doc.buffer.set_cursor(at, false);
-                    }
-                } else {
-                    let at = pos_at(&doc.buffer, p);
-                    doc.buffer.set_cursor(at, shift);
+                    doc.buffer.toggle_cursor(qell_core::Cursor::at(at));
+                    app.completion.open = false;
+                } else if !shift {
+                    doc.buffer.clear_extra_cursors();
                 }
-                app.completion.open = false;
-                // ⌘-click / Ctrl-click: go to definition.
-                if resp.clicked() && ui.input(|i| i.modifiers.command) {
-                    go_to_definition = true;
+                if !add_cursor {
+                    if resp.double_clicked() {
+                        let at = pos_at(&doc.buffer, p);
+                        // The word under the pointer, on this line only (word
+                        // jumps would run on past the line's end).
+                        let line = doc.buffer.line(at.line);
+                        if let Some((s, e)) = word_range(&line, at.col, false) {
+                            doc.buffer.set_cursor(Position::new(at.line, s), false);
+                            doc.buffer.set_cursor(Position::new(at.line, e), true);
+                        } else {
+                            doc.buffer.set_cursor(at, false);
+                        }
+                    } else {
+                        let at = pos_at(&doc.buffer, p);
+                        doc.buffer.set_cursor(at, shift);
+                    }
+                    app.completion.open = false;
+                    // ⌘-click / Ctrl-click: go to definition.
+                    if resp.clicked() && ui.input(|i| i.modifiers.command) {
+                        go_to_definition = true;
+                    }
                 }
             }
         } else if resp.dragged() {
@@ -824,7 +838,8 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
         }
 
         let cursor = doc.buffer.cursor;
-        let (sel_start, sel_end) = cursor.selection.ordered();
+        let all_cursors = doc.buffer.cursors();
+
         let head = cursor.head();
         let vim_block = if vim_on { app.vim.block_cursor(&doc.buffer) } else { None };
         doc.update_structure(&mut app.languages, tab_size);
@@ -877,8 +892,12 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                 painter.rect_filled(bar_rect, 0.0, bar);
             }
 
-            // Selection.
-            if !cursor.selection.is_empty() && row >= sel_start.line && row <= sel_end.line {
+            // Selections, one per cursor.
+            for c in &all_cursors {
+                let (sel_start, sel_end) = c.selection.ordered();
+                if c.selection.is_empty() || row < sel_start.line || row > sel_end.line {
+                    continue;
+                }
                 let line_len = doc.buffer.line_len(row);
                 let c0 = if row == sel_start.line { sel_start.col } else { 0 };
                 let c1 = if row == sel_end.line { sel_end.col } else { line_len + 1 };
@@ -1025,21 +1044,26 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
             }
 
             // Cursor.
-            let at = vim_block.unwrap_or(head);
-            if row == at.line && has_focus_before && wl.row_of(at) == vrow {
-                let x = xcol(at.col);
-                if vim_block.is_some() {
-                    // Vim outside Insert mode: a block on the character.
-                    let block = Rect::from_min_size(Pos2::new(x, y + 1.0), Vec2::new(char_width, row_height - 2.0));
-                    painter.rect_filled(block, 0.0, palette_cursor.gamma_multiply(0.45));
-                } else {
-                    painter.rect_filled(
-                        Rect::from_min_size(Pos2::new(x - 0.5, y + 1.0), Vec2::new(2.0, row_height - 2.0)),
-                        0.0,
-                        palette_cursor,
-                    );
+            for c in &all_cursors {
+                let at = vim_block.unwrap_or(c.head());
+                if row == at.line && has_focus_before && wl.row_of(at) == vrow {
+                    let x = xcol(at.col);
+                    if vim_block.is_some() {
+                        // Vim outside Insert mode: a block on the character.
+                        let block = Rect::from_min_size(Pos2::new(x, y + 1.0), Vec2::new(char_width, row_height - 2.0));
+                        painter.rect_filled(block, 0.0, palette_cursor.gamma_multiply(0.45));
+                    } else {
+                        painter.rect_filled(
+                            Rect::from_min_size(Pos2::new(x - 0.5, y + 1.0), Vec2::new(2.0, row_height - 2.0)),
+                            0.0,
+                            palette_cursor,
+                        );
+                    }
+                    // The completion popup follows the main cursor.
+                    if c.head() == head {
+                        cursor_screen = Some(Pos2::new(x, y + row_height));
+                    }
                 }
-                cursor_screen = Some(Pos2::new(x, y + row_height));
             }
         }
 
