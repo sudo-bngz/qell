@@ -224,6 +224,54 @@ impl Registry {
         }
     }
 
+    /// Ask the server to rename the symbol at the cursor. `None` when no
+    /// ready server for the language can do it.
+    pub fn request_rename(&mut self, languages: &LanguageRegistry, buffer: &mut Buffer, new_name: &str) -> Option<RequestId> {
+        self.sync(languages, buffer);
+        let lang = buffer.language()?;
+        let uri = buffer.path().and_then(path_to_uri)?;
+        let client = self.clients.get(lang).filter(|c| c.is_ready())?;
+        let p = buffer.cursor.head();
+        let pos = to_lsp_position(&buffer.line(p.line), p);
+        client.supports_rename().then(|| client.rename(uri, pos, new_name.to_string()))
+    }
+
+    /// Whether a ready server can rename symbols for this buffer.
+    pub fn can_rename(&mut self, languages: &LanguageRegistry, buffer: &Buffer) -> bool {
+        let Some(lang) = buffer.language() else { return false };
+        self.client_for(languages, lang).is_some_and(|c| c.is_ready() && c.supports_rename())
+    }
+
+    /// Ask what the server can do over the cursor's line or selection.
+    /// `None` when no ready server for the language offers code actions.
+    pub fn request_code_actions(
+        &mut self,
+        languages: &LanguageRegistry,
+        buffer: &mut Buffer,
+        diagnostics: Vec<lsp_types::Diagnostic>,
+    ) -> Option<RequestId> {
+        self.sync(languages, buffer);
+        let lang = buffer.language()?;
+        let uri = buffer.path().and_then(path_to_uri)?;
+        let client = self.clients.get(lang).filter(|c| c.is_ready())?;
+        let (s, e) = buffer.cursor.selection.ordered();
+        let range =
+            lsp_types::Range { start: to_lsp_position(&buffer.line(s.line), s), end: to_lsp_position(&buffer.line(e.line), e) };
+        client.supports_code_actions().then(|| client.code_actions(uri, range, diagnostics))
+    }
+
+    /// Fill in the edit of an action the server sent without one.
+    pub fn resolve_code_action(&self, lang_id: &str, action: &lsp_types::CodeAction) -> Option<RequestId> {
+        let client = self.clients.get(lang_id).filter(|c| c.is_ready())?;
+        Some(client.resolve_code_action(action))
+    }
+
+    /// Run a command an action asked for.
+    pub fn execute_command(&self, lang_id: &str, command: &lsp_types::Command) -> Option<RequestId> {
+        let client = self.clients.get(lang_id).filter(|c| c.is_ready())?;
+        Some(client.execute_command(command))
+    }
+
     /// Characters that open the completion list for a language.
     pub fn completion_triggers(&self, lang_id: &str) -> Vec<String> {
         self.clients.get(lang_id).map(|c| c.completion_triggers()).unwrap_or_default()

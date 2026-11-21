@@ -99,6 +99,12 @@ bottom, and language-server completion for the languages you actually use.
   the pair at the cursor is boxed, and vertical guides mark each indentation
   level, with the block around the cursor highlighted. The indentation step
   (2, 4, tabs…) is detected per file. Both can be turned off in Settings.
+- **Rename a symbol** (`F2`) through the language server, across every file
+  it is used in. The files it touches open as tabs with unsaved changes, so
+  nothing is written until you save them.
+- **Quick fixes** (`Ctrl/⌘+.`) — what the language server can do at the
+  cursor (remove an unused import, add a missing one, a refactoring), in a
+  list to pick from.
 - **Brackets and quotes close themselves** as you type, a selection gets
   wrapped when you type one around it, and backspace between an empty pair
   takes both halves. Off with `auto_close` in the settings.
@@ -172,6 +178,8 @@ npm i -g typescript typescript-language-server
 | Go to file            | `Ctrl+P`           |
 | Go to line            | `Ctrl+G`           |
 | Toggle comment        | `Ctrl+/`           |
+| Rename symbol         | `F2`               |
+| Quick fix             | `Ctrl+.`           |
 | Add cursor at next occurrence | `Ctrl+D`     |
 | Select all occurrences | `Ctrl+Shift+L`     |
 | Add cursor above / below | `Ctrl+Alt+↑` / `Ctrl+Alt+↓` |

@@ -38,6 +38,8 @@ pub fn collect_files(root: &Path, ignore: &[String]) -> Vec<PathBuf> {
 }
 
 enum Choice {
+    /// Index into `app.code_actions`.
+    Action(usize),
     Command(Command),
     Plugin(String),
     File(PathBuf),
@@ -85,7 +87,22 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                 choices.push((name, rel, Choice::File(p)));
             }
         }
-        PaletteMode::GoToLine => {}
+        PaletteMode::CodeActions => {
+            use qell_lsp::lsp_types::CodeActionOrCommand as Ac;
+            for (i, a) in app.code_actions.iter().enumerate() {
+                let (title, kind) = match a {
+                    Ac::Command(c) => (c.title.clone(), String::new()),
+                    Ac::CodeAction(a) => (
+                        a.title.clone(),
+                        a.kind.as_ref().map(|k| k.as_str().split('.').next_back().unwrap_or("").to_string()).unwrap_or_default(),
+                    ),
+                };
+                if fuzzy_score(&query, &title).is_some() {
+                    choices.push((title, kind, Choice::Action(i)));
+                }
+            }
+        }
+        PaletteMode::GoToLine | PaletteMode::Rename => {}
     }
     if choices.is_empty() {
         app.command_palette.selected = 0;
@@ -112,6 +129,8 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
         PaletteMode::Commands => "Type a command…",
         PaletteMode::Files => "Search files by name…",
         PaletteMode::GoToLine => "Line number (or line:column)",
+        PaletteMode::Rename => "New name",
+        PaletteMode::CodeActions => "Quick fix…",
     };
     let accent = app.palette.accent;
     let text_dim = app.palette.text_dim;
@@ -146,6 +165,11 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                 ui.add_space(4.0);
                 if mode == PaletteMode::GoToLine {
                     ui.label(egui::RichText::new("Enter to jump, Esc to cancel").size(11.0).color(text_dim));
+                    return;
+                }
+                if mode == PaletteMode::Rename {
+                    let hint = format!("Renaming {}, everywhere the language server finds it", app.rename_symbol);
+                    ui.label(egui::RichText::new(hint).size(11.0).color(text_dim));
                     return;
                 }
                 egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
@@ -203,6 +227,11 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                 }
                 close = true;
             }
+            PaletteMode::Rename => {
+                let name = app.command_palette.query.trim().to_string();
+                app.rename_to(&name);
+                close = true;
+            }
             _ => chosen = chosen.or(Some(app.command_palette.selected)),
         }
     }
@@ -212,12 +241,14 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                 Choice::Command(c) => app.pending_commands.push(c),
                 Choice::Plugin(n) => app.pending_plugin_commands.push(n),
                 Choice::File(p) => app.open_file(p),
+                Choice::Action(i) => app.run_code_action(i),
             }
         }
         close = true;
     }
     if close {
         app.command_palette.open = false;
+        app.code_actions.clear();
         if app.focus != Focus::Terminal {
             app.focus = Focus::Editor;
         }

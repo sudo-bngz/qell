@@ -44,6 +44,8 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                 item(ui, app, Command::TriggerCompletion);
                 ui.separator();
                 item(ui, app, Command::ToggleComment);
+                item(ui, app, Command::RenameSymbol);
+                item(ui, app, Command::QuickFix);
                 item(ui, app, Command::FormatDocument);
                 ui.separator();
                 item(ui, app, Command::FindInFile);

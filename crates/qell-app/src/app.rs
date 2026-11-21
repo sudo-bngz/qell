@@ -111,6 +111,10 @@ pub enum PaletteMode {
     Commands,
     Files,
     GoToLine,
+    /// Typing the new name for the symbol at the cursor (F2).
+    Rename,
+    /// Picking one of the server's quick fixes.
+    CodeActions,
 }
 
 /// Command palette / quick open / go-to-line overlay.
@@ -203,6 +207,16 @@ pub struct QellApp {
     pub searcher: qell_index::Searcher,
     pub search: views::search::SearchState,
     pub pending_nav: Option<(RequestId, NavRequest)>,
+    /// A rename waiting on the server, with the old and the new name.
+    pending_rename: Option<(RequestId, String, String)>,
+    /// A code-action request waiting on the server, and the actions it
+    /// came back with (what the Quick Fix palette lists).
+    pending_actions: Option<RequestId>,
+    pub code_actions: Vec<qell_lsp::lsp_types::CodeActionOrCommand>,
+    /// A chosen action whose edit the server is still filling in.
+    pending_action_resolve: Option<RequestId>,
+    /// The symbol F2 is renaming, shown in the prompt.
+    pub rename_symbol: String,
     /// Git's version of open files, fetched off the UI thread for the
     /// gutter's change marks.
     git_base_tx: std::sync::mpsc::Sender<(PathBuf, Option<String>)>,
@@ -296,6 +310,11 @@ impl QellApp {
             searcher,
             search: Default::default(),
             pending_nav: None,
+            pending_rename: None,
+            pending_actions: None,
+            code_actions: Vec::new(),
+            pending_action_resolve: None,
+            rename_symbol: String::new(),
             git_base_tx,
             git_base_rx,
             find: Default::default(),
@@ -797,6 +816,225 @@ impl QellApp {
             NavRequest::References { word } if items.is_empty() => self.notify(format!("No references to {word}.")),
             NavRequest::References { word } => self.show_locations(format!("References to {word}"), items, false),
         }
+    }
+
+    // ---- rename and quick fixes -------------------------------------------
+
+    /// F2: ask for the new name of the symbol at the cursor. The rename
+    /// itself is the language server's work, so say so when there is none.
+    pub fn start_rename(&mut self) {
+        let Some((_, word)) = self.symbol_at_cursor() else {
+            self.notify("Put the cursor on a symbol to rename it.");
+            return;
+        };
+        let Self { docs, active, lsp, languages, .. } = self;
+        let Some(doc) = docs.get(*active).filter(|d| !d.read_only) else { return };
+        let lang = doc.buffer.language().unwrap_or("").to_string();
+        let can = lsp.can_rename(languages, &doc.buffer);
+        if !can {
+            self.notify(self.no_server_hint(&lang, "Renaming a symbol needs"));
+            return;
+        }
+        self.rename_symbol = word.clone();
+        self.open_palette(PaletteMode::Rename);
+        self.command_palette.query = word;
+    }
+
+    /// Send the rename the prompt collected.
+    pub fn rename_to(&mut self, new_name: &str) {
+        let new_name = new_name.trim().to_string();
+        let old = std::mem::take(&mut self.rename_symbol);
+        if new_name.is_empty() || new_name == old {
+            return;
+        }
+        let Some(doc) = self.docs.get_mut(self.active) else { return };
+        match self.lsp.request_rename(&self.languages, &mut doc.buffer, &new_name) {
+            Some(id) => self.pending_rename = Some((id, old, new_name)),
+            None => self.notify("The language server stopped: nothing was renamed."),
+        }
+    }
+
+    /// Ctrl/Cmd+. : what the server can do at the cursor.
+    pub fn quick_fix(&mut self) {
+        let Some(doc) = self.docs.get(self.active).filter(|d| !d.read_only) else { return };
+        let lang = doc.buffer.language().unwrap_or("").to_string();
+        // Only the diagnostics the cursor or selection touches.
+        let (s, e) = doc.buffer.cursor.selection.ordered();
+        let (first, last) = (s.line as u32, e.line as u32);
+        let here: Vec<Diagnostic> =
+            doc.diagnostics.iter().filter(|d| d.range.start.line <= last && d.range.end.line >= first).cloned().collect();
+        let Some(doc) = self.docs.get_mut(self.active) else { return };
+        match self.lsp.request_code_actions(&self.languages, &mut doc.buffer, here) {
+            Some(id) => {
+                self.pending_actions = Some(id);
+                self.notify("Looking for quick fixes…");
+            }
+            None => self.notify(self.no_server_hint(&lang, "Quick fixes need")),
+        }
+    }
+
+    /// Why a language-server feature isn't available for `lang`. `needs`
+    /// opens the sentence, e.g. "Quick fixes need".
+    fn no_server_hint(&self, lang: &str, needs: &str) -> String {
+        let name = self.languages.get(lang).map(|l| l.name).unwrap_or(lang);
+        match self.lsp.status(lang) {
+            "ready" => format!("The {name} language server doesn't do that."),
+            "starting" => format!("The {name} language server is still starting: try again in a moment."),
+            "not installed" => {
+                format!("{needs} a language server for {name}. Hover \"LSP\" in the status bar to see how to add one.")
+            }
+            _ => format!("{needs} a language server for {name}, and there is none running."),
+        }
+    }
+
+    fn handle_code_actions(&mut self, id: RequestId, actions: Vec<qell_lsp::lsp_types::CodeActionOrCommand>) {
+        if self.pending_actions != Some(id) {
+            return;
+        }
+        self.pending_actions = None;
+        if actions.is_empty() {
+            self.notify("No quick fixes here.");
+            return;
+        }
+        self.code_actions = actions;
+        self.open_palette(PaletteMode::CodeActions);
+    }
+
+    /// Run the action the Quick Fix palette picked: apply its edit, ask
+    /// the server to fill one in, or run its command.
+    pub fn run_code_action(&mut self, index: usize) {
+        use qell_lsp::lsp_types::CodeActionOrCommand;
+        let Some(action) = self.code_actions.get(index).cloned() else { return };
+        let lang = self.docs.get(self.active).and_then(|d| d.buffer.language()).unwrap_or("").to_string();
+        match action {
+            CodeActionOrCommand::Command(cmd) => {
+                if self.lsp.execute_command(&lang, &cmd).is_none() {
+                    self.notify("The language server stopped: nothing was changed.");
+                }
+            }
+            CodeActionOrCommand::CodeAction(a) => match a.edit.clone() {
+                Some(edit) => self.handle_workspace_edit(0, edit),
+                None if a.command.is_some() => {
+                    let cmd = a.command.clone().expect("checked");
+                    if self.lsp.execute_command(&lang, &cmd).is_none() {
+                        self.notify("The language server stopped: nothing was changed.");
+                    }
+                }
+                None => match self.lsp.resolve_code_action(&lang, &a) {
+                    Some(id) => self.pending_action_resolve = Some(id),
+                    None => self.notify(format!("{} cannot be applied here.", a.title)),
+                },
+            },
+        }
+    }
+
+    /// A rename's answer, or an edit the server asked us to apply. `id` is
+    /// 0 for the latter, which nothing is waiting on.
+    fn handle_workspace_edit(&mut self, id: RequestId, edit: qell_lsp::lsp_types::WorkspaceEdit) {
+        let rename = match self.pending_rename.take() {
+            Some((pending, old, new)) if pending == id => Some((old, new)),
+            other => {
+                self.pending_rename = other;
+                None
+            }
+        };
+        let (files, places, skipped) = self.apply_workspace_edit(edit);
+        let what = |n: usize, one: &str, many: &str| if n == 1 { one.to_string() } else { format!("{n} {many}") };
+        if places == 0 {
+            match rename {
+                Some((old, _)) => self.notify(format!("The language server found nothing to rename for {old}.")),
+                None => self.notify("Nothing to change."),
+            }
+        } else {
+            let where_ = format!("{} in {}", what(places, "one place", "places"), what(files, "this file", "files"));
+            match rename {
+                Some((old, new)) => self.notify(format!("Renamed {old} to {new}: {where_}. Not saved yet.")),
+                None => self.notify(format!("Changed {where_}. Not saved yet.")),
+            }
+        }
+        if skipped > 0 {
+            self.notify_error(format!(
+                "{} the server wanted to create, delete or rename: do that yourself.",
+                what(skipped, "One file", "files")
+            ));
+        }
+    }
+
+    /// Apply an edit that may touch several files. Files that aren't open
+    /// are opened as tabs rather than written behind your back; nothing
+    /// touches the disk until you save. Returns how many files and places
+    /// changed, and how many file operations were left out.
+    fn apply_workspace_edit(&mut self, edit: qell_lsp::lsp_types::WorkspaceEdit) -> (usize, usize, usize) {
+        use qell_lsp::lsp_types::{DocumentChangeOperation, DocumentChanges};
+        let mut per_file: Vec<(PathBuf, Vec<qell_lsp::lsp_types::TextEdit>)> = Vec::new();
+        let mut skipped = 0usize;
+        let mut add = |uri: &qell_lsp::lsp_types::Uri, edits: Vec<qell_lsp::lsp_types::TextEdit>| {
+            let Some(path) = convert::uri_to_path(uri) else { return };
+            match per_file.iter_mut().find(|(p, _)| p == &path) {
+                Some((_, have)) => have.extend(edits),
+                None => per_file.push((path, edits)),
+            }
+        };
+        match edit.document_changes {
+            Some(DocumentChanges::Edits(edits)) => {
+                for e in edits {
+                    let plain = e.edits.into_iter().map(|e| match e {
+                        qell_lsp::lsp_types::OneOf::Left(edit) => edit,
+                        // An annotated edit carries the same change plus a label.
+                        qell_lsp::lsp_types::OneOf::Right(a) => a.text_edit,
+                    });
+                    add(&e.text_document.uri, plain.collect());
+                }
+            }
+            Some(DocumentChanges::Operations(ops)) => {
+                for op in ops {
+                    match op {
+                        DocumentChangeOperation::Edit(e) => {
+                            let plain = e.edits.into_iter().map(|e| match e {
+                                qell_lsp::lsp_types::OneOf::Left(edit) => edit,
+                                qell_lsp::lsp_types::OneOf::Right(a) => a.text_edit,
+                            });
+                            add(&e.text_document.uri, plain.collect());
+                        }
+                        DocumentChangeOperation::Op(_) => skipped += 1,
+                    }
+                }
+            }
+            None => {
+                for (uri, edits) in edit.changes.unwrap_or_default() {
+                    add(&uri, edits);
+                }
+            }
+        }
+        per_file.retain(|(_, e)| !e.is_empty());
+        let was_active = self.docs.get(self.active).and_then(|d| d.buffer.path()).map(Path::to_path_buf);
+        let (mut files, mut places) = (0, 0);
+        for (path, edits) in per_file {
+            let open = self.docs.iter().position(|d| d.buffer.path() == Some(path.as_path()));
+            let index = match open {
+                Some(i) => i,
+                None => {
+                    self.open_file(path.clone());
+                    match self.docs.iter().position(|d| d.buffer.path() == Some(path.as_path())) {
+                        Some(i) => i,
+                        None => continue,
+                    }
+                }
+            };
+            if let Some(doc) = self.docs.get_mut(index) {
+                places += edits.len();
+                files += 1;
+                apply_lsp_edits(doc, edits);
+            }
+        }
+        // Stay where the user was.
+        if let Some(p) = was_active {
+            if let Some(i) = self.docs.iter().position(|d| d.buffer.path() == Some(p.as_path())) {
+                self.active = i;
+            }
+        }
+        self.focus = Focus::Editor;
+        (files, places, skipped)
     }
 
     // ---- settings --------------------------------------------------------
@@ -1568,6 +1806,8 @@ impl QellApp {
             Command::FindPrevious => views::find::go(self, false),
             Command::GoToDefinition => self.go_to_definition(),
             Command::FindReferences => self.find_references(),
+            Command::RenameSymbol => self.start_rename(),
+            Command::QuickFix => self.quick_fix(),
             Command::GoBack => self.navigate(true),
             Command::GoForward => self.navigate(false),
             Command::ShowSourceControl => self.show_sidebar_view(SidebarView::SourceControl),
@@ -1806,6 +2046,17 @@ impl QellApp {
                         if rid == id && i < self.completion.items.len() {
                             self.completion.items[i] = *item;
                             self.completion.resolving = None;
+                        }
+                    }
+                }
+                LspEvent::WorkspaceEdit { id, edit } => self.handle_workspace_edit(id, *edit),
+                LspEvent::CodeActions { id, actions } => self.handle_code_actions(id, actions),
+                LspEvent::CodeActionResolved { id, action } => {
+                    if self.pending_action_resolve == Some(id) {
+                        self.pending_action_resolve = None;
+                        match action.edit {
+                            Some(edit) => self.handle_workspace_edit(0, edit),
+                            None => self.notify(format!("{} has nothing to change here.", action.title)),
                         }
                     }
                 }

@@ -162,6 +162,8 @@ pub fn layout() -> Vec<(&'static str, Vec<Entry>)> {
                 Edit(E::SelectAll),
                 Separator,
                 Cmd(C::ToggleComment, Some("Toggle Comment")),
+                Cmd(C::RenameSymbol, Some("Rename Symbol")),
+                Cmd(C::QuickFix, Some("Quick Fix")),
                 Cmd(C::FormatDocument, Some("Format Document")),
                 Separator,
                 Cmd(C::FindInFile, Some("Find…")),
