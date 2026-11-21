@@ -401,6 +401,29 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
     let has_focus_before = app.focus == Focus::Editor && !app.modal_open();
     let id = ui.id().with("editor").with(doc_idx);
 
+    // Esc in a tab the cluster view opened goes back to the list, the way
+    // Esc backs out of a view in k9s. In Vim mode the first Esc is still
+    // Vim's, so it only applies from Normal mode.
+    if app.docs[doc_idx].from_cluster
+        && has_focus_before
+        && !app.find.open
+        && !app.completion.open
+        && !(vim_on && app.vim.mode != crate::vim::Mode::Normal)
+        && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape))
+    {
+        // A describe or YAML tab has served its purpose; a manifest you
+        // may still be editing stays where it is.
+        if app.docs[doc_idx].read_only {
+            app.pending_commands.push(Command::CloseTab);
+        } else {
+            if app.docs[doc_idx].buffer.is_dirty() {
+                app.notify("Manifest left unsaved in its tab.");
+            }
+            app.back_to_cluster = true;
+        }
+        return;
+    }
+
     // ---- input ----------------------------------------------------------
     let mut want_completion = false;
     let mut trigger: Option<char> = None;

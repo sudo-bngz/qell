@@ -22,6 +22,9 @@ pub struct Document {
     pub line_marks: Vec<LineMark>,
     /// Tab title instead of the file name (diffs: "main.tf (f71c98)").
     pub label: Option<String>,
+    /// Opened from the cluster view (describe, YAML, a manifest), so Esc
+    /// and closing the tab go back to the list.
+    pub from_cluster: bool,
     /// Bracket pairs, for colours and matching.
     pub brackets: Brackets,
     /// Indentation step of the file (guides), e.g. 2 or 4; 1 for tabs.
@@ -189,6 +192,7 @@ impl Document {
             read_only: false,
             line_marks: Vec::new(),
             label: None,
+            from_cluster: false,
             brackets: Brackets::default(),
             indent_unit: 4,
             structure_key: None,
@@ -215,19 +219,6 @@ impl Document {
         let mut doc = Self::new(buffer);
         doc.read_only = true;
         doc.line_marks = marks;
-        doc.label = Some(label);
-        doc
-    }
-
-    /// A read-only tab of text Qell produced rather than read from a
-    /// file (`kubectl describe`, an object's YAML).
-    pub fn text_view(label: String, text: &str, language: Option<&str>) -> Self {
-        let mut buffer = Buffer::from_text(text, None);
-        if let Some(id) = language {
-            buffer.set_language(Some(id.to_string()));
-        }
-        let mut doc = Self::new(buffer);
-        doc.read_only = true;
         doc.label = Some(label);
         doc
     }

@@ -172,11 +172,13 @@ bottom, and language-server completion for the languages you actually use.
   `CrashLoopBackOff` pod and a `NotReady` node in red, a rollout still
   catching up in yellow.
 
-  `d` describes the object and `y` shows its YAML, each in a read-only
-  Qell tab; `e` opens its manifest in an ordinary tab, and **saving that
-  tab applies it to the cluster** — a strip above the text says which
-  object and context it is bound to, and kubectl's own words come back in
-  the status bar. Typing after `:` suggests resource kinds, the cluster's
+  `d` describes the object and `y` shows its YAML, in the panel itself
+  with `Esc` back to the list, so reading never takes you out of the view.
+  `e` opens the manifest in an ordinary tab, since editing is the editor's
+  job, and **saving that tab applies it to the cluster** — a strip above
+  the text says which object and context it is bound to, and kubectl's own
+  words come back in the status bar. `Esc` in that tab, or closing it,
+  goes back to the list where you left it. Typing after `:` suggests resource kinds, the cluster's
   CRDs included (`Tab` takes the suggestion, `Tab` again cycles), and
   typing after `/` suggests the names in front of you.
 
