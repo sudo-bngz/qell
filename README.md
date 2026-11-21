@@ -99,6 +99,10 @@ bottom, and language-server completion for the languages you actually use.
   the pair at the cursor is boxed, and vertical guides mark each indentation
   level, with the block around the cursor highlighted. The indentation step
   (2, 4, tabs…) is detected per file. Both can be turned off in Settings.
+- **Stage or revert one change** — click a change mark in the gutter for
+  *Revert* (put those lines back to git's version, in the editor and
+  unsaved) or *Stage* (that change alone into the index, the rest of the
+  file left as it is). Also *Edit → Git: Stage This Change* and the palette.
 - **Replace across files** — the Search view's chevron opens a replace box;
   *Replace All* asks once, then changes every match. Files open in a tab are
   changed in the editor and left unsaved so you can read them over and undo;

@@ -260,6 +260,9 @@ pub struct QellApp {
     /// Which pane had the keyboard last frame, to notice coming back to
     /// the editor from the terminal.
     last_focus: Focus,
+    /// A change mark in the gutter was clicked: its line and where its
+    /// Revert / Stage menu goes.
+    pub hunk_menu: Option<(usize, egui::Pos2)>,
     /// Rename / new file / new folder being typed in the file tree.
     pub tree_edit: Option<TreeEdit>,
     /// "Move to Trash?" asked for this path.
@@ -349,6 +352,7 @@ impl QellApp {
             pending_vim: Vec::new(),
             pending_format: None,
             last_focus: Focus::Editor,
+            hunk_menu: None,
             tree_edit: None,
             confirm_delete: None,
             nav_back: Vec::new(),
@@ -839,6 +843,82 @@ impl QellApp {
             NavRequest::References { word } if items.is_empty() => self.notify(format!("No references to {word}.")),
             NavRequest::References { word } => self.show_locations(format!("References to {word}"), items, false),
         }
+    }
+
+    // ---- git hunks from the gutter ----------------------------------------
+
+    /// The change `line` sits in, with git's text for the file.
+    fn hunk_at(&self, line: usize) -> Option<(crate::document::Hunk, std::sync::Arc<str>)> {
+        let doc = self.docs.get(self.active)?;
+        let base = doc.git_base.clone()?;
+        let hunk = crate::document::hunks(&base, &doc.buffer.text()).into_iter().find(|h| h.covers(line))?;
+        Some((hunk, base))
+    }
+
+    pub fn stage_hunk_at_cursor(&mut self) {
+        let line = self.docs.get(self.active).map(|d| d.buffer.cursor.head().line).unwrap_or(0);
+        self.stage_hunk(line);
+    }
+
+    pub fn revert_hunk_at_cursor(&mut self) {
+        let line = self.docs.get(self.active).map(|d| d.buffer.cursor.head().line).unwrap_or(0);
+        self.revert_hunk(line);
+    }
+
+    /// Put one change into the index, leaving the rest of the file alone.
+    /// The file must be saved first: git stages what is on disk.
+    pub fn stage_hunk(&mut self, line: usize) {
+        let Some(doc) = self.docs.get(self.active) else { return };
+        let Some(path) = doc.buffer.path().map(Path::to_path_buf) else { return };
+        if doc.buffer.is_dirty() {
+            self.notify("Save the file first: git stages what is on disk.");
+            return;
+        }
+        let Some((hunk, base)) = self.hunk_at(line) else {
+            self.notify("No change here to stage.");
+            return;
+        };
+        let Some((root, rel)) = qell_git::repo_of(&path) else {
+            self.notify("This file isn't in a git repository.");
+            return;
+        };
+        let text = self.docs.get(self.active).map(|d| d.buffer.text()).unwrap_or_default();
+        let patch = qell_git::unified_patch(&rel, &base, &text, hunk.base.clone(), hunk.new.clone());
+        match qell_git::apply_cached(&root, &patch) {
+            Ok(()) => {
+                let n = hunk.new.len().max(hunk.base.len());
+                self.notify(format!("Staged {n} line{} of {rel}.", if n == 1 { "" } else { "s" }));
+                // The gutter compares with the index, which just moved.
+                if let Some(doc) = self.docs.get_mut(self.active) {
+                    doc.git_base_state = crate::document::BaseState::Unknown;
+                }
+                self.git.refresh();
+            }
+            Err(e) => self.notify_error(format!("git apply failed: {}", e.lines().next().unwrap_or(&e))),
+        }
+    }
+
+    /// Put one change back to git's version, in the editor and unsaved.
+    pub fn revert_hunk(&mut self, line: usize) {
+        let Some((hunk, base)) = self.hunk_at(line) else {
+            self.notify("No change here to revert.");
+            return;
+        };
+        let Some(doc) = self.docs.get_mut(self.active).filter(|d| !d.read_only) else { return };
+        let was: Vec<&str> = base.split_inclusive('\n').collect();
+        let text: String = was.get(hunk.base.clone()).unwrap_or_default().concat();
+        // The whole run of lines: from the start of the first to the start
+        // of the one after it (at the end of the file, to its very end).
+        let start = Position::new(hunk.new.start, 0);
+        let end = if doc.buffer.line_count() > hunk.new.end { Position::new(hunk.new.end, 0) } else { doc.buffer.end() };
+        doc.buffer.begin_undo_group();
+        doc.buffer.replace_range(start, end, &text);
+        doc.buffer.end_undo_group();
+        let at = doc.buffer.clamp(Position::new(hunk.new.start, 0));
+        doc.buffer.set_cursor(at, false);
+        doc.scroll_to_cursor = true;
+        let n = hunk.base.len().max(hunk.new.len());
+        self.notify(format!("Put {n} line{} back to git's version, unsaved.", if n == 1 { "" } else { "s" }));
     }
 
     // ---- replace across files ---------------------------------------------
@@ -2001,6 +2081,8 @@ impl QellApp {
                 }
             }
             Command::ShowExplorer => self.show_sidebar_view(SidebarView::Explorer),
+            Command::StageHunk => self.stage_hunk_at_cursor(),
+            Command::RevertHunk => self.revert_hunk_at_cursor(),
             Command::ShowSearch => {
                 // Always shows (and focuses) Search, seeded with the selection.
                 let selection = self.docs.get(self.active).map(|d| d.buffer.selected_text());

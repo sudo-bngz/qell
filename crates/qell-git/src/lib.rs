@@ -326,6 +326,57 @@ pub fn run(dir: &Path, args: &[&str], input: Option<&str>) -> Result<String, Str
     }
 }
 
+/// The repository holding `path`, and `path` relative to its root (as
+/// git spells it, with forward slashes). `None` outside a repository.
+pub fn repo_of(path: &Path) -> Option<(PathBuf, String)> {
+    // Both sides are resolved first: git prints the real path, and on
+    // macOS a temporary folder is reached through a symlink.
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let dir = path.parent()?;
+    let root = run(dir, &["rev-parse", "--show-toplevel"], None).ok()?;
+    let root = PathBuf::from(root.trim());
+    let root = std::fs::canonicalize(&root).unwrap_or(root);
+    let rel = path.strip_prefix(&root).ok()?;
+    let rel = rel.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");
+    (!rel.is_empty()).then_some((root, rel))
+}
+
+/// A unified diff turning the `base` lines into the `new` ones, for one
+/// run of changed lines. No context lines, so it is applied with
+/// `--unidiff-zero`.
+pub fn unified_patch(
+    rel: &str,
+    base: &str,
+    new: &str,
+    base_range: std::ops::Range<usize>,
+    new_range: std::ops::Range<usize>,
+) -> String {
+    let b: Vec<&str> = base.split_inclusive('\n').collect();
+    let n: Vec<&str> = new.split_inclusive('\n').collect();
+    let (blen, nlen) = (base_range.len(), new_range.len());
+    // An empty side points at the line it comes after, not at a line.
+    let bs = if blen == 0 { base_range.start } else { base_range.start + 1 };
+    let ns = if nlen == 0 { new_range.start } else { new_range.start + 1 };
+    let mut out = format!("--- a/{rel}\n+++ b/{rel}\n@@ -{bs},{blen} +{ns},{nlen} @@\n");
+    let mut push = |sign: char, lines: &[&str]| {
+        for line in lines {
+            out.push(sign);
+            out.push_str(line);
+            if !line.ends_with('\n') {
+                out.push_str("\n\\ No newline at end of file\n");
+            }
+        }
+    };
+    push('-', b.get(base_range).unwrap_or_default());
+    push('+', n.get(new_range).unwrap_or_default());
+    out
+}
+
+/// Put `patch` into the index, leaving the working tree alone.
+pub fn apply_cached(root: &Path, patch: &str) -> Result<(), String> {
+    run(root, &["apply", "--cached", "--unidiff-zero", "-"], Some(patch)).map(|_| ())
+}
+
 /// `git add` these paths (relative to `dir`).
 pub fn stage(dir: &Path, paths: &[&Path]) -> Result<(), String> {
     let mut args = vec!["add", "--all", "--"];
@@ -761,6 +812,39 @@ mod tests {
         assert_eq!(ws.status_of(&p("clones/tool/main.go")), None);
         assert_eq!(ws.status_of(&p("clones/other.txt")), Some(FileStatus::Ignored));
         assert_eq!(ws.status_of(&p("top.txt")), Some(FileStatus::Modified));
+    }
+
+    #[test]
+    fn staging_one_hunk_leaves_the_rest_alone() {
+        if !git_available() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo(tmp.path());
+        let file = tmp.path().join("a.txt");
+        std::fs::write(&file, "one\ntwo\nthree\n").unwrap();
+        commit_all(tmp.path());
+        let new = "ONE\ntwo\nTHREE\n";
+        std::fs::write(&file, new).unwrap();
+        let (root, rel) = repo_of(&file).unwrap();
+        assert_eq!(rel, "a.txt");
+        // Only the first line.
+        let patch = unified_patch(&rel, "one\ntwo\nthree\n", new, 0..1, 0..1);
+        apply_cached(&root, &patch).unwrap();
+        assert_eq!(index_text(&file).as_deref(), Some("ONE\ntwo\nthree\n"));
+    }
+
+    #[test]
+    fn patches_for_added_and_deleted_lines() {
+        // Two lines added after the first.
+        let p = unified_patch("a.txt", "one\n", "one\nx\ny\n", 1..1, 1..3);
+        assert!(p.contains("@@ -1,0 +2,2 @@\n+x\n+y\n"), "{p}");
+        // The second line deleted.
+        let p = unified_patch("a.txt", "one\ntwo\n", "one\n", 1..2, 1..1);
+        assert!(p.contains("@@ -2,1 +1,0 @@\n-two\n"), "{p}");
+        // A last line without its newline is marked as such.
+        let p = unified_patch("a.txt", "one\n", "two", 0..1, 0..1);
+        assert!(p.ends_with("+two\n\\ No newline at end of file\n"), "{p}");
     }
 
     #[test]
