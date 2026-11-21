@@ -13,6 +13,7 @@
 pub mod client;
 pub mod convert;
 pub mod registry;
+pub mod roots;
 
 pub use client::{Client, Event, FileSymbol, RequestId, Waker};
 pub use registry::{install_hint, InstallHint, Registry};

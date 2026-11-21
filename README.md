@@ -151,6 +151,14 @@ bottom, and language-server completion for the languages you actually use.
   in the background (respecting `.gitignore`), so results appear as you
   type, even in large trees. Case, whole-word and regex toggles; click a
   match to open it.
+- **A language server per project, not per window.** Open a folder of
+  projects — `~/go/src`, a monorepo — and each file gets a server rooted
+  where its own project is: the nearest `go.mod` or `go.work`, `Cargo.toml`
+  (the workspace one, for a workspace), `package.json`, `pyproject.toml`,
+  `compile_commands.json`, and otherwise the nearest repository. Without
+  that, gopls opened at `~/go/src` answers *cannot find package in GOROOT
+  or GOPATH*. Qell never looks above the folder you opened, and the status
+  bar says where the server was started when it isn't that folder.
 - **Go to definition** — `Ctrl`/`⌘`+click a function, type, variable…
   (the symbol is underlined while the key is held), or press `F12`.
   Qell asks the language server when one is installed, and otherwise uses
