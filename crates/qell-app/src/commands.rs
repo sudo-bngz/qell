@@ -25,6 +25,7 @@ pub enum Command {
     ToggleWordWrap,
     ToggleMinimap,
     ToggleVimMode,
+    FormatDocument,
     ShowExplorer,
     ShowSearch,
     FindInFile,
@@ -71,6 +72,7 @@ impl Command {
         Command::ToggleWordWrap,
         Command::ToggleMinimap,
         Command::ToggleVimMode,
+        Command::FormatDocument,
         Command::ShowExplorer,
         Command::ShowSearch,
         Command::FindInFile,
@@ -117,6 +119,7 @@ impl Command {
             Command::ToggleWordWrap => "View: Toggle Word Wrap",
             Command::ToggleMinimap => "View: Toggle Minimap",
             Command::ToggleVimMode => "View: Toggle Vim Mode",
+            Command::FormatDocument => "Format Document",
             Command::ShowExplorer => "View: Show Explorer",
             Command::ShowSearch => "View: Search in Files",
             Command::FindInFile => "Find",
@@ -173,6 +176,8 @@ impl Command {
             // No default shortcut, like VS Code (it's in View and the palette).
             Command::ToggleMinimap => None,
             Command::ToggleVimMode => None,
+            // VS Code's ⇧⌥F / Shift+Alt+F.
+            Command::FormatDocument => s(Modifiers::SHIFT | Modifiers::ALT, Key::F),
             Command::ShowExplorer => s(Modifiers::CTRL | Modifiers::SHIFT, Key::E),
             Command::ShowSearch => s(cmd_shift, Key::F),
             Command::FindInFile => s(cmd, Key::F),

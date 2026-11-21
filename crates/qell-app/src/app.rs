@@ -220,6 +220,9 @@ pub struct QellApp {
     /// Vim mode state, and what its commands asked the app to do.
     pub vim: crate::vim::Vim,
     pub pending_vim: Vec<crate::vim::Action>,
+    /// A formatting request waiting on a language server, and whether the
+    /// file is to be saved once its edits arrive.
+    pending_format: Option<(RequestId, bool)>,
     /// Which pane had the keyboard last frame, to notice coming back to
     /// the editor from the terminal.
     last_focus: Focus,
@@ -302,6 +305,7 @@ impl QellApp {
             reveal: None,
             vim: crate::vim::Vim::new(),
             pending_vim: Vec::new(),
+            pending_format: None,
             last_focus: Focus::Editor,
             tree_edit: None,
             confirm_delete: None,
@@ -487,11 +491,26 @@ impl QellApp {
     }
 
     fn save_active(&mut self, force_dialog: bool) {
-        let Some(doc) = self.docs.get_mut(self.active) else { return };
+        let Some(doc) = self.docs.get(self.active) else { return };
         if doc.read_only {
             self.notify("This is a read-only view.");
             return;
         }
+        // Format first, then write (the formatter may answer later).
+        if self.config.format_on_save && !force_dialog && doc.buffer.path().is_some() {
+            self.format_active(true);
+        } else {
+            self.write_active_or_ask(force_dialog);
+        }
+    }
+
+    /// Write the file, after formatting if that was asked for.
+    fn write_active(&mut self) {
+        self.write_active_or_ask(false);
+    }
+
+    fn write_active_or_ask(&mut self, force_dialog: bool) {
+        let Some(doc) = self.docs.get_mut(self.active) else { return };
         if doc.buffer.path().is_none() || force_dialog {
             let Some(path) = rfd::FileDialog::new().set_directory(&self.root).save_file() else { return };
             if let Err(e) = doc.buffer.save_as(path) {
@@ -892,6 +911,90 @@ impl QellApp {
                 self.sidebar_view = SidebarView::Explorer;
                 self.show_sidebar = true;
             }
+        }
+    }
+
+    // ---- formatting -----------------------------------------------------------
+
+    /// Format the open file: the language server when it offers it, else
+    /// the language's own tool. `then_save` writes the file afterwards.
+    fn format_active(&mut self, then_save: bool) {
+        let Some(doc) = self.docs.get_mut(self.active) else { return };
+        if doc.read_only {
+            if !then_save {
+                self.notify("This is a read-only view.");
+            }
+            return;
+        }
+        let Some(lang) = doc.buffer.language().map(str::to_string) else {
+            if !then_save {
+                self.notify("Qell doesn't know this file's language, so it can't format it.");
+            }
+            return;
+        };
+        let configured = crate::format::command_for(&lang, &self.config.format);
+        // A command set by hand wins; otherwise the server, then the
+        // language's usual tool.
+        if self.config.format.contains_key(&lang) {
+            if let Some(cmd) = configured {
+                self.format_with_command(&cmd, then_save);
+            } else if !then_save {
+                self.notify(format!("Formatting is turned off for {lang} in your settings."));
+            }
+            return;
+        }
+        let doc = &mut self.docs[self.active];
+        if let Some(id) = self.lsp.request_formatting(&self.languages, &mut doc.buffer, self.config.tab_size) {
+            self.pending_format = Some((id, then_save));
+            return;
+        }
+        match configured {
+            Some(cmd) => self.format_with_command(&cmd, then_save),
+            None if !then_save => self.notify(format!("No formatter for {lang}: set one with [format] in the settings.")),
+            None => {}
+        }
+    }
+
+    /// Run an outside formatter over the buffer and take in what it prints.
+    fn format_with_command(&mut self, cmd: &[String], then_save: bool) {
+        let root = self.root.clone();
+        let Some(doc) = self.docs.get_mut(self.active) else { return };
+        let text = doc.buffer.text();
+        let path = doc.buffer.path().map(Path::to_path_buf).unwrap_or_else(|| root.join(doc.buffer.file_name()));
+        let cwd = path.parent().filter(|p| p.is_dir()).unwrap_or(&root).to_path_buf();
+        match crate::format::run(cmd, &text, &path, &cwd) {
+            Ok(formatted) => {
+                let count = apply_format(doc, &text, &formatted);
+                if !then_save && count == 0 {
+                    self.notify("Already formatted.");
+                }
+            }
+            // On save, a tool that isn't installed stays quiet: saving must
+            // not nag. Everything else is worth saying once.
+            Err(crate::format::Error::NotInstalled(_)) if then_save => {}
+            Err(e) => self.notify_error(e.to_string()),
+        }
+        if then_save {
+            self.write_active();
+        }
+    }
+
+    /// Edits from the language server's formatter.
+    fn handle_format_edits(&mut self, id: RequestId, edits: Vec<qell_lsp::lsp_types::TextEdit>) {
+        let Some((pending, then_save)) = self.pending_format else { return };
+        if pending != id {
+            return;
+        }
+        self.pending_format = None;
+        if let Some(doc) = self.docs.get_mut(self.active) {
+            let before = doc.buffer.text();
+            apply_lsp_edits(doc, edits);
+            if !then_save && doc.buffer.text() == before {
+                self.notify("Already formatted.");
+            }
+        }
+        if then_save {
+            self.write_active();
         }
     }
 
@@ -1320,6 +1423,7 @@ impl QellApp {
                 self.request_completion(None);
             }
             Command::ToggleSidebar => self.show_sidebar = !self.show_sidebar,
+            Command::FormatDocument => self.format_active(false),
             Command::ToggleVimMode => {
                 self.config.vim_mode = !self.config.vim_mode;
                 self.save_config();
@@ -1587,6 +1691,7 @@ impl QellApp {
                     }
                 }
                 LspEvent::Locations { id, locations } => self.handle_locations(id, locations),
+                LspEvent::Edits { id, edits } => self.handle_format_edits(id, edits),
                 LspEvent::CompletionResolved { id, item } => {
                     if let Some((rid, i)) = self.completion.resolving {
                         if rid == id && i < self.completion.items.len() {
@@ -1826,6 +1931,46 @@ impl eframe::App for QellApp {
 }
 
 /// Whether two paths name the same file (resolving symlinks and `..`).
+/// Put a formatter's text back into the buffer, changing only the lines
+/// that moved, as one undo step. Returns how many places changed.
+fn apply_format(doc: &mut Document, old: &str, new: &str) -> usize {
+    let edits = crate::format::edits(old, new);
+    if edits.is_empty() {
+        return 0;
+    }
+    let head = doc.buffer.cursor.head();
+    doc.buffer.begin_undo_group();
+    for (start, end, text) in &edits {
+        doc.buffer.replace_range(*start, *end, text);
+    }
+    doc.buffer.end_undo_group();
+    let p = doc.buffer.clamp(head);
+    doc.buffer.set_cursor(p, false);
+    doc.scroll_to_cursor = true;
+    edits.len()
+}
+
+/// Apply a language server's edits (their positions count UTF-16 units),
+/// last first so the earlier ones stay valid.
+fn apply_lsp_edits(doc: &mut Document, mut edits: Vec<qell_lsp::lsp_types::TextEdit>) {
+    if edits.is_empty() {
+        return;
+    }
+    edits.sort_by_key(|e| (e.range.start.line, e.range.start.character));
+    let head = doc.buffer.cursor.head();
+    doc.buffer.begin_undo_group();
+    for edit in edits.iter().rev() {
+        let line = |n: u32| doc.buffer.line(n as usize);
+        let start = from_lsp_position(&line(edit.range.start.line), edit.range.start);
+        let end = from_lsp_position(&line(edit.range.end.line), edit.range.end);
+        doc.buffer.replace_range(start, end, &edit.new_text);
+    }
+    doc.buffer.end_undo_group();
+    let p = doc.buffer.clamp(head);
+    doc.buffer.set_cursor(p, false);
+    doc.scroll_to_cursor = true;
+}
+
 fn same_file(a: &Path, b: &Path) -> bool {
     match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         (Ok(a), Ok(b)) => a == b,

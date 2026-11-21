@@ -55,6 +55,12 @@ fn defs() -> Vec<Def> {
         def("tab_size", "Editor", "Tab Size", "Spaces inserted by the Tab key."),
         def("auto_complete", "Editor", "Auto Complete", "Suggest completions while typing, not only on Ctrl+Space."),
         def(
+            "format_on_save",
+            "Editor",
+            "Format on Save",
+            "Run the language's formatter (gofmt, terraform fmt, rustfmt…) when you save, if it is installed.",
+        ),
+        def(
             "vim_mode",
             "Editor",
             "Vim Mode",
@@ -145,6 +151,7 @@ fn is_modified(key: &str, c: &Config) -> bool {
         "font_size" => c.font_size != d.font_size,
         "tab_size" => c.tab_size != d.tab_size,
         "auto_complete" => c.auto_complete != d.auto_complete,
+        "format_on_save" => c.format_on_save != d.format_on_save,
         "vim_mode" => c.vim_mode != d.vim_mode,
         "word_wrap" => c.word_wrap != d.word_wrap,
         "minimap" => c.minimap != d.minimap,
@@ -172,6 +179,7 @@ fn reset(key: &str, c: &mut Config) {
         "font_size" => c.font_size = d.font_size,
         "tab_size" => c.tab_size = d.tab_size,
         "auto_complete" => c.auto_complete = d.auto_complete,
+        "format_on_save" => c.format_on_save = d.format_on_save,
         "vim_mode" => c.vim_mode = d.vim_mode,
         "word_wrap" => c.word_wrap = d.word_wrap,
         "minimap" => c.minimap = d.minimap,
@@ -257,6 +265,9 @@ fn control(ui: &mut egui::Ui, key: &str, c: &mut Config, drafts: &mut HashMap<St
         }
         "auto_complete" => {
             ui.checkbox(&mut c.auto_complete, "Enabled");
+        }
+        "format_on_save" => {
+            ui.checkbox(&mut c.format_on_save, "Enabled");
         }
         "vim_mode" => {
             ui.checkbox(&mut c.vim_mode, "Enabled");
@@ -452,6 +463,7 @@ mod tests {
                 "font_size" => c.font_size = 20.0,
                 "tab_size" => c.tab_size = 2,
                 "auto_complete" => c.auto_complete = false,
+                "format_on_save" => c.format_on_save = false,
                 "vim_mode" => c.vim_mode = true,
                 "word_wrap" => c.word_wrap = true,
                 "minimap" => c.minimap = false,
