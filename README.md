@@ -190,6 +190,16 @@ bottom, and language-server completion for the languages you actually use.
   CRDs included (`Tab` takes the suggestion, `Tab` again cycles), and
   typing after `/` suggests the names in front of you.
 
+  **Live usage.** When metrics-server is there, pods carry the columns k9s
+  shows — `CPU`, `MEM`, `%CPU/R`, `%MEM/R`, `%CPU/L`, `%MEM/L`, measured
+  against the pod's own requests and limits — and nodes carry theirs,
+  against what they have to give. They move with the list, every two
+  seconds, while the panel has the keyboard. The header draws the last
+  minute of cluster CPU and memory as a sparkline, so you can see where it
+  is going and not only where it is. A pod that is still coming up reads
+  `Init:1/2`, and one the kernel keeps killing for memory reads
+  `OOMKilled` rather than only `CrashLoopBackOff`.
+
   The header is k9s's: context, cluster, user, the Qell and Kubernetes
   revisions, cluster CPU and memory when metrics-server is there, the
   namespaces on `<0>`…`<9>`, and the keys — dropping a column at a time as

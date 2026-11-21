@@ -31,6 +31,9 @@ enum Msg {
     Table(Listing, Box<Table>),
     Failed(Listing, Error),
     Info(Box<qell_k8s::Info>),
+    /// What everything is using now, from `kubectl top`: the listing's
+    /// own rows, and the cluster's CPU and memory for the header.
+    Usage(qell_k8s::Metrics, Option<u8>, Option<u8>),
     /// `kubectl describe`, the YAML, or a manifest to edit.
     Text(Shown, Box<qell_k8s::Object>, String),
     TextFailed(String),
@@ -107,6 +110,13 @@ pub struct K8sState {
     scroll_to: bool,
     /// Where the list is scrolled to, to work out whether it has to move.
     offset: f32,
+    /// How far right the list is scrolled, so the column header follows.
+    offset_x: f32,
+    /// What `kubectl top` last said, for the usage columns.
+    metrics: qell_k8s::Metrics,
+    /// Cluster CPU and memory over the last few minutes, for the header
+    /// sparklines: how it is going, not only where it is now.
+    history: std::collections::VecDeque<(u8, u8)>,
 }
 
 impl Default for K8sState {
@@ -138,6 +148,9 @@ impl Default for K8sState {
             text: None,
             scroll_to: false,
             offset: 0.0,
+            offset_x: 0.0,
+            metrics: qell_k8s::Metrics::default(),
+            history: std::collections::VecDeque::new(),
         }
     }
 }
@@ -157,12 +170,13 @@ impl K8sState {
     /// Ask for this listing; the answer arrives in a later frame.
     fn fetch(&mut self, ctx: &egui::Context) {
         let (client, listing) = (self.client.clone(), self.listing.clone());
+        let metrics = self.metrics.clone();
         let (tx, rx) = channel();
         let ctx = ctx.clone();
         self.loading = true;
         self.fetched = Some(Instant::now());
         let started = std::thread::Builder::new().name("kubectl-list".into()).spawn(move || {
-            let msg = match client.list(&listing, qell_k8s::now()) {
+            let msg = match client.list(&listing, qell_k8s::now(), &metrics) {
                 Ok(table) => Msg::Table(listing, Box::new(table)),
                 Err(e) => Msg::Failed(listing, e),
             };
@@ -175,6 +189,35 @@ impl K8sState {
                 self.loading = false;
                 self.error = Some(format!("cannot run kubectl: {e}"));
             }
+        }
+    }
+
+    /// Ask what things are using. One command for the kinds that have
+    /// usage columns, skipped when the cluster has no metrics-server.
+    fn fetch_usage(&mut self, ctx: &egui::Context) {
+        if self.info.no_metrics {
+            return;
+        }
+        let client = self.client.clone();
+        let kind = self.listing.kind.clone();
+        let namespace = self.listing.namespace.clone();
+        let (tx, rx) = channel();
+        let ctx = ctx.clone();
+        let spawned = std::thread::Builder::new().name("kubectl-top".into()).spawn(move || {
+            // One `top nodes` gives the header its CPU and memory and,
+            // when the list is of nodes, their rows as well.
+            let nodes = client.run(&["top", "nodes", "--no-headers"]).ok();
+            let (cpu, mem) = nodes.as_deref().map(qell_k8s::parse_top).unwrap_or((None, None));
+            let metrics = match kind.as_str() {
+                "pods" => client.top_pods(namespace.as_deref()).unwrap_or_default(),
+                "nodes" => nodes.as_deref().map(|t| qell_k8s::tables::parse_usage(t, false)).unwrap_or_default(),
+                _ => qell_k8s::Metrics::default(),
+            };
+            let _ = tx.send(Msg::Usage(metrics, cpu, mem));
+            ctx.request_repaint();
+        });
+        if spawned.is_ok() {
+            self.jobs.push(rx);
         }
     }
 
@@ -248,6 +291,7 @@ impl K8sState {
         self.error = None;
         self.blocked = false;
         self.fetch(ctx);
+        self.fetch_usage(ctx);
     }
 
     fn back(&mut self, ctx: &egui::Context) -> bool {
@@ -283,6 +327,7 @@ pub fn open(app: &mut QellApp, ctx: &egui::Context) {
         let listing = app.k8s.listing.clone();
         app.k8s.set(listing, ctx);
     }
+    app.k8s.fetch_usage(ctx);
 }
 
 pub fn close(app: &mut QellApp) {
@@ -347,10 +392,31 @@ pub fn update(app: &mut QellApp, ctx: &egui::Context) {
                 app.k8s.loading = false;
                 app.notify_error(message);
             }
+            // Kept for the next time the list is built, a tick away,
+            // rather than asking for the list again here.
+            Msg::Usage(metrics, cpu, mem) => {
+                if !metrics.is_empty() {
+                    app.k8s.metrics = metrics;
+                }
+                if let (Some(c), Some(m)) = (cpu, mem) {
+                    app.k8s.info.cpu = cpu;
+                    app.k8s.info.mem = mem;
+                    app.k8s.history.push_back((c, m));
+                    // Two minutes at the list's own pace.
+                    while app.k8s.history.len() > 60 {
+                        app.k8s.history.pop_front();
+                    }
+                }
+            }
             Msg::Info(info) => {
                 // A cluster that has just said it has no metrics
                 // keeps that answer, so the next read doesn't ask again.
+                // The usage job keeps CPU and MEM up to date between
+                // these, so the slower read doesn't undo them.
+                let (cpu, mem) = (app.k8s.info.cpu.or(info.cpu), app.k8s.info.mem.or(info.mem));
                 app.k8s.info = *info;
+                app.k8s.info.cpu = cpu;
+                app.k8s.info.mem = mem;
             }
             Msg::Contexts(list, current) => {
                 app.k8s.contexts = list;
@@ -368,6 +434,7 @@ pub fn update(app: &mut QellApp, ctx: &egui::Context) {
     let live = app.focus == Focus::K8s && app.k8s.open && app.k8s.listing.kind != CONTEXTS && !app.k8s.blocked;
     if live && !app.k8s.loading && app.k8s.fetched.is_some_and(|t| t.elapsed() >= REFRESH) {
         app.k8s.fetch(ctx);
+        app.k8s.fetch_usage(ctx);
     }
     // The header moves slowly (a version never, CPU every few seconds),
     // so it has a timer of its own.
@@ -394,6 +461,7 @@ pub fn show(app: &mut QellApp, ui: &mut egui::Ui, ctx: &egui::Context) {
         value: text,
         key: accent,
         key_ns: app.palette.token(qell_core::TokenKind::Keyword),
+        chart: accent.gamma_multiply(0.85),
         dim,
         logo: accent.gamma_multiply(0.8),
     };
@@ -422,7 +490,7 @@ pub fn show(app: &mut QellApp, ui: &mut egui::Ui, ctx: &egui::Context) {
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(table_rect));
     child.spacing_mut().item_spacing.y = 0.0;
     // Column header, then the rows.
-    column_header(&app.k8s.table, &widths, &mut child, &font, row_h, accent);
+    column_header(&app.k8s.table, &widths, &mut child, &font, row_h, accent, app.k8s.offset_x);
     let rows = visible.len();
     let selected = app.k8s.selected.min(rows.saturating_sub(1));
     if rows == 0 {
@@ -441,7 +509,7 @@ pub fn show(app: &mut QellApp, ui: &mut egui::Ui, ctx: &egui::Context) {
             ui.label(egui::RichText::new(what).font(font.clone()).color(dim));
         });
     }
-    let mut list = egui::ScrollArea::vertical().auto_shrink([false, false]);
+    let mut list = egui::ScrollArea::both().auto_shrink([false, false]);
     if app.k8s.scroll_to {
         // `show_rows` only draws what is on screen, so the row to follow
         // may not exist yet: the offset is worked out rather than asked
@@ -449,11 +517,15 @@ pub fn show(app: &mut QellApp, ui: &mut egui::Ui, ctx: &egui::Context) {
         let view_h = (table_rect.height() - row_h).max(row_h);
         list = list.vertical_scroll_offset(keep_visible(app.k8s.offset, view_h, selected, row_h));
     }
+    // With the usage columns a pod line is wider than most windows, so
+    // the rows are as wide as their content and the view scrolls.
+    let char_w = ui.fonts_mut(|f| f.glyph_width(&font, 'M'));
+    let line_w = (widths.iter().sum::<usize>() + 2 * widths.len()) as f32 * char_w + 16.0;
     let scrolled = list.show_rows(&mut child, row_h, rows, |ui, range| {
         ui.spacing_mut().item_spacing.y = 0.0;
         for i in range {
             let row = &app.k8s.table.rows[visible[i]];
-            let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), row_h), Sense::click());
+            let (rect, resp) = ui.allocate_exact_size(Vec2::new(line_w.max(ui.available_width()), row_h), Sense::click());
             let painter = ui.painter_at(rect);
             if i == selected {
                 painter.rect_filled(rect, 0.0, accent.gamma_multiply(0.35));
@@ -479,6 +551,7 @@ pub fn show(app: &mut QellApp, ui: &mut egui::Ui, ctx: &egui::Context) {
         }
     });
     app.k8s.offset = scrolled.state.offset.y;
+    app.k8s.offset_x = scrolled.state.offset.x;
     app.k8s.scroll_to = false;
     if let Some((i, enter)) = open_row {
         app.k8s.selected = i;
@@ -519,10 +592,12 @@ fn cells_line(cells: &[String], widths: &[usize]) -> String {
     out
 }
 
-fn column_header(table: &Table, widths: &[usize], ui: &mut egui::Ui, font: &FontId, row_h: f32, accent: Color32) {
+#[allow(clippy::too_many_arguments)]
+fn column_header(table: &Table, widths: &[usize], ui: &mut egui::Ui, font: &FontId, row_h: f32, accent: Color32, offset_x: f32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), row_h), Sense::hover());
+    // The header follows the rows when the table is scrolled sideways.
     ui.painter_at(rect).text(
-        Pos2::new(rect.left() + 8.0, rect.center().y),
+        Pos2::new(rect.left() + 8.0 - offset_x, rect.center().y),
         Align2::LEFT_CENTER,
         cells_line(&table.columns, widths),
         font.clone(),
@@ -543,15 +618,18 @@ fn header(app: &mut QellApp, ui: &mut egui::Ui, font: &FontId, colors: &Colors) 
         (None, true) => "n/a".into(),
         (None, false) => "…".into(),
     };
+    // A few minutes of cluster CPU and memory, drawn in the line itself.
+    let (cpu_line, mem_line) = sparklines(&k.history);
+    // (name, value, the little chart that follows it)
     let facts = [
-        ("Context", dash(&context)),
-        ("Refresh", if live { "live, every 2s".into() } else { "paused".to_string() }),
-        ("Cluster", dash(&k.info.cluster)),
-        ("User", dash(&k.info.user)),
-        ("Qell Rev", env!("CARGO_PKG_VERSION").to_string()),
-        ("K8s Rev", dash(&k.info.server)),
-        ("CPU", percent(k.info.cpu)),
-        ("MEM", percent(k.info.mem)),
+        ("Context", dash(&context), String::new()),
+        ("Refresh", if live { "live, every 2s".into() } else { "paused".to_string() }, String::new()),
+        ("Cluster", dash(&k.info.cluster), String::new()),
+        ("User", dash(&k.info.user), String::new()),
+        ("Qell Rev", env!("CARGO_PKG_VERSION").to_string(), String::new()),
+        ("K8s Rev", dash(&k.info.server), String::new()),
+        ("CPU", percent(k.info.cpu), cpu_line),
+        ("MEM", percent(k.info.mem), mem_line),
     ];
     // <0> every namespace, then the first few of the cluster's own.
     let current = k.listing.namespace.clone();
@@ -601,8 +679,12 @@ fn header(app: &mut QellApp, ui: &mut egui::Ui, font: &FontId, colors: &Colors) 
     // Columns are laid out from what they hold, so a long cluster name
     // pushes the rest along instead of being written over.
     let widest = |it: &mut dyn Iterator<Item = usize>| it.max().unwrap_or(0);
-    let label_w = widest(&mut facts.iter().map(|(l, _)| l.chars().count() + 1)) + 1;
-    let value_w = widest(&mut facts.iter().map(|(_, v)| elide(v, 34).chars().count())) + 3;
+    let label_w = widest(&mut facts.iter().map(|(l, _, _)| l.chars().count() + 1)) + 1;
+    let value_w = widest(&mut facts.iter().map(|(_, v, _)| elide(v, 34).chars().count())) + 3;
+    // The charts are wider than the longest value and are never cut, so
+    // the column leaves room for them.
+    let chart_at = 6;
+    let value_w = value_w.max(chart_at + SPARK_WIDTH + 3);
     let ns_key_w = 5;
     let ns_w = ns_key_w + widest(&mut namespaces.iter().map(|(_, n, _)| elide(n, 20).chars().count())) + 3;
     let key_w = widest(&mut keys_left.iter().map(|(k, _)| k.chars().count())) + 1;
@@ -615,9 +697,12 @@ fn header(app: &mut QellApp, ui: &mut egui::Ui, font: &FontId, colors: &Colors) 
     let columns = ((rect.width() - 16.0) / char_w) as usize;
     let mut x = 0;
     let mut keys_shown = false;
-    for (row, (name, value)) in facts.iter().enumerate() {
+    for (row, (name, value, chart)) in facts.iter().enumerate() {
         put(at(x, row), &format!("{name}:"), colors.label);
         put(at(x + label_w, row), &elide(value, 34), colors.value);
+        if !chart.is_empty() {
+            put(at(x + label_w + chart_at, row), chart, colors.chart);
+        }
     }
     x += label_w + value_w;
     if columns >= x + ns_w {
@@ -661,6 +746,28 @@ fn header(app: &mut QellApp, ui: &mut egui::Ui, font: &FontId, colors: &Colors) 
     keys_shown
 }
 
+/// The CPU and memory history as block characters, oldest on the left.
+/// Two lines, so the header reads like a tiny chart recorder.
+fn sparklines(history: &std::collections::VecDeque<(u8, u8)>) -> (String, String) {
+    let line = |values: Vec<u8>| -> String {
+        // Scaled against the whole, not against the window's own range:
+        // a flat 20% should look flat and low, not flat and high.
+        values.iter().map(|v| BLOCKS[(*v as usize * (BLOCKS.len() - 1)).div_ceil(100)]).collect()
+    };
+    if history.len() < 2 {
+        return (String::new(), String::new());
+    }
+    let recent: Vec<&(u8, u8)> = history.iter().rev().take(SPARK_WIDTH).rev().collect();
+    (line(recent.iter().map(|(c, _)| *c).collect()), line(recent.iter().map(|(_, m)| *m).collect()))
+}
+
+/// How many samples the header's charts show: at a reading every two
+/// seconds, the last minute or so.
+const SPARK_WIDTH: usize = 30;
+
+/// Eight heights, from nothing to full.
+const BLOCKS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
 /// Cut a value that would run into the next column, with an ellipsis.
 fn elide(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
@@ -681,6 +788,8 @@ const LOGO: [&str; 5] = [
 /// The header's palette, so the colours are named where they are chosen.
 struct Colors {
     label: Color32,
+    /// The CPU and memory sparklines.
+    chart: Color32,
     value: Color32,
     key: Color32,
     key_ns: Color32,
@@ -1521,6 +1630,16 @@ mod tests {
         let service = json!({ "spec": { "ports": [{ "port": 443 }] } });
         assert_eq!(first_port(&service), Some(443));
         assert_eq!(first_port(&json!({ "spec": {} })), None);
+    }
+
+    #[test]
+    fn the_sparkline_grows_with_the_numbers() {
+        let history: std::collections::VecDeque<(u8, u8)> = [(0, 100), (50, 50), (100, 0)].into_iter().collect();
+        let (cpu, mem) = sparklines(&history);
+        assert_eq!(cpu, " ▄█");
+        assert_eq!(mem, "█▄ ");
+        // Nothing to draw from a single sample.
+        assert_eq!(sparklines(&[(5, 5)].into_iter().collect()), (String::new(), String::new()));
     }
 
     #[test]
