@@ -62,6 +62,8 @@ pub enum Typing {
     No,
     Filter,
     Command,
+    /// The ports of a port-forward (`local:remote`).
+    Forward,
 }
 
 pub struct K8sState {
@@ -557,12 +559,20 @@ fn header(app: &mut QellApp, ui: &mut egui::Ui, font: &FontId, colors: &Colors) 
         ("<d>", "Describe"),
         ("<y>", "YAML"),
         ("<e>", "Edit"),
+        ("<s>", "Shell"),
+        ("<l>", "Logs"),
+        ("<shift-l>", "Logs previous"),
+        ("<f>", "Port-forward"),
+    ];
+    let keys_right = [
         ("<:>", "Resource"),
         ("</>", "Filter"),
         ("<tab>", "Complete"),
-        ("", ""),
+        ("<0-9>", "Namespace"),
+        ("<n>", "Namespaces"),
+        ("<c>", "Contexts"),
+        ("<:q>", "Close"),
     ];
-    let keys_right = [("<0-9>", "Namespace"), ("<n>", "Namespaces"), ("<c>", "Contexts"), ("<:q>", "Close"), ("", ""), ("", "")];
 
     let char_w = ui.fonts_mut(|f| f.glyph_width(font, 'M'));
     let line_h = ui.fonts_mut(|f| f.row_height(font));
@@ -781,8 +791,11 @@ fn bottom_line(
     // While typing, the first match is shown greyed out after what you
     // typed: Tab takes it, Tab again steps to the next.
     if app.k8s.typing != Typing::No {
-        let sign = if app.k8s.typing == Typing::Filter { '/' } else { ':' };
-        let typed = format!("{sign}{}", app.k8s.line);
+        let typed = match app.k8s.typing {
+            Typing::Filter => format!("/{}", app.k8s.line),
+            Typing::Forward => format!("port-forward  {}   (local:remote, enter to start)", app.k8s.line),
+            _ => format!(":{}", app.k8s.line),
+        };
         let mut job = LayoutJob::default();
         job.append(&typed, 0.0, TextFormat { font_id: font.clone(), color: accent, ..Default::default() });
         let suggestion = app.k8s.matches.get(app.k8s.match_at).cloned().unwrap_or_default();
@@ -830,6 +843,9 @@ fn help_overlay(ctx: &egui::Context, font: &FontId, text: Color32, dim: Color32)
         ("Esc", "back, or clear the filter"),
         ("d / y", "describe it / its YAML, here; Esc comes back"),
         ("e", "edit the manifest in a tab; saving applies it"),
+        ("s", "a shell in the pod, in a terminal tab"),
+        ("l / L", "follow its logs / the previous container's"),
+        ("f", "forward a port; it runs as long as its terminal tab"),
         ("/", "filter the rows"),
         (":", "a resource (:po, :svc, :ns, :ctx) or :q to close"),
         ("Tab", "take the suggestion, again for the next"),
@@ -965,6 +981,9 @@ fn keys(app: &mut QellApp, ctx: &egui::Context) {
                     app.k8s.set(l, ctx);
                 }
             }
+            (Key::S, false) => shell_into(app, ctx),
+            (Key::L, false) => logs(app, modifiers.shift),
+            (Key::F, false) => ask_ports(app),
             (Key::D, false) => fetch_object(app, Shown::Describe, ctx),
             (Key::Y, false) => fetch_object(app, Shown::Yaml, ctx),
             (Key::E, false) => fetch_object(app, Shown::Edit, ctx),
@@ -1058,6 +1077,7 @@ fn typing_keys(app: &mut QellApp, ctx: &egui::Context) {
                         app.k8s.selected = 0;
                     }
                     Typing::Command => run_command(app, &suggestion.unwrap_or(line), ctx),
+                    Typing::Forward => port_forward(app, &line),
                     Typing::No => {}
                 }
             }
@@ -1076,7 +1096,8 @@ fn typing_keys(app: &mut QellApp, ctx: &egui::Context) {
 fn suggest(app: &mut QellApp) {
     let typed = app.k8s.line.trim().to_string();
     app.k8s.match_at = 0;
-    app.k8s.matches = if typed.is_empty() {
+    // Ports are typed out; there is nothing to suggest for them.
+    app.k8s.matches = if typed.is_empty() || app.k8s.typing == Typing::Forward {
         Vec::new()
     } else if app.k8s.typing == Typing::Command {
         let mut matches = qell_k8s::complete(&typed, &app.k8s.info.kinds);
@@ -1144,6 +1165,171 @@ fn show_contexts(app: &mut QellApp, ctx: &egui::Context) {
     app.k8s.selected = 0;
     app.k8s.filter.clear();
     app.k8s.error = None;
+}
+
+/// A shell inside the selected pod, in a terminal tab.
+fn shell_into(app: &mut QellApp, ctx: &egui::Context) {
+    let Some(target) = target(app) else {
+        app.notify("Put the cursor on a pod to open a shell in it.");
+        return;
+    };
+    if target.object.kind != "pods" {
+        app.notify(format!("A shell goes into a pod, not a {}.", qell_k8s::singular(&target.object.kind)));
+        return;
+    }
+    let container = match (&target.container, target.containers.len()) {
+        (Some(c), _) => Some(c.clone()),
+        (None, 0 | 1) => target.containers.first().cloned(),
+        // Which one is a real question, so the containers come up and
+        // `s` on one of them opens the shell.
+        (None, n) => {
+            app.notify(format!("{n} containers in this pod: pick one and press s again."));
+            let mut listing = Listing::new("pods", target.object.namespace.clone());
+            listing.containers_of = Some(target.object.name.clone());
+            app.k8s.go(listing, ctx);
+            return;
+        }
+    };
+    let args = exec_args(&target.object, container.as_deref());
+    let name = match &container {
+        Some(c) => format!("shell {}/{c}", target.object.name),
+        None => format!("shell {}", target.object.name),
+    };
+    run(app, name, args);
+}
+
+/// `kubectl logs -f` in a terminal tab, below the list.
+fn logs(app: &mut QellApp, previous: bool) {
+    let Some(target) = target(app) else {
+        app.notify("Put the cursor on a pod to read its logs.");
+        return;
+    };
+    if target.object.kind != "pods" {
+        app.notify(format!("Logs come from a pod, not a {}.", qell_k8s::singular(&target.object.kind)));
+        return;
+    }
+    let args = log_args(&target.object, target.container.as_deref(), target.containers.len(), previous);
+    let what = if previous { "previous logs" } else { "logs" };
+    run(app, format!("{what} {}", target.object.name), args);
+}
+
+/// Ask which ports to forward, filled in from the object itself.
+fn ask_ports(app: &mut QellApp) {
+    let Some(target) = target(app) else {
+        app.notify("Nothing here to forward a port to.");
+        return;
+    };
+    let port = first_port(&target.row).unwrap_or(8080);
+    app.k8s.typing = Typing::Forward;
+    app.k8s.line = format!("{port}:{port}");
+    app.k8s.matches.clear();
+}
+
+/// `kubectl port-forward` in a terminal tab: it runs as long as the tab.
+fn port_forward(app: &mut QellApp, ports: &str) {
+    let ports = ports.trim().to_string();
+    if ports.is_empty() {
+        return;
+    }
+    let Some(target) = target(app) else { return };
+    let what = format!("{}/{}", qell_k8s::singular(&target.object.kind), target.object.name);
+    let mut args = vec!["port-forward".to_string()];
+    args.extend(namespace_args(&target.object));
+    args.extend([what.clone(), ports.clone()]);
+    run(app, format!("forward {ports} to {what}"), args);
+}
+
+/// `kubectl exec` into one container, asking for bash where the image
+/// has it and sh everywhere else.
+fn exec_args(object: &qell_k8s::Object, container: Option<&str>) -> Vec<String> {
+    let mut args = vec!["exec".to_string(), "-it".to_string()];
+    args.extend(namespace_args(object));
+    args.push(object.name.clone());
+    if let Some(c) = container {
+        args.extend(["-c".to_string(), c.to_string()]);
+    }
+    args.extend([
+        "--".to_string(),
+        "sh".to_string(),
+        "-c".to_string(),
+        "command -v bash >/dev/null 2>&1 && exec bash || exec sh".to_string(),
+    ]);
+    args
+}
+
+/// `kubectl logs -f`. With several containers and none chosen, all of
+/// them, each line saying which, as `--prefix` does.
+fn log_args(object: &qell_k8s::Object, container: Option<&str>, containers: usize, previous: bool) -> Vec<String> {
+    let mut args = vec!["logs".to_string(), "-f".to_string(), "--tail=200".to_string()];
+    args.extend(namespace_args(object));
+    args.push(object.name.clone());
+    match (container, containers) {
+        (Some(c), _) => args.extend(["-c".to_string(), c.to_string()]),
+        (None, n) if n > 1 => args.extend(["--all-containers=true".to_string(), "--prefix".to_string()]),
+        _ => {}
+    }
+    if previous {
+        args.push("--previous".to_string());
+    }
+    args
+}
+
+/// `-n <namespace>`, for the kinds that live in one.
+fn namespace_args(object: &qell_k8s::Object) -> Vec<String> {
+    match &object.namespace {
+        Some(ns) => vec!["-n".to_string(), ns.clone()],
+        None => Vec::new(),
+    }
+}
+
+/// The first port an object serves, for the port-forward prompt.
+fn first_port(row: &serde_json::Value) -> Option<u64> {
+    let containers = row["spec"]["containers"].as_array();
+    if let Some(port) = containers
+        .and_then(|cs| cs.iter().find_map(|c| c["ports"].as_array().and_then(|p| p.first().cloned())))
+        .and_then(|p| p["containerPort"].as_u64())
+    {
+        return Some(port);
+    }
+    row["spec"]["ports"].as_array()?.first()?["port"].as_u64()
+}
+
+/// Start a kubectl command in a terminal tab of its own.
+fn run(app: &mut QellApp, name: String, args: Vec<String>) {
+    let bin = app.k8s.client.bin.clone();
+    let mut all: Vec<String> = Vec::new();
+    // The tab is tied to the context the list is showing, not to
+    // whatever the kubeconfig's current context becomes later.
+    if let Some(context) = app.k8s.client.context.clone().or_else(|| app.k8s.context.clone()) {
+        all.extend(["--context".to_string(), context]);
+    }
+    all.extend(args);
+    app.run_in_terminal(name, &bin, all);
+}
+
+/// The pod and container the keys act on, with the row they came from.
+struct Target {
+    object: qell_k8s::Object,
+    /// The container chosen, when the cursor is in a pod's containers.
+    container: Option<String>,
+    containers: Vec<String>,
+    row: serde_json::Value,
+}
+
+fn target(app: &QellApp) -> Option<Target> {
+    let k = &app.k8s;
+    let object = selected_object(app)?;
+    let row = k.visible().get(k.selected).and_then(|i| k.table.rows.get(*i))?;
+    // Inside a pod's containers: that container, and all of its siblings.
+    if k.listing.containers_of.is_some() {
+        let containers = k.table.rows.iter().map(|r| r.name.clone()).collect();
+        return Some(Target { object, container: Some(row.name.clone()), containers, row: row.object.clone() });
+    }
+    let containers = row.object["spec"]["containers"]
+        .as_array()
+        .map(|cs| cs.iter().filter_map(|c| c["name"].as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    Some(Target { object, container: None, containers, row: row.object.clone() })
 }
 
 /// The object the cursor is on, as kubectl names it.
@@ -1280,6 +1466,47 @@ fn trim_s(kind: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn pod() -> qell_k8s::Object {
+        qell_k8s::Object { kind: "pods".into(), name: "api-0".into(), namespace: Some("web".into()) }
+    }
+
+    #[test]
+    fn a_shell_goes_into_the_container_that_was_chosen() {
+        let args = exec_args(&pod(), Some("app"));
+        assert_eq!(args[..6], ["exec", "-it", "-n", "web", "api-0", "-c"]);
+        assert_eq!(args[6], "app");
+        // The last argument tries bash and settles for sh.
+        assert!(args.last().unwrap().contains("exec bash"));
+        // Without a container, kubectl picks the pod's only one: no
+        // `-c` before the `--` (the one after it belongs to `sh -c`).
+        let args = exec_args(&pod(), None);
+        let before = &args[..args.iter().position(|a| a == "--").expect("a -- separator")];
+        assert!(!before.contains(&"-c".to_string()));
+    }
+
+    #[test]
+    fn logs_follow_every_container_until_one_is_chosen() {
+        let all = log_args(&pod(), None, 2, false);
+        assert!(all.contains(&"--all-containers=true".to_string()));
+        assert!(all.contains(&"--prefix".to_string()));
+        assert!(!all.contains(&"--previous".to_string()));
+        let one = log_args(&pod(), Some("app"), 2, true);
+        assert!(!one.contains(&"--all-containers=true".to_string()));
+        assert_eq!(one[one.len() - 3..], ["-c", "app", "--previous"]);
+        // One container, none chosen: nothing to say either way.
+        let single = log_args(&pod(), None, 1, false);
+        assert_eq!(single, ["logs", "-f", "--tail=200", "-n", "web", "api-0"]);
+    }
+
+    #[test]
+    fn the_port_prompt_is_filled_in_from_the_object() {
+        let pod = json!({ "spec": { "containers": [{ "ports": [{ "containerPort": 8080 }] }] } });
+        assert_eq!(first_port(&pod), Some(8080));
+        let service = json!({ "spec": { "ports": [{ "port": 443 }] } });
+        assert_eq!(first_port(&service), Some(443));
+        assert_eq!(first_port(&json!({ "spec": {} })), None);
+    }
 
     #[test]
     fn the_list_only_scrolls_when_the_cursor_would_be_off_screen() {
