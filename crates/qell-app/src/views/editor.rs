@@ -731,6 +731,9 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
     let mut clicked_editor = false;
     let mut go_to_definition = false;
     let mut menu_choice: Option<EditorMenu> = None;
+    // A click on a change mark in the gutter: its line and where to put
+    // the little Revert / Stage menu.
+    let mut gutter_hunk: Option<(usize, Pos2)> = None;
     let mut cursor_screen: Option<Pos2> = None;
 
     // Clicks and drags on the minimap scroll the editor this frame.
@@ -767,7 +770,21 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
             let x = ((p.x - (origin.x + text_x0)) / char_width + 0.5).floor().max(0.0) as usize;
             wl.position_at(row.min(row_total.saturating_sub(1)), x, |l| b.line_len(l))
         };
-        if resp.clicked() || resp.drag_started() {
+        // A click on the gutter's change mark opens its menu instead of
+        // moving the cursor.
+        let on_mark = resp.clicked()
+            && resp.interact_pointer_pos().is_some_and(|p| p.x >= origin.x + gutter_w - 9.0 && p.x < origin.x + gutter_w);
+        if on_mark {
+            if let Some(p) = resp.interact_pointer_pos() {
+                let line = pos_at(&doc.buffer, p).line;
+                let changed = doc.changes.get(line).is_some_and(|c| c.added || c.modified || c.deleted_above || c.deleted_below);
+                if changed {
+                    gutter_hunk = Some((line, p));
+                    clicked_editor = true;
+                }
+            }
+        }
+        if !on_mark && (resp.clicked() || resp.drag_started()) {
             clicked_editor = true;
             if let Some(p) = resp.interact_pointer_pos() {
                 let (shift, alt) = ui.input(|i| (i.modifiers.shift, i.modifiers.alt));
@@ -1147,6 +1164,44 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
     }
     if let Some(p) = cursor_screen {
         app.completion.anchor = p;
+    }
+    if let Some((line, at)) = gutter_hunk {
+        app.hunk_menu = Some((line, at));
+    }
+    hunk_menu(app, ui.ctx(), gutter_hunk.is_some());
+}
+
+/// The Revert / Stage menu a change mark in the gutter opens.
+fn hunk_menu(app: &mut QellApp, ctx: &egui::Context, just_opened: bool) {
+    let Some((line, at)) = app.hunk_menu else { return };
+    let (mut revert, mut stage, mut close) = (false, false, false);
+    let area = egui::Area::new(egui::Id::new("qell-hunk-menu"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(at + Vec2::new(6.0, 6.0))
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(4)).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    revert = ui.button("Revert").on_hover_text("Put these lines back to git's version").clicked();
+                    stage = ui.button("Stage").on_hover_text("Put this change into the index").clicked();
+                });
+            });
+        });
+    if ctx.input(|i| i.key_pressed(Key::Escape)) {
+        close = true;
+    }
+    // A click anywhere else closes it — but not the click that opened it.
+    let outside = !area.response.rect.contains(ctx.pointer_interact_pos().unwrap_or(Pos2::ZERO));
+    if !just_opened && outside && ctx.input(|i| i.pointer.any_click()) {
+        close = true;
+    }
+    if revert {
+        app.revert_hunk(line);
+    }
+    if stage {
+        app.stage_hunk(line);
+    }
+    if revert || stage || close {
+        app.hunk_menu = None;
     }
 }
 

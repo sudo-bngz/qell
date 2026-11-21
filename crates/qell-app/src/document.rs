@@ -91,6 +91,49 @@ pub struct LineChange {
     pub deleted_below: bool,
 }
 
+/// A run of lines that differ from git's version: which lines it replaces
+/// there (`base`) and which lines it is here (`new`). Either can be empty,
+/// for lines only added or only deleted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hunk {
+    pub base: std::ops::Range<usize>,
+    pub new: std::ops::Range<usize>,
+}
+
+impl Hunk {
+    /// Whether `line` is in the hunk; a deletion (no lines of its own) is
+    /// reached from the line it sits above, or the last line of the file.
+    pub fn covers(&self, line: usize) -> bool {
+        if self.new.is_empty() {
+            self.new.start == line || (self.new.start > 0 && self.new.start - 1 == line)
+        } else {
+            self.new.contains(&line)
+        }
+    }
+}
+
+/// The runs of lines of `text` that differ from `base`, in order.
+pub fn hunks(base: &str, text: &str) -> Vec<Hunk> {
+    use similar::DiffOp;
+    let diff = similar::TextDiff::configure().timeout(std::time::Duration::from_millis(200)).diff_lines(base, text);
+    let mut out: Vec<Hunk> = Vec::new();
+    for op in diff.ops() {
+        if matches!(op, DiffOp::Equal { .. }) {
+            continue;
+        }
+        let (old, new) = (op.old_range(), op.new_range());
+        // Changes that touch join into one hunk, as git's own diff does.
+        match out.last_mut() {
+            Some(h) if h.base.end == old.start && h.new.end == new.start => {
+                h.base.end = old.end;
+                h.new.end = new.end;
+            }
+            _ => out.push(Hunk { base: old, new }),
+        }
+    }
+    out
+}
+
 /// Marks for each line of `text` compared with `base`.
 pub fn line_changes(base: &str, text: &str) -> Vec<LineChange> {
     use similar::DiffOp;
@@ -431,5 +474,36 @@ mod disk_tests {
         doc.buffer.save().unwrap();
         doc.note_disk();
         assert_eq!(doc.disk_change(), None);
+    }
+}
+
+#[cfg(test)]
+mod hunk_tests {
+    use super::*;
+
+    #[test]
+    fn one_hunk_per_run_of_changed_lines() {
+        let base = "a\nb\nc\nd\ne\n";
+        let text = "a\nB\nc\nd\ne\nf\n";
+        let hs = hunks(base, text);
+        assert_eq!(hs, vec![Hunk { base: 1..2, new: 1..2 }, Hunk { base: 5..5, new: 5..6 }]);
+        assert!(hs[0].covers(1));
+        assert!(!hs[0].covers(2));
+    }
+
+    #[test]
+    fn deleted_lines_are_a_hunk_with_no_lines_here() {
+        let hs = hunks("a\nb\nc\n", "a\nc\n");
+        assert_eq!(hs, vec![Hunk { base: 1..2, new: 1..1 }]);
+        // Reached from either side of where they were.
+        assert!(hs[0].covers(0));
+        assert!(hs[0].covers(1));
+    }
+
+    #[test]
+    fn touching_changes_join() {
+        // A line replaced and another added right after it.
+        let hs = hunks("a\nb\n", "a\nB\nC\n");
+        assert_eq!(hs, vec![Hunk { base: 1..2, new: 1..3 }]);
     }
 }

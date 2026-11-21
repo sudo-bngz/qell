@@ -58,6 +58,9 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                 item(ui, app, Command::ShowExplorer);
                 item(ui, app, Command::ShowSearch);
                 item(ui, app, Command::ShowSourceControl);
+                ui.separator();
+                item(ui, app, Command::StageHunk);
+                item(ui, app, Command::RevertHunk);
                 item(ui, app, Command::ToggleSidebar);
                 item(ui, app, Command::ToggleWordWrap);
                 item(ui, app, Command::ToggleMinimap);
