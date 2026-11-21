@@ -121,6 +121,17 @@ impl Buffer {
         self.version
     }
 
+    /// Treat the text as matching the file on disk (after a reload).
+    pub fn set_clean(&mut self) {
+        self.dirty = false;
+    }
+
+    /// The very end of the text.
+    pub fn end(&self) -> Position {
+        let last = self.line_count().saturating_sub(1);
+        Position::new(last, self.line_len(last))
+    }
+
     pub fn is_dirty(&self) -> bool {
         self.dirty
     }

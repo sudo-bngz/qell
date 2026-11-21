@@ -1,7 +1,7 @@
 //! An open tab: a buffer plus the UI-side caches that go with it
 //! (highlight spans, diagnostics, scroll position).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use qell_core::structure::{detect_indent_unit, Brackets};
 use qell_core::wrap::WrapLayout;
@@ -35,6 +35,11 @@ pub struct Document {
     /// Per line: how it differs from `git_base`.
     pub changes: Vec<LineChange>,
     changes_key: Option<i32>,
+    /// Size and time of the file when it was last read or written.
+    pub disk: Option<DiskState>,
+    /// It changed (or went) on disk since, and you have unsaved edits:
+    /// waiting for you to pick a side.
+    pub conflict: Option<DiskChange>,
     /// Rows on screen (word wrap), for the width last drawn at.
     pub wrap: WrapLayout,
     /// (buffer version, wrap width) `wrap` was computed for.
@@ -44,6 +49,27 @@ pub struct Document {
     pub goal_col: Option<usize>,
     /// The miniature beside the editor.
     pub minimap: crate::views::minimap::Minimap,
+}
+
+/// What happened to a file while it was open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiskChange {
+    Modified,
+    Deleted,
+}
+
+/// What the file looked like on disk, to notice changes without reading it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiskState {
+    len: u64,
+    mtime: Option<std::time::SystemTime>,
+}
+
+impl DiskState {
+    pub fn of(path: &Path) -> Option<Self> {
+        let m = std::fs::metadata(path).ok()?;
+        Some(Self { len: m.len(), mtime: m.modified().ok() })
+    }
 }
 
 /// Whether git's version of a file has been asked for.
@@ -127,6 +153,8 @@ impl Document {
             git_base_state: BaseState::Unknown,
             changes: Vec::new(),
             changes_key: None,
+            disk: None,
+            conflict: None,
             wrap: WrapLayout::plain(1),
             wrap_key: None,
             goal_col: None,
@@ -153,7 +181,58 @@ impl Document {
     }
 
     pub fn open(path: PathBuf) -> std::io::Result<Self> {
-        Ok(Self::new(Buffer::open(path)?))
+        let mut doc = Self::new(Buffer::open(&path)?);
+        doc.disk = DiskState::of(&path);
+        Ok(doc)
+    }
+
+    /// Note the file as it is now: just written, or its changes accepted.
+    pub fn note_disk(&mut self) {
+        self.disk = self.buffer.path().and_then(DiskState::of);
+        self.conflict = None;
+    }
+
+    /// How the file differs from what was last read or written. `None`
+    /// for an untitled buffer, a diff view, or a file nobody touched.
+    pub fn disk_change(&self) -> Option<DiskChange> {
+        let path = self.buffer.path().filter(|_| !self.read_only)?;
+        let known = self.disk.as_ref()?;
+        match DiskState::of(path) {
+            Some(now) if now == *known => None,
+            Some(_) => Some(DiskChange::Modified),
+            // A rename or a checkout can make it blink out of existence;
+            // only call it deleted once it stays gone.
+            None if path.exists() => None,
+            None => Some(DiskChange::Deleted),
+        }
+    }
+
+    /// Take the file's text as it is on disk, keeping the cursor where it
+    /// was. The swap is a normal edit, so undo brings your version back.
+    pub fn reload(&mut self) -> std::io::Result<()> {
+        let path = self
+            .buffer
+            .path()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "buffer has no path"))?;
+        let text = std::fs::read_to_string(&path)?;
+        let head = self.buffer.cursor.head();
+        let end = self.buffer.end();
+        // Its own undo step, so one undo gives your version back whole.
+        self.buffer.begin_undo_group();
+        self.buffer.replace_range(qell_core::Position::new(0, 0), end, &text);
+        self.buffer.end_undo_group();
+        let p = self.buffer.clamp(head);
+        self.buffer.set_cursor(p, false);
+        self.buffer.set_clean();
+        self.scroll_to_cursor = true;
+        // Everything derived from the old text is out of date.
+        self.spans_version = None;
+        self.structure_key = None;
+        self.changes_key = None;
+        self.git_base_state = BaseState::Unknown;
+        self.note_disk();
+        Ok(())
     }
 
     pub fn title(&self) -> String {
@@ -285,5 +364,72 @@ mod change_tests {
         assert_eq!(kinds(base, "a\nb\nc\n"), "...v");
         assert_eq!(kinds(base, "b\nc\nd\n"), "^...");
         assert_eq!(kinds("", "x\ny\n"), "AA");
+    }
+}
+
+#[cfg(test)]
+mod disk_tests {
+    use super::*;
+
+    fn write(path: &Path, text: &str) {
+        // Enough of a pause that the file's timestamp really moves.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn notices_changes_made_outside_qell() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("main.tf");
+        std::fs::write(&path, "one\ntwo\n").unwrap();
+        let mut doc = Document::open(path.clone()).unwrap();
+        assert_eq!(doc.disk_change(), None);
+
+        // Changed on disk, same length: caught by the timestamp.
+        write(&path, "one\nTWO\n");
+        assert_eq!(doc.disk_change(), Some(DiskChange::Modified));
+        doc.reload().unwrap();
+        assert_eq!(doc.buffer.text(), "one\nTWO\n");
+        assert_eq!(doc.disk_change(), None);
+        assert!(!doc.buffer.is_dirty());
+
+        // Gone.
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(doc.disk_change(), Some(DiskChange::Deleted));
+    }
+
+    #[test]
+    fn reload_keeps_the_cursor_and_can_be_undone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.rs");
+        std::fs::write(&path, "fn a() {}\nfn b() {}\nfn c() {}\n").unwrap();
+        let mut doc = Document::open(path.clone()).unwrap();
+        doc.buffer.set_cursor(qell_core::Position::new(2, 5), false);
+        doc.buffer.insert("X");
+        assert!(doc.buffer.is_dirty());
+
+        write(&path, "fn a() {}\n");
+        assert_eq!(doc.disk_change(), Some(DiskChange::Modified));
+        doc.reload().unwrap();
+        assert_eq!(doc.buffer.text(), "fn a() {}\n");
+        // The cursor was past the new end: pulled back inside it.
+        let head = doc.buffer.cursor.head();
+        assert!(head.line < doc.buffer.line_count() && head.col <= doc.buffer.line_len(head.line));
+        // The edited version is one undo away.
+        assert!(doc.buffer.undo());
+        assert!(doc.buffer.text().contains("fn c(X) {}"), "{}", doc.buffer.text());
+    }
+
+    #[test]
+    fn a_saved_file_is_not_a_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "x").unwrap();
+        let mut doc = Document::open(path.clone()).unwrap();
+        doc.buffer.insert("y");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        doc.buffer.save().unwrap();
+        doc.note_disk();
+        assert_eq!(doc.disk_change(), None);
     }
 }

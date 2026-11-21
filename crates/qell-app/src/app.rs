@@ -15,7 +15,7 @@ use qell_term::Terminal;
 
 use crate::commands::Command;
 use crate::config::{self, Config};
-use crate::document::Document;
+use crate::document::{DiskChange, Document};
 use crate::theme::Palette;
 use crate::views;
 
@@ -220,6 +220,9 @@ pub struct QellApp {
     /// Vim mode state, and what its commands asked the app to do.
     pub vim: crate::vim::Vim,
     pub pending_vim: Vec<crate::vim::Action>,
+    /// Which pane had the keyboard last frame, to notice coming back to
+    /// the editor from the terminal.
+    last_focus: Focus,
     /// Rename / new file / new folder being typed in the file tree.
     pub tree_edit: Option<TreeEdit>,
     /// "Move to Trash?" asked for this path.
@@ -299,6 +302,7 @@ impl QellApp {
             reveal: None,
             vim: crate::vim::Vim::new(),
             pending_vim: Vec::new(),
+            last_focus: Focus::Editor,
             tree_edit: None,
             confirm_delete: None,
             nav_back: Vec::new(),
@@ -494,10 +498,22 @@ impl QellApp {
                 self.notify_error(format!("Save failed: {e}"));
                 return;
             }
-        } else if let Err(e) = doc.buffer.save() {
-            self.notify_error(format!("Save failed: {e}"));
-            return;
+        } else {
+            // Never write over a change made outside Qell without asking.
+            if let Some(change) = doc.disk_change() {
+                if change == DiskChange::Modified {
+                    doc.conflict = Some(change);
+                    let name = doc.buffer.file_name();
+                    self.notify_error(format!("{name} changed on disk: reload it or keep yours first"));
+                    return;
+                }
+            }
+            if let Err(e) = doc.buffer.save() {
+                self.notify_error(format!("Save failed: {e}"));
+                return;
+            }
         }
+        doc.note_disk();
         self.lsp.did_save(&doc.buffer);
         self.git.refresh();
         self.indexer.refresh();
@@ -879,6 +895,54 @@ impl QellApp {
         }
     }
 
+    // ---- files changed outside Qell -----------------------------------------
+
+    /// Notice files that changed on disk since Qell read them. Untouched
+    /// ones are quietly brought up to date; where you have unsaved edits,
+    /// the editor asks which version to keep.
+    fn check_disk(&mut self) {
+        let mut reloaded: Vec<String> = Vec::new();
+        for doc in &mut self.docs {
+            if doc.conflict.is_some() {
+                continue;
+            }
+            let Some(change) = doc.disk_change() else { continue };
+            if doc.buffer.is_dirty() || change == DiskChange::Deleted {
+                doc.conflict = Some(change);
+                continue;
+            }
+            let name = doc.buffer.file_name();
+            match doc.reload() {
+                Ok(()) => reloaded.push(name),
+                // Unreadable right now (a half-written file): ask instead.
+                Err(_) => doc.conflict = Some(DiskChange::Modified),
+            }
+        }
+        match reloaded.len() {
+            0 => {}
+            1 => self.notify(format!("{} changed on disk: reloaded", reloaded[0])),
+            n => self.notify(format!("{n} files changed on disk: reloaded")),
+        }
+    }
+
+    /// Take the file as it is on disk, dropping the unsaved edits (undo
+    /// brings them back).
+    pub fn reload_active(&mut self) {
+        let Some(doc) = self.docs.get_mut(self.active) else { return };
+        let name = doc.buffer.file_name();
+        match doc.reload() {
+            Ok(()) => self.notify(format!("Reloaded {name}")),
+            Err(e) => self.notify_error(format!("Cannot read {name}: {e}")),
+        }
+    }
+
+    /// Keep the version in the editor; the next save overwrites the file.
+    pub fn keep_mine(&mut self) {
+        if let Some(doc) = self.docs.get_mut(self.active) {
+            doc.note_disk();
+        }
+    }
+
     // ---- file operations (file tree menu) -----------------------------------
 
     /// Something changed on disk: refresh the tree, file list, git and index.
@@ -1131,11 +1195,19 @@ impl QellApp {
         let focused = ctx.input(|i| i.focused);
         if focused && !self.was_focused {
             self.git.refresh();
+            self.check_disk();
         }
         self.was_focused = focused;
+        // Coming back to the editor after running something in the terminal.
+        if self.focus == Focus::Editor && self.last_focus != Focus::Editor {
+            self.check_disk();
+        }
+        self.last_focus = self.focus;
         if let Some(st) = self.git.poll() {
             // Files changed on disk (git noticed): bring the index up to date.
             self.indexer.refresh();
+            // A checkout or a rebase rewrites the files you have open.
+            self.check_disk();
             // Something changed on disk; new or removed files must show up
             // in the tree too.
             self.tree_cache.clear();
