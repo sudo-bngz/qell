@@ -230,6 +230,109 @@ impl Client {
     }
 }
 
+/// What the header shows about the cluster itself. Everything here is
+/// best effort: a cluster without metrics-server still gets a header.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Info {
+    pub cluster: String,
+    pub user: String,
+    /// The API server's version, e.g. `v1.31.3`.
+    pub server: String,
+    /// Percentages across the nodes, when metrics-server answers.
+    pub cpu: Option<u8>,
+    pub mem: Option<u8>,
+    /// For the `<0>`…`<9>` namespace keys.
+    pub namespaces: Vec<String>,
+    /// metrics-server isn't there, so don't keep asking it.
+    pub no_metrics: bool,
+}
+
+impl Client {
+    /// Read what the header shows. Each part is allowed to fail on its
+    /// own: a cluster you can list pods on but not nodes still gets a
+    /// context, a user and a version.
+    pub fn info(&self, with_metrics: bool) -> Info {
+        let mut info = Info::default();
+        if let Ok(text) = self.run(&["config", "view", "--minify", "-o", "json"]) {
+            let (cluster, user) = parse_config(&text);
+            info.cluster = cluster;
+            info.user = user;
+        }
+        // `version` exits non-zero when the cluster is out of reach, but
+        // still prints the client's half, so its output is read either way.
+        info.server = parse_version(&self.output(&["version", "-o", "json"]));
+        if let Ok(text) = self.run(&["get", "namespaces", "-o", "json"]) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                info.namespaces = json["items"]
+                    .as_array()
+                    .map(|items| items.iter().filter_map(|i| i["metadata"]["name"].as_str().map(str::to_string)).collect())
+                    .unwrap_or_default();
+                info.namespaces.sort();
+            }
+        }
+        if with_metrics {
+            match self.run(&["top", "nodes", "--no-headers"]) {
+                Ok(text) => {
+                    let (cpu, mem) = parse_top(&text);
+                    info.cpu = cpu;
+                    info.mem = mem;
+                    info.no_metrics = cpu.is_none();
+                }
+                // Without metrics-server this always fails; asking again
+                // every few seconds would be pure noise.
+                Err(_) => info.no_metrics = true,
+            }
+        }
+        info
+    }
+
+    /// Run and take stdout whatever the exit status, for commands that
+    /// half-answer (`kubectl version` without a cluster).
+    fn output(&self, args: &[&str]) -> String {
+        match self.run(args) {
+            Ok(text) => text,
+            Err(Error::Failed(_)) | Err(Error::TimedOut) => String::new(),
+            Err(Error::NotInstalled) => String::new(),
+        }
+    }
+}
+
+/// The cluster and user of the current context.
+pub fn parse_config(json: &str) -> (String, String) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else { return (String::new(), String::new()) };
+    let context = &v["contexts"][0]["context"];
+    let text = |key: &str| context[key].as_str().unwrap_or("").to_string();
+    (text("cluster"), text("user"))
+}
+
+/// The server's version from `kubectl version -o json`, or the client's
+/// when there is no server to ask.
+pub fn parse_version(json: &str) -> String {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else { return String::new() };
+    v["serverVersion"]["gitVersion"].as_str().unwrap_or("").to_string()
+}
+
+/// The CPU and memory percentages of `kubectl top nodes --no-headers`,
+/// averaged over the nodes.
+pub fn parse_top(text: &str) -> (Option<u8>, Option<u8>) {
+    let mut cpu: Vec<u32> = Vec::new();
+    let mut mem: Vec<u32> = Vec::new();
+    for line in text.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        // NAME  CPU(cores)  CPU%  MEMORY(bytes)  MEMORY%
+        if fields.len() < 5 {
+            continue;
+        }
+        let percent = |f: &str| f.strip_suffix('%').and_then(|n| n.parse::<u32>().ok());
+        if let (Some(c), Some(m)) = (percent(fields[2]), percent(fields[4])) {
+            cpu.push(c);
+            mem.push(m);
+        }
+    }
+    let average = |v: Vec<u32>| (!v.is_empty()).then(|| (v.iter().sum::<u32>() / v.len() as u32).min(100) as u8);
+    (average(cpu), average(mem))
+}
+
 fn parse(text: &str) -> Result<serde_json::Value, Error> {
     serde_json::from_str(text).map_err(|e| Error::Failed(format!("kubectl's answer wasn't JSON: {e}")))
 }
@@ -264,6 +367,29 @@ pub fn now() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_header_reads_the_current_context() {
+        let json = r#"{"contexts":[{"name":"prod","context":{"cluster":"prod-eks","user":"nico","namespace":"web"}}]}"#;
+        assert_eq!(parse_config(json), ("prod-eks".to_string(), "nico".to_string()));
+        assert_eq!(parse_config("not json"), (String::new(), String::new()));
+    }
+
+    #[test]
+    fn the_server_version_is_the_one_shown() {
+        let json = r#"{"clientVersion":{"gitVersion":"v1.31.3"},"serverVersion":{"gitVersion":"v1.30.6-eks-1234"}}"#;
+        assert_eq!(parse_version(json), "v1.30.6-eks-1234");
+        // No cluster to ask: nothing rather than the client's version.
+        assert_eq!(parse_version(r#"{"clientVersion":{"gitVersion":"v1.31.3"}}"#), "");
+    }
+
+    #[test]
+    fn metrics_average_over_the_nodes() {
+        let top = "ip-10-0-1-5   250m   10%   1234Mi   30%\nip-10-0-2-8   500m   20%   2468Mi   50%\n";
+        assert_eq!(parse_top(top), (Some(15), Some(40)));
+        // metrics-server missing: kubectl prints nothing useful.
+        assert_eq!(parse_top("error: Metrics API not available"), (None, None));
+    }
 
     #[test]
     fn short_names_resolve() {
