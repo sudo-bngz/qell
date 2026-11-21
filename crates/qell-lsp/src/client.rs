@@ -45,6 +45,22 @@ pub enum Event {
         id: RequestId,
         locations: Vec<Location>,
     },
+    /// Answer to a rename request, or an edit the server asks us to apply
+    /// (`workspace/applyEdit`), which may touch several files.
+    WorkspaceEdit {
+        id: RequestId,
+        edit: Box<lsp_types::WorkspaceEdit>,
+    },
+    /// Answer to a code-action request: what the server can do here.
+    CodeActions {
+        id: RequestId,
+        actions: Vec<CodeActionOrCommand>,
+    },
+    /// A code action with its edit filled in (`codeAction/resolve`).
+    CodeActionResolved {
+        id: RequestId,
+        action: Box<CodeAction>,
+    },
     /// Answer to a formatting request: the edits to apply.
     Edits {
         id: RequestId,
@@ -84,6 +100,9 @@ enum Pending {
     Locations,
     Formatting,
     Hover,
+    Rename,
+    CodeActions,
+    ResolveAction,
     Other,
 }
 
@@ -216,6 +235,11 @@ impl Client {
                 name: root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
             }]),
             capabilities: ClientCapabilities {
+                workspace: Some(WorkspaceClientCapabilities {
+                    apply_edit: Some(true),
+                    workspace_edit: Some(WorkspaceEditClientCapabilities { document_changes: Some(true), ..Default::default() }),
+                    ..Default::default()
+                }),
                 text_document: Some(TextDocumentClientCapabilities {
                     completion: Some(CompletionClientCapabilities {
                         completion_item: Some(CompletionItemCapability {
@@ -235,6 +259,30 @@ impl Client {
                         ..Default::default()
                     }),
                     definition: Some(GotoCapability { dynamic_registration: None, link_support: Some(true) }),
+                    rename: Some(RenameClientCapabilities { prepare_support: Some(false), ..Default::default() }),
+                    code_action: Some(CodeActionClientCapabilities {
+                        // Ask for whole code actions, not bare commands.
+                        code_action_literal_support: Some(CodeActionLiteralSupport {
+                            code_action_kind: CodeActionKindLiteralSupport {
+                                value_set: [
+                                    CodeActionKind::QUICKFIX,
+                                    CodeActionKind::REFACTOR,
+                                    CodeActionKind::REFACTOR_EXTRACT,
+                                    CodeActionKind::REFACTOR_INLINE,
+                                    CodeActionKind::REFACTOR_REWRITE,
+                                    CodeActionKind::SOURCE,
+                                ]
+                                .iter()
+                                .map(|k| k.as_str().to_string())
+                                .collect(),
+                            },
+                        }),
+                        // Servers may leave the edit out and fill it in on
+                        // `codeAction/resolve` when one is picked.
+                        resolve_support: Some(CodeActionCapabilityResolveSupport { properties: vec!["edit".into()] }),
+                        data_support: Some(true),
+                        ..Default::default()
+                    }),
                     references: Some(DynamicRegistrationClientCapabilities { dynamic_registration: None }),
                     hover: Some(HoverClientCapabilities {
                         content_format: Some(vec![MarkupKind::PlainText, MarkupKind::Markdown]),
@@ -407,6 +455,67 @@ impl Client {
         )
     }
 
+    /// Whether the server can rename a symbol across the workspace.
+    pub fn supports_rename(&self) -> bool {
+        let caps = self.capabilities.lock().unwrap();
+        caps.as_ref().and_then(|c| c.rename_provider.as_ref()).is_some_and(|p| !matches!(p, OneOf::Left(false)))
+    }
+
+    /// Whether the server offers quick fixes and refactorings.
+    pub fn supports_code_actions(&self) -> bool {
+        let caps = self.capabilities.lock().unwrap();
+        caps.as_ref()
+            .and_then(|c| c.code_action_provider.as_ref())
+            .is_some_and(|p| !matches!(p, CodeActionProviderCapability::Simple(false)))
+    }
+
+    /// Rename the symbol at `position` everywhere it is used.
+    pub fn rename(&self, uri: Uri, position: Position, new_name: String) -> RequestId {
+        self.request(
+            "textDocument/rename",
+            RenameParams {
+                text_document_position: TextDocumentPositionParams { text_document: TextDocumentIdentifier { uri }, position },
+                new_name,
+                work_done_progress_params: Default::default(),
+            },
+            Pending::Rename,
+        )
+    }
+
+    /// What the server can do over `range`, given the diagnostics there.
+    pub fn code_actions(&self, uri: Uri, range: Range, diagnostics: Vec<Diagnostic>) -> RequestId {
+        self.request(
+            "textDocument/codeAction",
+            CodeActionParams {
+                text_document: TextDocumentIdentifier { uri },
+                range,
+                context: CodeActionContext { diagnostics, only: None, trigger_kind: Some(CodeActionTriggerKind::INVOKED) },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            },
+            Pending::CodeActions,
+        )
+    }
+
+    /// Fill in the edit of an action the server sent without one.
+    pub fn resolve_code_action(&self, action: &CodeAction) -> RequestId {
+        self.request("codeAction/resolve", action, Pending::ResolveAction)
+    }
+
+    /// Run a command an action asked for; its edits come back as
+    /// `workspace/applyEdit`.
+    pub fn execute_command(&self, command: &lsp_types::Command) -> RequestId {
+        self.request(
+            "workspace/executeCommand",
+            ExecuteCommandParams {
+                command: command.command.clone(),
+                arguments: command.arguments.clone().unwrap_or_default(),
+                work_done_progress_params: Default::default(),
+            },
+            Pending::Other,
+        )
+    }
+
     pub fn resolve_completion(&self, item: &CompletionItem) -> RequestId {
         self.request("completionItem/resolve", item, Pending::Resolve)
     }
@@ -483,6 +592,15 @@ fn dispatch(
 ) {
     // Server → client request (we answer the few we must, with null).
     if let (Some(id), Some(method)) = (msg.get("id"), msg.get("method").and_then(Value::as_str)) {
+        if method == "workspace/applyEdit" {
+            // The server asks us to change files (after a command, say).
+            // Say yes, then hand the edit to the editor.
+            let _ = outgoing.send(json!({ "jsonrpc": "2.0", "id": id, "result": { "applied": true } }));
+            if let Some(p) = parse::<ApplyWorkspaceEditParams>(msg["params"].clone()) {
+                let _ = events.send(Event::WorkspaceEdit { id: 0, edit: Box::new(p.edit) });
+            }
+            return;
+        }
         let result = match method {
             "window/workDoneProgress/create" | "client/registerCapability" | "client/unregisterCapability" => Value::Null,
             "workspace/configuration" => {
@@ -543,6 +661,19 @@ fn dispatch(
         Some(Pending::Resolve) => {
             if let Some(item) = parse::<CompletionItem>(result) {
                 let _ = events.send(Event::CompletionResolved { id, item: Box::new(item) });
+            }
+        }
+        Some(Pending::Rename) => {
+            let edit = parse::<WorkspaceEdit>(result).unwrap_or_default();
+            let _ = events.send(Event::WorkspaceEdit { id, edit: Box::new(edit) });
+        }
+        Some(Pending::CodeActions) => {
+            let actions = parse::<Vec<CodeActionOrCommand>>(result).unwrap_or_default();
+            let _ = events.send(Event::CodeActions { id, actions });
+        }
+        Some(Pending::ResolveAction) => {
+            if let Some(action) = parse::<CodeAction>(result) {
+                let _ = events.send(Event::CodeActionResolved { id, action: Box::new(action) });
             }
         }
         Some(Pending::Hover) => {
