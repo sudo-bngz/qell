@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-pub use tables::{age, Health, Row, Table};
+pub use tables::{age, Health, Metrics, Row, Table, Usage};
 
 /// How long one `kubectl` call may take before it is given up on. A
 /// cluster behind a dead VPN would otherwise hang the worker.
@@ -258,9 +258,29 @@ impl Client {
         Ok((list, current.filter(|c| !c.is_empty())))
     }
 
+    /// What the pods of a namespace (or of every namespace) are using.
+    /// Empty when metrics-server isn't installed; the caller decides
+    /// whether to ask again.
+    pub fn top_pods(&self, namespace: Option<&str>) -> Result<Metrics, Error> {
+        let mut args = vec!["top".to_string(), "pods".to_string(), "--no-headers".to_string()];
+        match namespace {
+            Some(ns) => args.extend(["-n".to_string(), ns.to_string()]),
+            None => args.push("--all-namespaces".to_string()),
+        }
+        let text = self.run(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
+        Ok(tables::parse_usage(&text, namespace.is_none()))
+    }
+
+    /// What the nodes are using.
+    pub fn top_nodes(&self) -> Result<Metrics, Error> {
+        let text = self.run(&["top", "nodes", "--no-headers"])?;
+        Ok(tables::parse_usage(&text, false))
+    }
+
     /// Run the listing and build its table. `now` is the time in seconds
-    /// since the epoch, for the age column.
-    pub fn list(&self, listing: &Listing, now: i64) -> Result<Table, Error> {
+    /// since the epoch, for the age column. `metrics` is what `kubectl
+    /// top` last said, which the kinds that have usage columns show.
+    pub fn list(&self, listing: &Listing, now: i64, metrics: &Metrics) -> Result<Table, Error> {
         if let Some(pod) = &listing.containers_of {
             let mut args = vec!["get", "pod", pod.as_str(), "-o", "json"];
             if let Some(ns) = &listing.namespace {
@@ -286,7 +306,7 @@ impl Client {
         let json: serde_json::Value = parse(&self.run(&borrowed)?)?;
         let items = json["items"].as_array().cloned().unwrap_or_default();
         let across = namespaced && listing.namespace.is_none();
-        Ok(tables::build(&listing.kind, &items, now, across))
+        Ok(tables::build(&listing.kind, &items, now, across, metrics))
     }
 }
 
@@ -516,6 +536,32 @@ mod tests {
         assert_eq!(node.args(), ["nodes", "ip-10"]);
         let ingress = Object { kind: "ingresses".into(), name: "web".into(), namespace: None };
         assert_eq!(ingress.slash(), "ingress/web");
+    }
+
+    #[test]
+    fn quantities_read_both_ways_kubernetes_writes_them() {
+        assert_eq!(tables::cpu_quantity("250m"), Some(250));
+        assert_eq!(tables::cpu_quantity("2"), Some(2000));
+        assert_eq!(tables::cpu_quantity("1500000n"), Some(1));
+        assert_eq!(tables::mem_quantity("128Mi"), Some(128 * 1024 * 1024));
+        assert_eq!(tables::mem_quantity("1Gi"), Some(1024 * 1024 * 1024));
+        assert_eq!(tables::mem_quantity("500M"), Some(500_000_000));
+        assert_eq!(tables::mem_quantity("1024"), Some(1024));
+        assert_eq!(tables::mem_quantity("what"), None);
+    }
+
+    #[test]
+    fn top_output_becomes_usage_by_name() {
+        // Pods in one namespace: NAME CPU MEMORY.
+        let one = tables::parse_usage("api-0   5m   120Mi\nweb-1   1   2Gi\n", false);
+        assert_eq!(one["api-0"], tables::Usage { cpu_milli: 5, mem_bytes: 120 * 1024 * 1024 });
+        assert_eq!(one["web-1"].cpu_milli, 1000);
+        // Across namespaces, the namespace comes first and joins the key.
+        let all = tables::parse_usage("web   api-0   5m   120Mi\n", true);
+        assert!(all.contains_key("web/api-0"));
+        // Nodes also print percentages, which are skipped.
+        let nodes = tables::parse_usage("ip-10   520m   26%   5321Mi   41%\n", false);
+        assert_eq!(nodes["ip-10"], tables::Usage { cpu_milli: 520, mem_bytes: 5321 * 1024 * 1024 });
     }
 
     #[test]

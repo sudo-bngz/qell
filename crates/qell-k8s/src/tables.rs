@@ -51,6 +51,164 @@ impl Table {
     }
 }
 
+/// What one pod or node is using now, from `kubectl top`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Usage {
+    /// CPU in thousandths of a core, as `250m`.
+    pub cpu_milli: u64,
+    pub mem_bytes: u64,
+}
+
+/// What everything is using, by name (`namespace/name` when the listing
+/// spans namespaces, which is how `kubectl top -A` prints it).
+pub type Metrics = std::collections::HashMap<String, Usage>;
+
+/// `250m`, `1`, `1500000n` as thousandths of a core.
+pub fn cpu_quantity(text: &str) -> Option<u64> {
+    let text = text.trim();
+    let (number, scale) = match text.strip_suffix(['m', 'u', 'n']) {
+        Some(head) => (head, text.as_bytes()[text.len() - 1]),
+        None => (text, b'c'),
+    };
+    let value: f64 = number.parse().ok()?;
+    Some(match scale {
+        b'n' => (value / 1_000_000.0) as u64,
+        b'u' => (value / 1_000.0) as u64,
+        b'm' => value as u64,
+        _ => (value * 1_000.0) as u64,
+    })
+}
+
+/// `128Mi`, `1Gi`, `500M`, `1024` as bytes. Kubernetes writes both the
+/// binary suffixes (Ki, Mi, Gi) and the decimal ones (K, M, G).
+pub fn mem_quantity(text: &str) -> Option<u64> {
+    let text = text.trim();
+    let units: [(&str, u64); 10] = [
+        ("Ki", 1 << 10),
+        ("Mi", 1 << 20),
+        ("Gi", 1 << 30),
+        ("Ti", 1u64 << 40),
+        ("Pi", 1u64 << 50),
+        ("K", 1_000),
+        ("M", 1_000_000),
+        ("G", 1_000_000_000),
+        ("T", 1_000_000_000_000),
+        ("k", 1_000),
+    ];
+    for (suffix, scale) in units {
+        if let Some(head) = text.strip_suffix(suffix) {
+            let value: f64 = head.trim().parse().ok()?;
+            return Some((value * scale as f64) as u64);
+        }
+    }
+    text.parse::<f64>().ok().map(|v| v as u64)
+}
+
+/// A `kubectl top pods|nodes --no-headers` table. With `-A` the first
+/// column is the namespace, and the key becomes `namespace/name`.
+pub fn parse_usage(text: &str, all_namespaces: bool) -> Metrics {
+    let mut out = Metrics::new();
+    for line in text.lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        let (key, rest) = match (all_namespaces, f.len()) {
+            (true, n) if n >= 4 => (format!("{}/{}", f[0], f[1]), &f[2..]),
+            (false, n) if n >= 3 => (f[0].to_string(), &f[1..]),
+            _ => continue,
+        };
+        // Nodes also print percentages: NAME CPU CPU% MEM MEM%.
+        let (cpu, mem) = if rest.len() >= 4 { (rest[0], rest[2]) } else { (rest[0], rest[1]) };
+        if let (Some(cpu_milli), Some(mem_bytes)) = (cpu_quantity(cpu), mem_quantity(mem)) {
+            out.insert(key, Usage { cpu_milli, mem_bytes });
+        }
+    }
+    out
+}
+
+/// `250m` / `1.2` for CPU, the way kubectl writes it back.
+fn cpu_cell(milli: u64) -> String {
+    if milli >= 10_000 {
+        format!("{:.1}", milli as f64 / 1000.0)
+    } else {
+        format!("{milli}m")
+    }
+}
+
+/// Bytes as mebibytes, which is the unit people read pods in.
+fn mem_cell(bytes: u64) -> String {
+    let mi = bytes as f64 / (1 << 20) as f64;
+    if mi >= 1_024.0 {
+        format!("{:.1}Gi", mi / 1024.0)
+    } else {
+        format!("{mi:.0}Mi")
+    }
+}
+
+/// `used` against `of`, as a percentage, or `-` when nothing was asked
+/// for (no request, no limit).
+fn percent(used: u64, of: u64) -> String {
+    if of == 0 {
+        return "-".to_string();
+    }
+    format!("{}", (used as f64 / of as f64 * 100.0).round() as u64)
+}
+
+/// What a pod's containers ask for and are capped at, added up.
+fn pod_resources(item: &Value) -> (u64, u64, u64, u64) {
+    let (mut cpu_r, mut mem_r, mut cpu_l, mut mem_l) = (0, 0, 0, 0);
+    for c in array(item, &["spec", "containers"]) {
+        let get = |kind: &str, key: &str| {
+            let text = s(c, &["resources", kind, key]);
+            (!text.is_empty()).then_some(text)
+        };
+        cpu_r += get("requests", "cpu").and_then(|t| cpu_quantity(&t)).unwrap_or(0);
+        mem_r += get("requests", "memory").and_then(|t| mem_quantity(&t)).unwrap_or(0);
+        cpu_l += get("limits", "cpu").and_then(|t| cpu_quantity(&t)).unwrap_or(0);
+        mem_l += get("limits", "memory").and_then(|t| mem_quantity(&t)).unwrap_or(0);
+    }
+    (cpu_r, mem_r, cpu_l, mem_l)
+}
+
+/// The usage cells of whichever kind has them.
+fn metric_cells(kind: &str, item: &Value, usage: Option<&Usage>) -> Vec<String> {
+    match kind {
+        "nodes" => node_metric_cells(item, usage),
+        _ => pod_metric_cells(item, usage),
+    }
+}
+
+/// A node's usage, against what it has to give (`kubectl top node`).
+fn node_metric_cells(item: &Value, usage: Option<&Usage>) -> Vec<String> {
+    let Some(u) = usage else {
+        return vec!["n/a".into(), "n/a".into()];
+    };
+    let cpu = cpu_quantity(&s(item, &["status", "allocatable", "cpu"])).unwrap_or(0);
+    let mem = mem_quantity(&s(item, &["status", "allocatable", "memory"])).unwrap_or(0);
+    // A node that doesn't say what it has gets the figure on its own,
+    // rather than a percentage of nothing.
+    let against = |cell: String, used: u64, of: u64| match of {
+        0 => cell,
+        _ => format!("{cell} ({}%)", percent(used, of)),
+    };
+    vec![against(cpu_cell(u.cpu_milli), u.cpu_milli, cpu), against(mem_cell(u.mem_bytes), u.mem_bytes, mem)]
+}
+
+/// The metric cells for a pod: what it is using, and how that compares
+/// with what it asked for and what it is capped at, as k9s shows them.
+fn pod_metric_cells(item: &Value, usage: Option<&Usage>) -> Vec<String> {
+    let Some(u) = usage else {
+        return vec!["n/a".into(), "n/a".into(), "-".into(), "-".into(), "-".into(), "-".into()];
+    };
+    let (cpu_r, mem_r, cpu_l, mem_l) = pod_resources(item);
+    vec![
+        cpu_cell(u.cpu_milli),
+        mem_cell(u.mem_bytes),
+        percent(u.cpu_milli, cpu_r),
+        percent(u.mem_bytes, mem_r),
+        percent(u.cpu_milli, cpu_l),
+        percent(u.mem_bytes, mem_l),
+    ]
+}
+
 /// `.a.b.c` through a JSON object, as a string.
 fn s(v: &Value, path: &[&str]) -> String {
     let mut cur = v;
@@ -158,7 +316,7 @@ type RowOf = fn(&Value, i64) -> (Vec<String>, Health);
 
 /// Build the table for `kind` from the items of a `kubectl get -o json`.
 /// `show_namespace` is for listings that span namespaces.
-pub fn build(kind: &str, items: &[Value], now: i64, show_namespace: bool) -> Table {
+pub fn build(kind: &str, items: &[Value], now: i64, show_namespace: bool, metrics: &Metrics) -> Table {
     let mut columns: Vec<String> = Vec::new();
     if show_namespace {
         columns.push("NAMESPACE".into());
@@ -175,12 +333,36 @@ pub fn build(kind: &str, items: &[Value], now: i64, show_namespace: bool) -> Tab
         "configmaps" | "secrets" => (vec!["NAME", "TYPE", "DATA", "AGE"], data_row),
         _ => (vec!["NAME", "AGE"], plain_row),
     };
+    // What each one is using now, when metrics-server is answering.
+    let metric_columns: &[&str] = match kind {
+        _ if metrics.is_empty() => &[],
+        "pods" => &["CPU", "MEM", "%CPU/R", "%MEM/R", "%CPU/L", "%MEM/L"],
+        "nodes" => &["CPU", "MEM"],
+        _ => &[],
+    };
     columns.extend(rest.iter().map(|c| c.to_string()));
+    // Usage goes where k9s puts it: after the state, before the age.
+    let metrics_at = columns.iter().position(|c| c == "AGE").unwrap_or(columns.len());
+    for (i, name) in metric_columns.iter().enumerate() {
+        columns.insert(metrics_at + i, name.to_string());
+    }
     let mut rows: Vec<Row> = items
         .iter()
         .map(|item| {
             let (mut cells, health) = row_of(item, now);
             let namespace = Some(s(item, &["metadata", "namespace"])).filter(|n| !n.is_empty());
+            if !metric_columns.is_empty() {
+                let name = s(item, &["metadata", "name"]);
+                let key = match &namespace {
+                    Some(ns) => format!("{ns}/{name}"),
+                    None => name.clone(),
+                };
+                let usage = metrics.get(&key).or_else(|| metrics.get(&name));
+                let at = metrics_at - usize::from(show_namespace);
+                for (i, cell) in metric_cells(kind, item, usage).into_iter().enumerate() {
+                    cells.insert(at + i, cell);
+                }
+            }
             if show_namespace {
                 cells.insert(0, namespace.clone().unwrap_or_default());
             }
@@ -213,6 +395,9 @@ fn pod_row(item: &Value, now: i64) -> (Vec<String>, Health) {
     let health = match status.as_str() {
         "Running" | "Completed" | "Succeeded" => Health::Ok,
         "Terminating" | "Pending" | "ContainerCreating" | "PodInitializing" => Health::Warn,
+        // `Init:1/2` is on its way; `Init:ImagePullBackOff` is stuck,
+        // and falls through to the not-ready arm below.
+        _ if status.starts_with("Init:") && status.contains('/') => Health::Warn,
         _ if ready < total => Health::Bad,
         _ => Health::Ok,
     };
@@ -234,8 +419,31 @@ fn pod_status(item: &Value, statuses: &[Value]) -> String {
     if !s(item, &["metadata", "deletionTimestamp"]).is_empty() {
         return "Terminating".to_string();
     }
-    for c in array(item, &["status", "initContainerStatuses"]).iter().chain(statuses) {
+    // Still starting up: which init container it is on, as kubectl says.
+    let inits = array(item, &["status", "initContainerStatuses"]);
+    let wanted = array(item, &["spec", "initContainers"]).len();
+    if wanted > 0 {
+        let done = inits.iter().filter(|c| s(c, &["state", "terminated", "reason"]) == "Completed").count();
+        if done < wanted {
+            let stuck = inits.iter().find_map(|c| {
+                let reason = s(c, &["state", "waiting", "reason"]);
+                let failed = s(c, &["state", "terminated", "reason"]);
+                [reason, failed].into_iter().find(|r| !r.is_empty() && r != "PodInitializing" && r != "Completed")
+            });
+            return match stuck {
+                Some(reason) => format!("Init:{reason}"),
+                None => format!("Init:{done}/{wanted}"),
+            };
+        }
+    }
+    for c in inits.iter().chain(statuses) {
         let waiting = s(c, &["state", "waiting", "reason"]);
+        let last = s(c, &["lastState", "terminated", "reason"]);
+        // A container that keeps being killed for memory says so, rather
+        // than only `CrashLoopBackOff`, which is how it comes back.
+        if waiting == "CrashLoopBackOff" && last == "OOMKilled" {
+            return "OOMKilled".to_string();
+        }
         if !waiting.is_empty() {
             return waiting;
         }
@@ -478,7 +686,7 @@ mod tests {
     #[test]
     fn pods_get_the_columns_k9s_shows() {
         let now = epoch_seconds("2026-11-21T09:04:05Z").unwrap();
-        let t = build("pods", &[pod("api-0", "Running", None, true)], now, false);
+        let t = build("pods", &[pod("api-0", "Running", None, true)], now, false, &Metrics::new());
         assert_eq!(t.columns, ["NAME", "READY", "STATUS", "RESTARTS", "AGE", "IP", "NODE"]);
         assert_eq!(t.rows[0].cells, ["api-0", "1/1", "Running", "3", "2h", "10.0.1.9", "ip-10-0-1-5"]);
         assert_eq!(t.rows[0].health, Health::Ok);
@@ -487,8 +695,35 @@ mod tests {
 
     #[test]
     fn a_waiting_container_names_the_trouble() {
-        let t = build("pods", &[pod("api-1", "Pending", Some("CrashLoopBackOff"), false)], NOW, false);
+        let t = build("pods", &[pod("api-1", "Pending", Some("CrashLoopBackOff"), false)], NOW, false, &Metrics::new());
         assert_eq!(t.rows[0].cells[2], "CrashLoopBackOff");
+        assert_eq!(t.rows[0].health, Health::Bad);
+    }
+
+    #[test]
+    fn a_pod_still_starting_says_which_init_container_it_is_on() {
+        let mut p = pod("api-0", "Pending", Some("PodInitializing"), false);
+        p["spec"]["initContainers"] = json!([{ "name": "wait-db" }, { "name": "migrate" }]);
+        p["status"]["initContainerStatuses"] = json!([
+            { "name": "wait-db", "state": { "terminated": { "reason": "Completed" } } },
+            { "name": "migrate", "state": { "running": {} } },
+        ]);
+        let t = build("pods", &[p.clone()], NOW, false, &Metrics::new());
+        assert_eq!(t.rows[0].cells[2], "Init:1/2");
+        assert_eq!(t.rows[0].health, Health::Warn);
+        // One that is failing names the reason instead of counting.
+        p["status"]["initContainerStatuses"][1]["state"] = json!({ "waiting": { "reason": "ImagePullBackOff" } });
+        let t = build("pods", &[p], NOW, false, &Metrics::new());
+        assert_eq!(t.rows[0].cells[2], "Init:ImagePullBackOff");
+        assert_eq!(t.rows[0].health, Health::Bad);
+    }
+
+    #[test]
+    fn a_pod_killed_for_memory_says_oomkilled() {
+        let mut p = pod("api-0", "Running", Some("CrashLoopBackOff"), false);
+        p["status"]["containerStatuses"][0]["lastState"] = json!({ "terminated": { "reason": "OOMKilled" } });
+        let t = build("pods", &[p], NOW, false, &Metrics::new());
+        assert_eq!(t.rows[0].cells[2], "OOMKilled");
         assert_eq!(t.rows[0].health, Health::Bad);
     }
 
@@ -496,14 +731,14 @@ mod tests {
     fn a_pod_on_its_way_out_is_terminating() {
         let mut p = pod("api-2", "Running", None, true);
         p["metadata"]["deletionTimestamp"] = json!("2026-11-21T07:05:05Z");
-        let t = build("pods", &[p], NOW, false);
+        let t = build("pods", &[p], NOW, false, &Metrics::new());
         assert_eq!(t.rows[0].cells[2], "Terminating");
         assert_eq!(t.rows[0].health, Health::Warn);
     }
 
     #[test]
     fn listings_across_namespaces_say_which() {
-        let t = build("pods", &[pod("api-0", "Running", None, true)], NOW, true);
+        let t = build("pods", &[pod("api-0", "Running", None, true)], NOW, true, &Metrics::new());
         assert_eq!(t.columns[0], "NAMESPACE");
         assert_eq!(t.rows[0].cells[0], "web");
     }
@@ -515,7 +750,7 @@ mod tests {
             "spec": { "replicas": 3 },
             "status": { "readyReplicas": 1, "updatedReplicas": 3, "availableReplicas": 1 },
         });
-        let t = build("deployments", &[item], NOW, false);
+        let t = build("deployments", &[item], NOW, false, &Metrics::new());
         assert_eq!(t.rows[0].cells[1], "1/3");
         assert_eq!(t.rows[0].health, Health::Warn);
     }
@@ -528,7 +763,7 @@ mod tests {
                       "ports": [{ "port": 80, "nodePort": 31234, "protocol": "TCP" }] },
             "status": { "loadBalancer": { "ingress": [{ "hostname": "a.elb.amazonaws.com" }] } },
         });
-        let t = build("services", &[item], NOW, false);
+        let t = build("services", &[item], NOW, false, &Metrics::new());
         assert_eq!(t.rows[0].cells[3], "a.elb.amazonaws.com");
         assert_eq!(t.rows[0].cells[4], "80:31234/TCP");
         assert_eq!(t.rows[0].health, Health::Plain);
@@ -543,7 +778,7 @@ mod tests {
             "status": { "conditions": [{ "type": "Ready", "status": "True" }],
                         "nodeInfo": { "kubeletVersion": "v1.31.3" } },
         });
-        let t = build("nodes", &[item], NOW, false);
+        let t = build("nodes", &[item], NOW, false, &Metrics::new());
         assert_eq!(t.rows[0].cells[1], "Ready,SchedulingDisabled");
         assert_eq!(t.rows[0].cells[2], "worker");
         assert_eq!(t.rows[0].cells[4], "v1.31.3");
@@ -557,7 +792,7 @@ mod tests {
                     "lastTimestamp": "2026-11-21T07:04:05Z",
                     "involvedObject": { "kind": "Pod", "name": "api-0" } })
         };
-        let t = build("events", &[ev("Pulled", "Normal"), ev("BackOff", "Warning")], NOW, false);
+        let t = build("events", &[ev("Pulled", "Normal"), ev("BackOff", "Warning")], NOW, false, &Metrics::new());
         assert_eq!(t.rows[0].cells[2], "BackOff");
         assert_eq!(t.rows[0].health, Health::Bad);
         // Messages are one line, whatever the cluster sends.
@@ -567,7 +802,7 @@ mod tests {
     #[test]
     fn anything_else_still_lists_by_name_and_age() {
         let item = json!({ "metadata": { "name": "thing", "creationTimestamp": "2026-11-21T07:04:05Z" } });
-        let t = build("widgets", &[item], NOW, false);
+        let t = build("widgets", &[item], NOW, false, &Metrics::new());
         assert_eq!(t.columns, ["NAME", "AGE"]);
         assert_eq!(t.rows[0].cells[0], "thing");
     }
@@ -583,8 +818,52 @@ mod tests {
     }
 
     #[test]
+    fn pods_show_what_they_use_against_what_they_asked_for() {
+        let mut p = pod("api-0", "Running", None, true);
+        p["spec"]["containers"][0]["resources"] =
+            json!({ "requests": { "cpu": "100m", "memory": "128Mi" }, "limits": { "cpu": "500m", "memory": "256Mi" } });
+        let mut metrics = Metrics::new();
+        metrics.insert("web/api-0".into(), Usage { cpu_milli: 50, mem_bytes: 64 * 1024 * 1024 });
+        let t = build("pods", &[p], NOW, true, &metrics);
+        // The usage columns sit between the state and the age, as in k9s.
+        let at = t.columns.iter().position(|c| c == "CPU").expect("a CPU column");
+        assert_eq!(&t.columns[at..at + 6], ["CPU", "MEM", "%CPU/R", "%MEM/R", "%CPU/L", "%MEM/L"]);
+        assert_eq!(&t.rows[0].cells[at..at + 6], ["50m", "64Mi", "50", "50", "10", "25"]);
+        assert_eq!(t.columns[at + 6], "AGE");
+    }
+
+    #[test]
+    fn a_pod_without_metrics_or_limits_says_so_rather_than_lying() {
+        let mut metrics = Metrics::new();
+        metrics.insert("other".into(), Usage::default());
+        let t = build("pods", &[pod("api-0", "Running", None, true)], NOW, false, &metrics);
+        let at = t.columns.iter().position(|c| c == "CPU").expect("a CPU column");
+        // No metrics for this pod at all.
+        assert_eq!(&t.rows[0].cells[at..at + 3], ["n/a", "n/a", "-"]);
+        // And with metrics but no requests, the percentage is a dash.
+        metrics.insert("api-0".into(), Usage { cpu_milli: 7, mem_bytes: 1 << 20 });
+        let t = build("pods", &[pod("api-0", "Running", None, true)], NOW, false, &metrics);
+        assert_eq!(&t.rows[0].cells[at..at + 4], ["7m", "1Mi", "-", "-"]);
+    }
+
+    #[test]
+    fn nodes_show_their_usage_against_what_they_can_give() {
+        let item = json!({
+            "metadata": { "name": "ip-10-0-1-5", "creationTimestamp": "2026-11-21T07:04:05Z" },
+            "status": { "conditions": [{ "type": "Ready", "status": "True" }],
+                        "allocatable": { "cpu": "2", "memory": "8Gi" },
+                        "nodeInfo": { "kubeletVersion": "v1.31.3" } },
+        });
+        let mut metrics = Metrics::new();
+        metrics.insert("ip-10-0-1-5".into(), Usage { cpu_milli: 500, mem_bytes: 2 * (1 << 30) });
+        let t = build("nodes", &[item], NOW, false, &metrics);
+        let at = t.columns.iter().position(|c| c == "CPU").expect("a CPU column");
+        assert_eq!(&t.rows[0].cells[at..at + 2], ["500m (25%)", "2.0Gi (25%)"]);
+    }
+
+    #[test]
     fn columns_are_as_wide_as_their_widest_cell() {
-        let t = build("pods", &[pod("a-very-long-pod-name", "Running", None, true)], NOW, false);
+        let t = build("pods", &[pod("a-very-long-pod-name", "Running", None, true)], NOW, false, &Metrics::new());
         assert_eq!(t.widths()[0], "a-very-long-pod-name".len());
     }
 }
