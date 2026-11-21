@@ -4,6 +4,7 @@
 
 pub mod editor;
 pub mod find;
+pub mod k8s;
 pub mod menu;
 pub mod minimap;
 pub mod palette;
