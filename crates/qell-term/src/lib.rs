@@ -187,6 +187,21 @@ impl Terminal {
     /// is a command line such as `zsh -l`, split on whitespace (no quoting);
     /// `None` or empty uses `$SHELL`.
     pub fn new(cols: usize, rows: usize, cwd: Option<PathBuf>, shell: Option<&str>) -> Result<Self> {
+        let argv = shell.map(str::split_whitespace).and_then(|mut words| {
+            let program = words.next()?.to_string();
+            Some((program, words.map(String::from).collect()))
+        });
+        Self::start(cols, rows, cwd, argv)
+    }
+
+    /// Start one command instead of a shell, with its arguments given one
+    /// by one (`kubectl exec … -- sh -c 'exec bash || exec sh'`), which
+    /// splitting a command line on spaces could not express.
+    pub fn command(cols: usize, rows: usize, cwd: Option<PathBuf>, program: &str, args: Vec<String>) -> Result<Self> {
+        Self::start(cols, rows, cwd, Some((program.to_string(), args)))
+    }
+
+    fn start(cols: usize, rows: usize, cwd: Option<PathBuf>, argv: Option<(String, Vec<String>)>) -> Result<Self> {
         let (tx, events) = unbounded();
         let listener = Listener(tx);
 
@@ -195,10 +210,7 @@ impl Terminal {
         let term = Term::new(config, &size, listener.clone());
         let term = Arc::new(FairMutex::new(term));
 
-        let shell = shell.map(str::split_whitespace).and_then(|mut words| {
-            let program = words.next()?.to_string();
-            Some(tty::Shell::new(program, words.map(String::from).collect()))
-        });
+        let shell = argv.map(|(program, args)| tty::Shell::new(program, args));
         let mut options = tty::Options { working_directory: cwd, shell, ..Default::default() };
         options.env.insert("TERM".into(), "xterm-256color".into());
         options.env.insert("COLORTERM".into(), "truecolor".into());

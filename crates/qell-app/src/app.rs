@@ -169,11 +169,16 @@ pub struct TerminalTab {
     pub term: Terminal,
     /// Stable number shown in the tab, VS Code style ("1: bash").
     pub number: usize,
+    /// What Qell started here, when it wasn't a shell ("logs api-0").
+    pub name: Option<String>,
 }
 
 impl TerminalTab {
     /// Tab label: the title the shell set, else the shell's name.
     pub fn label(&self) -> String {
+        if let Some(name) = &self.name {
+            return name.clone();
+        }
         let title = self.term.title().trim();
         if !title.is_empty() {
             return title.to_string();
@@ -2224,13 +2229,13 @@ impl QellApp {
             Command::GoBack => self.navigate(true),
             Command::GoForward => self.navigate(false),
             Command::ShowSourceControl => self.show_sidebar_view(SidebarView::SourceControl),
-            Command::ToggleCluster => {
-                if self.k8s.open {
-                    views::k8s::close(self);
-                } else {
-                    views::k8s::open(self, ctx);
-                }
-            }
+            Command::ToggleCluster => match (self.k8s.open, self.focus == Focus::K8s) {
+                // Open but behind (you were in the terminal): bring it
+                // back rather than closing what you were looking at.
+                (true, false) => self.focus = Focus::K8s,
+                (true, true) => views::k8s::close(self),
+                (false, _) => views::k8s::open(self, ctx),
+            },
             Command::ToggleTerminal => {
                 self.show_terminal = !self.show_terminal;
                 // Closing it hands the keyboard back to whatever is behind.
@@ -2529,7 +2534,7 @@ impl QellApp {
             Ok(term) => {
                 let number = self.next_terminal_number;
                 self.next_terminal_number += 1;
-                self.terminals.push(TerminalTab { term, number });
+                self.terminals.push(TerminalTab { term, number, name: None });
                 self.active_terminal = self.terminals.len() - 1;
             }
             Err(e) => {
@@ -2538,6 +2543,24 @@ impl QellApp {
                     self.show_terminal = false;
                 }
             }
+        }
+    }
+
+    /// Run one command in a terminal tab of its own: a shell in a pod,
+    /// its logs, a port-forward. The process lives as long as the tab,
+    /// so Ctrl+C or closing it is how you stop it — nothing of Qell's
+    /// keeps running where you can't see it.
+    pub fn run_in_terminal(&mut self, name: String, program: &str, args: Vec<String>) {
+        match Terminal::command(80, 24, Some(self.root.clone()), program, args) {
+            Ok(term) => {
+                let number = self.next_terminal_number;
+                self.next_terminal_number += 1;
+                self.terminals.push(TerminalTab { term, number, name: Some(name) });
+                self.active_terminal = self.terminals.len() - 1;
+                self.show_terminal = true;
+                self.focus = Focus::Terminal;
+            }
+            Err(e) => self.notify_error(format!("Cannot start {program}: {e:#}")),
         }
     }
 
@@ -2658,6 +2681,7 @@ impl QellApp {
                 && !matches!(
                     cmd,
                     Command::ToggleTerminal
+                        | Command::ToggleCluster
                         | Command::NewTerminal
                         | Command::NextTerminal
                         | Command::PrevTerminal

@@ -172,6 +172,14 @@ bottom, and language-server completion for the languages you actually use.
   `CrashLoopBackOff` pod and a `NotReady` node in red, a rollout still
   catching up in yellow.
 
+  `s` opens a shell in the pod (bash where the image has it, sh
+  otherwise), `l` follows its logs and `Shift+L` the previous
+  container's, and `f` forwards a port, asking which with the object's own
+  port filled in. Each runs `kubectl` in a terminal tab of its own, below
+  the list — so the pods stay on screen while the logs scroll, the tab is
+  named for what it is doing, and Ctrl+C or closing the tab is what stops
+  it. Nothing of Qell's keeps running where you can't see it.
+
   `d` describes the object and `y` shows its YAML, in the panel itself
   with `Esc` back to the list, so reading never takes you out of the view.
   `e` opens the manifest in an ordinary tab, since editing is the editor's
