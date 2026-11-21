@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use egui::{Context, Key, Modifiers};
-use qell_core::{LanguageRegistry, Position};
+use qell_core::{Buffer, Cursor, LanguageRegistry, Position};
 use qell_git::{RepoStatus, Watcher as GitWatcher, WorkspaceStatus};
 use qell_lsp::convert::from_lsp_position;
 use qell_lsp::lsp_types::{CompletionItem, Diagnostic, InsertTextFormat};
@@ -914,6 +914,105 @@ impl QellApp {
         }
     }
 
+    // ---- several cursors --------------------------------------------------
+
+    /// ⌘D: select the word under the cursor, then one more occurrence of
+    /// it each time. `all` takes every occurrence at once (⌘⇧L).
+    fn add_occurrence(&mut self, all: bool) {
+        let Some(doc) = self.docs.get_mut(self.active) else { return };
+        let buffer = &mut doc.buffer;
+        // Nothing selected yet: start from the word each cursor sits on.
+        if buffer.cursors().iter().all(|c| c.selection.is_empty()) {
+            let words: Vec<Cursor> = buffer
+                .cursors()
+                .iter()
+                .filter_map(|c| {
+                    let head = c.head();
+                    let (s, e) = views::editor::word_range(&buffer.line(head.line), head.col, false)?;
+                    let mut c = Cursor::at(Position::new(head.line, s));
+                    c.set_head(Position::new(head.line, e), true);
+                    Some(c)
+                })
+                .collect();
+            if !words.is_empty() {
+                buffer.set_cursors(words);
+                if !all {
+                    return;
+                }
+            }
+        }
+        let (ps, pe) = buffer.cursor.selection.ordered();
+        let (pstart, pend) = (buffer.pos_to_char(ps), buffer.pos_to_char(pe));
+        let needle: String = buffer.rope().slice(pstart..pend).to_string();
+        if needle.is_empty() || needle.contains('\n') {
+            return;
+        }
+        // Where the cursors already are, so the same place isn't taken twice.
+        let mut taken: Vec<(usize, usize)> = buffer
+            .cursors()
+            .iter()
+            .map(|c| {
+                let (s, e) = c.selection.ordered();
+                (buffer.pos_to_char(s), buffer.pos_to_char(e))
+            })
+            .collect();
+        let text = buffer.text();
+        let rope = buffer.rope();
+        let found: Vec<(usize, usize)> =
+            text.match_indices(&needle).map(|(b, m)| (rope.byte_to_char(b), rope.byte_to_char(b + m.len()))).collect();
+        let mut added: Vec<Cursor> = Vec::new();
+        let take = |at: &(usize, usize), buffer: &Buffer, added: &mut Vec<Cursor>| {
+            let mut c = Cursor::at(buffer.char_to_pos(at.0));
+            c.set_head(buffer.char_to_pos(at.1), true);
+            added.push(c);
+        };
+        if all {
+            for at in found.iter().filter(|f| !taken.contains(f)) {
+                take(at, buffer, &mut added);
+            }
+        } else {
+            let after = taken.iter().map(|(_, e)| *e).max().unwrap_or(pend);
+            let next =
+                found.iter().find(|f| f.0 >= after && !taken.contains(f)).or_else(|| found.iter().find(|f| !taken.contains(f)));
+            match next {
+                Some(at) => take(at, buffer, &mut added),
+                // Every one of them is already selected.
+                None => return,
+            }
+        }
+        if added.is_empty() {
+            return;
+        }
+        taken.extend(added.iter().map(|c| {
+            let (s, e) = c.selection.ordered();
+            (buffer.pos_to_char(s), buffer.pos_to_char(e))
+        }));
+        let mut cursors = buffer.cursors();
+        cursors.extend(added);
+        cursors.sort_by_key(|c| c.selection.ordered().0);
+        buffer.set_cursors(cursors);
+        doc.scroll_to_cursor = true;
+    }
+
+    /// Add a cursor on the line above or below the outermost one.
+    fn add_cursor_line(&mut self, delta: isize) {
+        let Some(doc) = self.docs.get_mut(self.active) else { return };
+        let buffer = &mut doc.buffer;
+        let cursors = buffer.cursors();
+        let edge = if delta < 0 { cursors.first() } else { cursors.last() };
+        let Some(from) = edge.map(|c| c.head()) else { return };
+        let line = from.line as isize + delta;
+        if line < 0 || line as usize >= buffer.line_count() {
+            return;
+        }
+        let line = line as usize;
+        let col = doc.goal_col.unwrap_or(from.col);
+        doc.goal_col = Some(col);
+        let at = Position::new(line, col.min(buffer.line_len(line)));
+        buffer.toggle_cursor(Cursor::at(at));
+        doc.scroll_to_cursor = true;
+    }
+
     // ---- formatting -----------------------------------------------------------
 
     /// Format the open file: the language server when it offers it, else
@@ -1424,6 +1523,10 @@ impl QellApp {
             }
             Command::ToggleSidebar => self.show_sidebar = !self.show_sidebar,
             Command::FormatDocument => self.format_active(false),
+            Command::AddNextOccurrence => self.add_occurrence(false),
+            Command::SelectAllOccurrences => self.add_occurrence(true),
+            Command::AddCursorAbove => self.add_cursor_line(-1),
+            Command::AddCursorBelow => self.add_cursor_line(1),
             Command::ToggleVimMode => {
                 self.config.vim_mode = !self.config.vim_mode;
                 self.save_config();
@@ -1859,6 +1962,10 @@ impl QellApp {
                         | Command::Quit
                 )
             {
+                continue;
+            }
+            // In Vim's Normal mode, Ctrl-D scrolls: leave it to Vim.
+            if cmd == Command::AddNextOccurrence && self.config.vim_mode && self.focus == Focus::Editor && self.vim.captures() {
                 continue;
             }
             if ctx.input_mut(|i| i.consume_shortcut(&sc)) {

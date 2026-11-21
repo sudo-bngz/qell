@@ -116,6 +116,10 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                         }
                     }
                     ui.label(small(lang_name.to_string()));
+                    let extra = doc.buffer.extra_cursors().len();
+                    if extra > 0 {
+                        ui.label(small(format!("{} cursors", extra + 1)));
+                    }
                     ui.label(small(format!("Ln {}, Col {}", p.line + 1, p.col + 1)));
                 }
             });

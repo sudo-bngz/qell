@@ -99,6 +99,13 @@ bottom, and language-server completion for the languages you actually use.
   the pair at the cursor is boxed, and vertical guides mark each indentation
   level, with the block around the cursor highlighted. The indentation step
   (2, 4, tabs…) is detected per file. Both can be turned off in Settings.
+- **Several cursors** — `Ctrl/⌘+D` selects the word under the cursor and
+  then one more occurrence each time, `Ctrl/⌘+Shift+L` takes them all,
+  `Alt+click` puts a cursor anywhere (click again to remove it), and
+  `Ctrl+Alt+↑/↓` (`⌥⌘↑/↓` on macOS) adds one on the line above or below.
+  Typing, deleting, Enter and Tab happen at every cursor, pasting as many
+  lines as there are cursors gives each its own, and `Escape` goes back to
+  one.
 - **Format** (`Shift+Alt+F`, and on save) — the language server when it
   offers formatting, otherwise the language's own tool: `gofmt`,
   `terraform fmt`, `rustfmt`, `black`, `clang-format`, `shfmt`, `taplo`,
@@ -158,6 +165,9 @@ npm i -g typescript typescript-language-server
 | Command palette       | `Ctrl+Shift+P`     |
 | Go to file            | `Ctrl+P`           |
 | Go to line            | `Ctrl+G`           |
+| Add cursor at next occurrence | `Ctrl+D`     |
+| Select all occurrences | `Ctrl+Shift+L`     |
+| Add cursor above / below | `Ctrl+Alt+↑` / `Ctrl+Alt+↓` |
 | Find / Replace in file | `Ctrl+F` / `Ctrl+H` |
 | Find next / previous  | `F3` / `Shift+F3`  |
 | Search in files       | `Ctrl+Shift+F`     |

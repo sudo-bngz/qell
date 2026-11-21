@@ -26,6 +26,10 @@ pub enum Command {
     ToggleMinimap,
     ToggleVimMode,
     FormatDocument,
+    AddNextOccurrence,
+    SelectAllOccurrences,
+    AddCursorAbove,
+    AddCursorBelow,
     ShowExplorer,
     ShowSearch,
     FindInFile,
@@ -73,6 +77,10 @@ impl Command {
         Command::ToggleMinimap,
         Command::ToggleVimMode,
         Command::FormatDocument,
+        Command::AddNextOccurrence,
+        Command::SelectAllOccurrences,
+        Command::AddCursorAbove,
+        Command::AddCursorBelow,
         Command::ShowExplorer,
         Command::ShowSearch,
         Command::FindInFile,
@@ -120,6 +128,10 @@ impl Command {
             Command::ToggleMinimap => "View: Toggle Minimap",
             Command::ToggleVimMode => "View: Toggle Vim Mode",
             Command::FormatDocument => "Format Document",
+            Command::AddNextOccurrence => "Selection: Add Next Occurrence",
+            Command::SelectAllOccurrences => "Selection: Select All Occurrences",
+            Command::AddCursorAbove => "Selection: Add Cursor Above",
+            Command::AddCursorBelow => "Selection: Add Cursor Below",
             Command::ShowExplorer => "View: Show Explorer",
             Command::ShowSearch => "View: Search in Files",
             Command::FindInFile => "Find",
@@ -178,6 +190,11 @@ impl Command {
             Command::ToggleVimMode => None,
             // VS Code's ⇧⌥F / Shift+Alt+F.
             Command::FormatDocument => s(Modifiers::SHIFT | Modifiers::ALT, Key::F),
+            Command::AddNextOccurrence => s(cmd, Key::D),
+            Command::SelectAllOccurrences => s(cmd_shift, Key::L),
+            // VS Code: ⌥⌘↑/↓ on macOS, Ctrl+Alt+↑/↓ elsewhere.
+            Command::AddCursorAbove => s(add_cursor_mods(), Key::ArrowUp),
+            Command::AddCursorBelow => s(add_cursor_mods(), Key::ArrowDown),
             Command::ShowExplorer => s(Modifiers::CTRL | Modifiers::SHIFT, Key::E),
             Command::ShowSearch => s(cmd_shift, Key::F),
             Command::FindInFile => s(cmd, Key::F),
@@ -274,6 +291,15 @@ pub fn fuzzy_match(needle: &str, haystack: &str) -> Option<(usize, Vec<usize>)> 
         pos = found + 1;
     }
     Some((score, hits))
+}
+
+/// ⌥⌘ on macOS, Ctrl+Alt elsewhere: the modifiers for adding a cursor.
+fn add_cursor_mods() -> Modifiers {
+    if cfg!(target_os = "macos") {
+        Modifiers::COMMAND | Modifiers::ALT
+    } else {
+        Modifiers::CTRL | Modifiers::ALT
+    }
 }
 
 #[cfg(test)]
