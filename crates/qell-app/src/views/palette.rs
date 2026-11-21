@@ -40,6 +40,8 @@ pub fn collect_files(root: &Path, ignore: &[String]) -> Vec<PathBuf> {
 enum Choice {
     /// Index into `app.code_actions`.
     Action(usize),
+    /// Index into `app.symbols`.
+    Symbol(usize),
     Command(Command),
     Plugin(String),
     File(PathBuf),
@@ -87,6 +89,18 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                 choices.push((name, rel, Choice::File(p)));
             }
         }
+        PaletteMode::Symbols => {
+            for (i, s) in app.symbols.iter().enumerate() {
+                let hint = match (s.container.is_empty(), s.kind.is_empty()) {
+                    (true, _) => s.kind.clone(),
+                    (false, true) => s.container.clone(),
+                    (false, false) => format!("{} · {}", s.container, s.kind),
+                };
+                if fuzzy_score(&query, &s.name).is_some() {
+                    choices.push((s.name.clone(), hint, Choice::Symbol(i)));
+                }
+            }
+        }
         PaletteMode::CodeActions => {
             use qell_lsp::lsp_types::CodeActionOrCommand as Ac;
             for (i, a) in app.code_actions.iter().enumerate() {
@@ -129,6 +143,7 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
         PaletteMode::Commands => "Type a command…",
         PaletteMode::Files => "Search files by name…",
         PaletteMode::GoToLine => "Line number (or line:column)",
+        PaletteMode::Symbols => "Go to symbol in this file…",
         PaletteMode::Rename => "New name",
         PaletteMode::CodeActions => "Quick fix…",
     };
@@ -242,6 +257,7 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                 Choice::Plugin(n) => app.pending_plugin_commands.push(n),
                 Choice::File(p) => app.open_file(p),
                 Choice::Action(i) => app.run_code_action(i),
+                Choice::Symbol(i) => app.go_to_symbol_row(i),
             }
         }
         close = true;
@@ -249,6 +265,7 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
     if close {
         app.command_palette.open = false;
         app.code_actions.clear();
+        app.symbols.clear();
         if app.focus != Focus::Terminal {
             app.focus = Focus::Editor;
         }

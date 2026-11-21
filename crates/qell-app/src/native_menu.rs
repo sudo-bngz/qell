@@ -203,6 +203,7 @@ pub fn layout() -> Vec<(&'static str, Vec<Entry>)> {
                 Cmd(C::QuickOpen, Some("Go to File…")),
                 Cmd(C::GoToLine, Some("Go to Line…")),
                 Separator,
+                Cmd(C::GoToSymbol, Some("Go to Symbol in File")),
                 Cmd(C::GoToDefinition, Some("Go to Definition")),
                 Cmd(C::FindReferences, Some("Find All References")),
             ],

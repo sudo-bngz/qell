@@ -14,7 +14,7 @@ pub mod client;
 pub mod convert;
 pub mod registry;
 
-pub use client::{Client, Event, RequestId, Waker};
+pub use client::{Client, Event, FileSymbol, RequestId, Waker};
 pub use registry::{install_hint, InstallHint, Registry};
 
 pub use lsp_types;

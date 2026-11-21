@@ -34,6 +34,18 @@ pub enum NavRequest {
     References { word: String },
 }
 
+/// One line of the Go to Symbol list.
+#[derive(Debug, Clone)]
+pub struct SymbolRow {
+    pub name: String,
+    pub kind: String,
+    /// What it is defined in, when the language server says so.
+    pub container: String,
+    pub line: usize,
+    pub col: usize,
+    pub end_col: usize,
+}
+
 /// Char range of `word` in `preview`, for highlighting.
 fn preview_range(preview: &str, _chars: &str, word: &str) -> (usize, usize) {
     let last = word.rsplit('.').next().unwrap_or(word);
@@ -110,6 +122,8 @@ pub struct SnippetSession {
 pub enum PaletteMode {
     Commands,
     Files,
+    /// Jumping to one of the things the open file defines.
+    Symbols,
     GoToLine,
     /// Typing the new name for the symbol at the cursor (F2).
     Rename,
@@ -213,6 +227,12 @@ pub struct QellApp {
     /// came back with (what the Quick Fix palette lists).
     pending_actions: Option<RequestId>,
     pub code_actions: Vec<qell_lsp::lsp_types::CodeActionOrCommand>,
+    /// What the open file defines, for Go to Symbol.
+    pub symbols: Vec<SymbolRow>,
+    pending_symbols: Option<RequestId>,
+    /// Reads definitions out of a file; built the first time it is needed
+    /// (compiling the tree-sitter queries takes a moment).
+    extractor: Option<qell_index::symbols::Extractor>,
     /// A chosen action whose edit the server is still filling in.
     pending_action_resolve: Option<RequestId>,
     /// The symbol F2 is renaming, shown in the prompt.
@@ -313,6 +333,9 @@ impl QellApp {
             pending_rename: None,
             pending_actions: None,
             code_actions: Vec::new(),
+            symbols: Vec::new(),
+            pending_symbols: None,
+            extractor: None,
             pending_action_resolve: None,
             rename_symbol: String::new(),
             git_base_tx,
@@ -816,6 +839,94 @@ impl QellApp {
             NavRequest::References { word } if items.is_empty() => self.notify(format!("No references to {word}.")),
             NavRequest::References { word } => self.show_locations(format!("References to {word}"), items, false),
         }
+    }
+
+    // ---- go to symbol -----------------------------------------------------
+
+    /// Ctrl/Cmd+Shift+O: list what the open file defines and jump to one.
+    /// Qell reads the file itself for the languages it can; for the others
+    /// it asks the language server.
+    pub fn go_to_symbol(&mut self) {
+        let Some(doc) = self.docs.get(self.active) else { return };
+        let lang = doc.buffer.language().unwrap_or("").to_string();
+        let text = doc.buffer.text();
+        let extractor = self.extractor.get_or_insert_with(qell_index::symbols::Extractor::new);
+        if extractor.supports(&lang) {
+            let mut rows: Vec<SymbolRow> = extractor
+                .extract(&lang, &text)
+                .into_iter()
+                .map(|s| SymbolRow {
+                    name: s.name,
+                    kind: s.kind,
+                    container: String::new(),
+                    line: s.line,
+                    col: s.col,
+                    end_col: s.end_col,
+                })
+                .collect();
+            rows.sort_by_key(|s| (s.line, s.col));
+            if rows.is_empty() {
+                self.notify("Nothing defined in this file.");
+                return;
+            }
+            self.symbols = rows;
+            self.open_palette(PaletteMode::Symbols);
+            return;
+        }
+        let Some(doc) = self.docs.get_mut(self.active) else { return };
+        match self.lsp.request_symbols(&self.languages, &mut doc.buffer) {
+            Some(id) => {
+                self.pending_symbols = Some(id);
+                self.notify("Reading the symbols in this file…");
+            }
+            None => self.notify(self.no_server_hint(&lang, "Listing what a file defines needs")),
+        }
+    }
+
+    fn handle_symbols(&mut self, id: RequestId, symbols: Vec<qell_lsp::FileSymbol>) {
+        if self.pending_symbols != Some(id) {
+            return;
+        }
+        self.pending_symbols = None;
+        let Some(doc) = self.docs.get(self.active) else { return };
+        let mut rows: Vec<SymbolRow> = symbols
+            .into_iter()
+            .map(|s| {
+                let line = s.range.start.line as usize;
+                let text = doc.buffer.line(line);
+                let start = from_lsp_position(&text, s.range.start);
+                let end = from_lsp_position(&text, s.range.end);
+                SymbolRow {
+                    name: s.name,
+                    kind: s.kind,
+                    container: s.container,
+                    line,
+                    col: start.col,
+                    end_col: end.col.max(start.col),
+                }
+            })
+            .collect();
+        rows.sort_by_key(|s| (s.line, s.col));
+        if rows.is_empty() {
+            self.notify("The language server found nothing defined in this file.");
+            return;
+        }
+        self.symbols = rows;
+        self.open_palette(PaletteMode::Symbols);
+    }
+
+    /// Jump to the symbol the palette picked.
+    pub fn go_to_symbol_row(&mut self, index: usize) {
+        let Some(row) = self.symbols.get(index).cloned() else { return };
+        let Some(path) = self.docs.get(self.active).and_then(|d| d.buffer.path()).map(Path::to_path_buf) else {
+            // An untitled buffer has no path to navigate to: just move.
+            if let Some(doc) = self.docs.get_mut(self.active) {
+                doc.buffer.set_cursor(Position::new(row.line, row.col), false);
+                doc.scroll_to_cursor = true;
+            }
+            return;
+        };
+        self.open_location(&path, row.line, row.col, row.end_col);
     }
 
     // ---- rename and quick fixes -------------------------------------------
@@ -1806,6 +1917,7 @@ impl QellApp {
             Command::FindPrevious => views::find::go(self, false),
             Command::GoToDefinition => self.go_to_definition(),
             Command::FindReferences => self.find_references(),
+            Command::GoToSymbol => self.go_to_symbol(),
             Command::RenameSymbol => self.start_rename(),
             Command::QuickFix => self.quick_fix(),
             Command::GoBack => self.navigate(true),
@@ -2049,6 +2161,7 @@ impl QellApp {
                         }
                     }
                 }
+                LspEvent::Symbols { id, symbols } => self.handle_symbols(id, symbols),
                 LspEvent::WorkspaceEdit { id, edit } => self.handle_workspace_edit(id, *edit),
                 LspEvent::CodeActions { id, actions } => self.handle_code_actions(id, actions),
                 LspEvent::CodeActionResolved { id, action } => {
