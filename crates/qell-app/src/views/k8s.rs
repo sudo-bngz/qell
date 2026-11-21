@@ -39,6 +39,14 @@ enum Msg {
     Contexts(Vec<String>, Option<String>),
 }
 
+/// `kubectl describe` or an object's YAML, shown in the panel itself.
+pub struct TextView {
+    pub title: String,
+    pub lines: Vec<String>,
+    /// The line the keys are on, which is what is kept on screen.
+    pub at: usize,
+}
+
 /// What `d`, `y` and `e` fetch about the selected object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shown {
@@ -87,6 +95,13 @@ pub struct K8sState {
     pub help: bool,
     /// Rows that fit on screen, for Ctrl+D and page keys.
     page: usize,
+    /// `d` and `y` show their text here, over the table, the way k9s
+    /// keeps everything in the one window.
+    pub text: Option<TextView>,
+    /// The cursor moved by key: bring its row back on screen.
+    scroll_to: bool,
+    /// Where the list is scrolled to, to work out whether it has to move.
+    offset: f32,
 }
 
 impl Default for K8sState {
@@ -114,6 +129,9 @@ impl Default for K8sState {
             info_at: None,
             help: false,
             page: 20,
+            text: None,
+            scroll_to: false,
+            offset: 0.0,
         }
     }
 }
@@ -217,6 +235,7 @@ impl K8sState {
     /// Show `listing` without stacking it (switching resource with `:`).
     fn set(&mut self, listing: Listing, ctx: &egui::Context) {
         self.listing = listing;
+        self.text = None;
         self.table = Table::default();
         self.selected = 0;
         self.filter.clear();
@@ -300,7 +319,7 @@ pub fn update(app: &mut QellApp, ctx: &egui::Context) {
             }
             Msg::Text(what, object, text) => {
                 app.k8s.loading = false;
-                open_object_tab(app, what, &object, &text);
+                show_object(app, what, &object, &text);
             }
             Msg::Applied(result) => {
                 app.k8s.loading = false;
@@ -377,6 +396,13 @@ pub fn show(app: &mut QellApp, ui: &mut egui::Ui, ctx: &egui::Context) {
     app.k8s.page = ((table_rect.height() / row_h) as usize).saturating_sub(2).max(1);
     table_frame(app, ui, frame_rect, &font, accent, dim);
 
+    if app.k8s.text.is_some() {
+        text_view(app, ui, table_rect, &font, row_h, text, accent);
+        let line_rect = Rect::from_min_max(Pos2::new(area.min.x, area.max.y - bottom), area.max);
+        bottom_line(app, ui, line_rect, &font, dim, accent, err, keys_in_header);
+        return;
+    }
+
     let mut open_row = None;
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(table_rect));
     child.spacing_mut().item_spacing.y = 0.0;
@@ -400,7 +426,15 @@ pub fn show(app: &mut QellApp, ui: &mut egui::Ui, ctx: &egui::Context) {
             ui.label(egui::RichText::new(what).font(font.clone()).color(dim));
         });
     }
-    egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(&mut child, row_h, rows, |ui, range| {
+    let mut list = egui::ScrollArea::vertical().auto_shrink([false, false]);
+    if app.k8s.scroll_to {
+        // `show_rows` only draws what is on screen, so the row to follow
+        // may not exist yet: the offset is worked out rather than asked
+        // of a widget that isn't there.
+        let view_h = (table_rect.height() - row_h).max(row_h);
+        list = list.vertical_scroll_offset(keep_visible(app.k8s.offset, view_h, selected, row_h));
+    }
+    let scrolled = list.show_rows(&mut child, row_h, rows, |ui, range| {
         ui.spacing_mut().item_spacing.y = 0.0;
         for i in range {
             let row = &app.k8s.table.rows[visible[i]];
@@ -429,6 +463,8 @@ pub fn show(app: &mut QellApp, ui: &mut egui::Ui, ctx: &egui::Context) {
             }
         }
     });
+    app.k8s.offset = scrolled.state.offset.y;
+    app.k8s.scroll_to = false;
     if let Some((i, enter)) = open_row {
         app.k8s.selected = i;
         app.focus = Focus::K8s;
@@ -629,12 +665,84 @@ struct Colors {
     logo: Color32,
 }
 
+/// `kubectl describe` or a manifest, in the panel. The name of a field
+/// is picked out, which is most of what makes describe readable.
+#[allow(clippy::too_many_arguments)]
+fn text_view(app: &mut QellApp, ui: &mut egui::Ui, rect: Rect, font: &FontId, row_h: f32, text: Color32, accent: Color32) {
+    let Some(view) = &app.k8s.text else { return };
+    let (lines, at) = (view.lines.clone(), view.at);
+    app.k8s.page = ((rect.height() / row_h) as usize).saturating_sub(2).max(1);
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+    child.spacing_mut().item_spacing.y = 0.0;
+    let mut area = egui::ScrollArea::both().auto_shrink([false, false]);
+    if app.k8s.scroll_to {
+        area = area.vertical_scroll_offset(keep_visible(app.k8s.offset, rect.height(), at, row_h));
+    }
+    let scrolled = area.show_rows(&mut child, row_h, lines.len(), |ui, range| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        for i in range {
+            let line = &lines[i];
+            let (r, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), row_h), Sense::hover());
+            let painter = ui.painter_at(r);
+            let left = Pos2::new(r.left() + 8.0, r.center().y);
+            // `Name:` / `  app:` — the field, then its value.
+            match field_of(line) {
+                Some(end) => {
+                    let (name, rest) = line.split_at(end);
+                    let mut job = LayoutJob::default();
+                    job.append(name, 0.0, TextFormat { font_id: font.clone(), color: accent, ..Default::default() });
+                    job.append(rest, 0.0, TextFormat { font_id: font.clone(), color: text, ..Default::default() });
+                    let galley = ui.fonts_mut(|f| f.layout_job(job));
+                    painter.galley(Pos2::new(left.x, r.center().y - galley.size().y / 2.0), galley, text);
+                }
+                None => {
+                    painter.text(left, Align2::LEFT_CENTER, line, font.clone(), text);
+                }
+            }
+        }
+    });
+    app.k8s.offset = scrolled.state.offset.y;
+    app.k8s.scroll_to = false;
+}
+
+/// Where a list must be scrolled to for `row` to be on screen: as it is
+/// when the row is already there, otherwise just far enough.
+fn keep_visible(offset: f32, view_h: f32, row: usize, row_h: f32) -> f32 {
+    let top = row as f32 * row_h;
+    let bottom = top + row_h;
+    if top < offset {
+        top
+    } else if bottom > offset + view_h {
+        bottom - view_h
+    } else {
+        offset
+    }
+}
+
+/// Where a line's field name ends (`Name:` → 5), for colouring. Only a
+/// name at the start of the line counts, so URLs keep their colon.
+fn field_of(line: &str) -> Option<usize> {
+    let name = line.trim_start();
+    let indent = line.len() - name.len();
+    let end = name.find(':')?;
+    let field = &name[..end];
+    let plain = |c: char| c.is_alphanumeric() || "-_./ ".contains(c);
+    (!field.is_empty() && field.chars().all(plain)).then_some(indent + end + 1)
+}
+
 /// The border around the table, with what it is listing on the top edge:
 /// `Pods(web)[12]`, as k9s puts it.
 fn table_frame(app: &QellApp, ui: &mut egui::Ui, rect: Rect, font: &FontId, accent: Color32, dim: Color32) {
     // The title sits on the top edge, so the clip reaches above it.
     let painter = ui.painter_at(rect.expand(10.0));
     painter.rect_stroke(rect, 4.0, egui::Stroke::new(1.0_f32, accent.gamma_multiply(0.5)), egui::StrokeKind::Inside);
+    if let Some(view) = &app.k8s.text {
+        let galley = ui.fonts_mut(|f| f.layout_no_wrap(view.title.clone(), font.clone(), accent));
+        let at = Pos2::new(rect.center().x - galley.size().x / 2.0, rect.top() - galley.size().y / 2.0);
+        painter.rect_filled(Rect::from_min_size(at, galley.size()).expand2(Vec2::new(4.0, 0.0)), 0.0, app.palette.editor_bg);
+        painter.galley(at, galley, accent);
+        return;
+    }
     let kind = &app.k8s.listing.kind;
     let mut title = kind.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
     title.push_str(&kind.chars().skip(1).collect::<String>());
@@ -720,8 +828,8 @@ fn help_overlay(ctx: &egui::Context, font: &FontId, text: Color32, dim: Color32)
         ("Ctrl+d / Ctrl+u", "half a page"),
         ("Enter", "go in — a namespace, a workload, a node, a pod"),
         ("Esc", "back, or clear the filter"),
-        ("d / y", "describe it / its YAML, in a read-only tab"),
-        ("e", "edit the manifest; saving applies it to the cluster"),
+        ("d / y", "describe it / its YAML, here; Esc comes back"),
+        ("e", "edit the manifest in a tab; saving applies it"),
         ("/", "filter the rows"),
         (":", "a resource (:po, :svc, :ns, :ctx) or :q to close"),
         ("Tab", "take the suggestion, again for the next"),
@@ -751,6 +859,10 @@ fn help_overlay(ctx: &egui::Context, font: &FontId, text: Color32, dim: Color32)
 
 /// Everything the panel does with the keyboard.
 fn keys(app: &mut QellApp, ctx: &egui::Context) {
+    if app.k8s.text.is_some() {
+        text_keys(app, ctx);
+        return;
+    }
     // The help overlay is up: the next key of its own puts it away. This
     // is a frame after the one that opened it, so `?` doesn't close it
     // the instant it appears.
@@ -774,14 +886,34 @@ fn keys(app: &mut QellApp, ctx: &egui::Context) {
         let egui::Event::Key { key, pressed: true, modifiers, .. } = event else { continue };
         let k = &mut app.k8s;
         match (key, modifiers.ctrl || modifiers.command) {
-            (Key::J | Key::ArrowDown, false) => moved(k, k.selected + 1),
-            (Key::K | Key::ArrowUp, false) => k.selected = k.selected.saturating_sub(1),
-            (Key::G, false) if modifiers.shift => moved(k, rows.saturating_sub(1)),
-            (Key::G, false) => k.selected = 0,
-            (Key::Home, false) => k.selected = 0,
-            (Key::End, false) => moved(k, rows.saturating_sub(1)),
-            (Key::D, true) | (Key::PageDown, false) => moved(k, k.selected + page),
-            (Key::U, true) | (Key::PageUp, false) => k.selected = k.selected.saturating_sub(page),
+            (Key::J | Key::ArrowDown, false) => {
+                moved(k, k.selected + 1);
+                k.scroll_to = true;
+            }
+            (Key::K | Key::ArrowUp, false) => {
+                k.selected = k.selected.saturating_sub(1);
+                k.scroll_to = true;
+            }
+            (Key::G, false) if modifiers.shift => {
+                moved(k, rows.saturating_sub(1));
+                k.scroll_to = true;
+            }
+            (Key::G, false) | (Key::Home, false) => {
+                k.selected = 0;
+                k.scroll_to = true;
+            }
+            (Key::End, false) => {
+                moved(k, rows.saturating_sub(1));
+                k.scroll_to = true;
+            }
+            (Key::D, true) | (Key::PageDown, false) => {
+                moved(k, k.selected + page);
+                k.scroll_to = true;
+            }
+            (Key::U, true) | (Key::PageUp, false) => {
+                k.selected = k.selected.saturating_sub(page);
+                k.scroll_to = true;
+            }
             (Key::Slash, false) => {
                 k.typing = Typing::Filter;
                 k.line = k.filter.clone();
@@ -839,6 +971,42 @@ fn keys(app: &mut QellApp, ctx: &egui::Context) {
             (Key::N, false) => app.k8s.set(Listing::new("namespaces", None), ctx),
             (Key::C, false) => show_contexts(app, ctx),
             _ => {}
+        }
+    }
+}
+
+/// Moving about `kubectl describe`, and Esc back to the list.
+fn text_keys(app: &mut QellApp, ctx: &egui::Context) {
+    let page = app.k8s.page;
+    let events = ctx.input(|i| i.events.clone());
+    let Some(view) = &app.k8s.text else { return };
+    let last = view.lines.len().saturating_sub(1);
+    let mut at = view.at;
+    let mut back = false;
+    for event in events {
+        let egui::Event::Key { key, pressed: true, modifiers, .. } = event else { continue };
+        let ctrl = modifiers.ctrl || modifiers.command;
+        match (key, ctrl) {
+            (Key::J | Key::ArrowDown, false) => at = (at + 1).min(last),
+            (Key::K | Key::ArrowUp, false) => at = at.saturating_sub(1),
+            (Key::G, false) if modifiers.shift => at = last,
+            (Key::G, false) | (Key::Home, false) => at = 0,
+            (Key::End, false) => at = last,
+            (Key::D, true) | (Key::PageDown, false) => at = (at + page).min(last),
+            (Key::U, true) | (Key::PageUp, false) => at = at.saturating_sub(page),
+            (Key::Escape, false) | (Key::Q, false) => back = true,
+            _ => {}
+        }
+    }
+    if back {
+        app.k8s.text = None;
+        app.k8s.scroll_to = true;
+        return;
+    }
+    if let Some(view) = &mut app.k8s.text {
+        if view.at != at {
+            view.at = at;
+            app.k8s.scroll_to = true;
         }
     }
 }
@@ -1029,28 +1197,26 @@ fn fetch_object(app: &mut QellApp, what: Shown, ctx: &egui::Context) {
 
 /// Put what came back in a tab. The panel steps aside, since it covers
 /// the editor; its shortcut brings it back as it was.
-fn open_object_tab(app: &mut QellApp, what: Shown, object: &qell_k8s::Object, text: &str) {
+fn show_object(app: &mut QellApp, what: Shown, object: &qell_k8s::Object, text: &str) {
     let context = app.k8s.client.context.clone().or_else(|| app.k8s.context.clone()).unwrap_or_default();
     let place = match &object.namespace {
         Some(ns) => format!("{ns}/{}", object.slash()),
         None => object.slash(),
     };
     match what {
-        Shown::Describe => {
-            app.open_text_tab(format!("describe {place}"), text, Some("yaml"));
+        // Reading stays in the panel: `d` and `y` are a step in, like
+        // going from a namespace to its pods, and Esc comes back.
+        Shown::Describe | Shown::Yaml => {
+            let title = if what == Shown::Describe { format!("describe {place}") } else { format!("{place} yaml") };
+            app.k8s.text = Some(TextView { title, lines: text.lines().map(str::to_string).collect(), at: 0 });
+            app.k8s.scroll_to = true;
         }
-        Shown::Yaml => {
-            app.open_text_tab(format!("{place}.yaml"), text, Some("yaml"));
-        }
+        // Editing is the editor's job, so that one gets a tab.
         Shown::Edit => match app.open_manifest_tab(object.clone(), context, text) {
-            Ok(()) => {}
-            Err(e) => {
-                app.notify_error(format!("Cannot open the manifest: {e}"));
-                return;
-            }
+            Ok(()) => close(app),
+            Err(e) => app.notify_error(format!("Cannot open the manifest: {e}")),
         },
     }
-    close(app);
 }
 
 /// Enter: what this row leads to.
@@ -1114,6 +1280,27 @@ fn trim_s(kind: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn the_list_only_scrolls_when_the_cursor_would_be_off_screen() {
+        // Ten rows of 20px fit in a 200px view.
+        assert_eq!(keep_visible(0.0, 200.0, 5, 20.0), 0.0);
+        // Row 12 is below it: scroll just far enough.
+        assert_eq!(keep_visible(0.0, 200.0, 12, 20.0), 60.0);
+        // Row 1 is above the top: bring it to the top.
+        assert_eq!(keep_visible(100.0, 200.0, 1, 20.0), 20.0);
+    }
+
+    #[test]
+    fn field_names_are_picked_out_only_at_the_start_of_a_line() {
+        assert_eq!(field_of("Name:         api-0"), Some(5));
+        assert_eq!(field_of("  Image:  nginx"), Some(8));
+        // A colon inside a value is part of the value.
+        assert_eq!(field_of("    Image: ghcr.io/momo/api:1.4"), Some(10));
+        assert_eq!(field_of("no colon here"), None);
+        // A YAML list item is a field too.
+        assert_eq!(field_of("  - name: app"), Some(9));
+    }
 
     #[test]
     fn long_values_are_cut_so_columns_never_collide() {

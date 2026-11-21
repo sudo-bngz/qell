@@ -277,6 +277,9 @@ pub struct QellApp {
     pub manifests: HashMap<PathBuf, Manifest>,
     /// A manifest that was just saved and is waiting to be applied.
     pending_apply: Option<PathBuf>,
+    /// A tab that came from the cluster view was closed or escaped out
+    /// of: show the list again where it was left.
+    pub back_to_cluster: bool,
     /// A change mark in the gutter was clicked: its line and where its
     /// Revert / Stage menu goes.
     pub hunk_menu: Option<(usize, egui::Pos2)>,
@@ -372,6 +375,7 @@ impl QellApp {
             k8s: views::k8s::K8sState::default(),
             manifests: HashMap::new(),
             pending_apply: None,
+            back_to_cluster: false,
             hunk_menu: None,
             tree_edit: None,
             confirm_delete: None,
@@ -426,8 +430,10 @@ impl QellApp {
         let mut ws = crate::session::Workspace::default();
         let mut paths = Vec::new();
         for (i, doc) in self.docs.iter().enumerate() {
-            // Untitled tabs and read-only diffs have nothing to reopen.
-            let Some(path) = doc.buffer.path().filter(|_| !doc.read_only) else { continue };
+            // Untitled tabs and read-only diffs have nothing to reopen,
+            // and a manifest is a scratch copy of something in a cluster:
+            // it is fetched again by `e`, not restored from a temp file.
+            let Some(path) = doc.buffer.path().filter(|_| !doc.read_only && !doc.from_cluster) else { continue };
             if i == self.active {
                 ws.active = ws.tabs.len();
             }
@@ -623,6 +629,7 @@ impl QellApp {
             return;
         }
         let doc = self.docs.remove(self.active);
+        self.back_to_cluster |= doc.from_cluster;
         self.lsp.did_close(&doc.buffer);
         if self.docs.is_empty() {
             self.docs.push(Document::untitled());
@@ -636,8 +643,10 @@ impl QellApp {
     pub fn close_tabs_where(&mut self, close: impl Fn(usize) -> bool) {
         let mut kept = Vec::new();
         let mut active = None;
+        let mut closed: Vec<bool> = Vec::new();
         for (i, doc) in std::mem::take(&mut self.docs).into_iter().enumerate() {
             if close(i) {
+                closed.push(doc.from_cluster);
                 self.lsp.did_close(&doc.buffer);
             } else {
                 if i == self.active {
@@ -653,6 +662,9 @@ impl QellApp {
         let fallback = self.active.min(kept.len()).saturating_sub(1);
         self.active = active.unwrap_or(fallback).min(kept.len() - 1);
         self.docs = kept;
+        // Closing the one cluster tab goes back to the list; closing a
+        // whole row of tabs is housekeeping, and shouldn't open a view.
+        self.back_to_cluster |= closed.as_slice() == [true];
         self.completion.open = false;
     }
 
@@ -875,14 +887,6 @@ impl QellApp {
 
     // ---- text from the cluster --------------------------------------------
 
-    /// Show text Qell produced (not a file) in a read-only tab.
-    pub fn open_text_tab(&mut self, label: String, text: &str, language: Option<&str>) {
-        self.drop_pristine_tab();
-        self.docs.push(Document::text_view(label, text, language));
-        self.active = self.docs.len() - 1;
-        self.focus = Focus::Editor;
-    }
-
     /// Open an object's manifest in a tab you can edit. It is a real file
     /// in a temp folder, so saving works as everywhere else — and because
     /// it is a manifest, saving also sends it back to the cluster.
@@ -897,12 +901,31 @@ impl QellApp {
             safe(&object.name)
         );
         let path = dir.join(name);
-        std::fs::write(&path, text)?;
+        // Already open: don't write over edits that haven't been applied,
+        // and don't pile up a second tab for the same object.
         let label = format!("{} (manifest)", object.slash());
+        if let Some(i) = self.docs.iter().position(|d| d.buffer.path() == Some(path.as_path())) {
+            self.active = i;
+            self.focus = Focus::Editor;
+            if self.docs[i].buffer.is_dirty() {
+                self.notify("This manifest is already open, with changes you haven't applied.");
+            } else {
+                // Not touched since: show what the cluster has now.
+                std::fs::write(&path, text)?;
+                let mut doc = Document::open(path.clone())?;
+                doc.label = Some(label);
+                doc.from_cluster = true;
+                self.docs[i] = doc;
+                self.manifests.insert(path, Manifest { object, context });
+            }
+            return Ok(());
+        }
+        std::fs::write(&path, text)?;
         self.manifests.insert(path.clone(), Manifest { object, context });
         self.drop_pristine_tab();
         let mut doc = Document::open(path)?;
         doc.label = Some(label);
+        doc.from_cluster = true;
         self.docs.push(doc);
         self.active = self.docs.len() - 1;
         self.focus = Focus::Editor;
@@ -2700,6 +2723,9 @@ impl eframe::App for QellApp {
         }
         if let Some(path) = self.pending_apply.take() {
             self.apply_manifest(path, ctx);
+        }
+        if std::mem::take(&mut self.back_to_cluster) {
+            views::k8s::open(self, ctx);
         }
         // The cluster view's workers answer even when it is hidden (an
         // apply started from a manifest tab), so they are drained here
