@@ -219,6 +219,19 @@ impl Document {
         doc
     }
 
+    /// A read-only tab of text Qell produced rather than read from a
+    /// file (`kubectl describe`, an object's YAML).
+    pub fn text_view(label: String, text: &str, language: Option<&str>) -> Self {
+        let mut buffer = Buffer::from_text(text, None);
+        if let Some(id) = language {
+            buffer.set_language(Some(id.to_string()));
+        }
+        let mut doc = Self::new(buffer);
+        doc.read_only = true;
+        doc.label = Some(label);
+        doc
+    }
+
     pub fn untitled() -> Self {
         Self::new(Buffer::empty())
     }

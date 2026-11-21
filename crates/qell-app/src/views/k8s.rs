@@ -31,7 +31,21 @@ enum Msg {
     Table(Listing, Box<Table>),
     Failed(Listing, Error),
     Info(Box<qell_k8s::Info>),
+    /// `kubectl describe`, the YAML, or a manifest to edit.
+    Text(Shown, Box<qell_k8s::Object>, String),
+    TextFailed(String),
+    /// What `kubectl apply` said about a saved manifest.
+    Applied(Result<String, String>),
     Contexts(Vec<String>, Option<String>),
+}
+
+/// What `d`, `y` and `e` fetch about the selected object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shown {
+    Describe,
+    Yaml,
+    /// The manifest, in a tab you can change and save back.
+    Edit,
 }
 
 /// What the bottom line is collecting, if anything.
@@ -61,6 +75,9 @@ pub struct K8sState {
     pub filter: String,
     /// What is being typed on the bottom line.
     line: String,
+    /// The completion offered for it, and which one is shown.
+    matches: Vec<String>,
+    match_at: usize,
     fetched: Option<Instant>,
     pub contexts: Vec<String>,
     pub context: Option<String>,
@@ -88,6 +105,8 @@ impl Default for K8sState {
             selected: 0,
             filter: String::new(),
             line: String::new(),
+            matches: Vec::new(),
+            match_at: 0,
             fetched: None,
             contexts: Vec::new(),
             context: None,
@@ -173,6 +192,22 @@ impl K8sState {
         }
     }
 
+    /// Send a manifest file back to the cluster on a worker thread.
+    pub fn apply(&mut self, client: Client, path: std::path::PathBuf, what: String, ctx: &egui::Context) {
+        let (tx, rx) = channel();
+        let ctx2 = ctx.clone();
+        self.loading = true;
+        let spawned = std::thread::Builder::new().name("kubectl-apply".into()).spawn(move || {
+            let said = client.apply(&path).map(|out| if out.is_empty() { format!("Applied {what}") } else { out });
+            let _ = tx.send(Msg::Applied(said.map_err(|e| e.to_string())));
+            ctx2.request_repaint();
+        });
+        match spawned {
+            Ok(_) => self.jobs.push(rx),
+            Err(_) => self.loading = false,
+        }
+    }
+
     /// Show `listing`, remembering where we were so Esc comes back.
     fn go(&mut self, listing: Listing, ctx: &egui::Context) {
         self.stack.push((self.listing.clone(), self.selected));
@@ -231,38 +266,15 @@ pub fn close(app: &mut QellApp) {
 /// Take whatever the worker finished, and re-read the list when it is
 /// time. Called once a frame while the panel is open.
 pub fn update(app: &mut QellApp, ctx: &egui::Context) {
+    // The answers are taken first, then acted on: opening a tab or
+    // saying something needs the whole app, which the loop holds.
+    let mut received: Vec<Msg> = Vec::new();
     let mut done = Vec::new();
     for (i, rx) in app.k8s.jobs.iter().enumerate() {
         match rx.try_recv() {
             Ok(msg) => {
                 done.push(i);
-                match msg {
-                    // An answer to a listing we have since left is dropped.
-                    Msg::Table(listing, table) if listing == app.k8s.listing => {
-                        app.k8s.table = *table;
-                        app.k8s.error = None;
-                        app.k8s.loading = false;
-                        let rows = app.k8s.visible().len();
-                        app.k8s.selected = app.k8s.selected.min(rows.saturating_sub(1));
-                    }
-                    Msg::Failed(listing, e) if listing == app.k8s.listing => {
-                        app.k8s.blocked = e == Error::NotInstalled;
-                        app.k8s.error = Some(e.to_string());
-                        app.k8s.loading = false;
-                    }
-                    Msg::Info(info) => {
-                        // A cluster that has just said it has no metrics
-                        // keeps that answer, so the next read doesn't ask again.
-                        app.k8s.info = *info;
-                    }
-                    Msg::Contexts(list, current) => {
-                        app.k8s.contexts = list;
-                        if app.k8s.client.context.is_none() {
-                            app.k8s.context = current;
-                        }
-                    }
-                    _ => app.k8s.loading = false,
-                }
+                received.push(msg);
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => done.push(i),
             Err(std::sync::mpsc::TryRecvError::Empty) => {}
@@ -270,6 +282,50 @@ pub fn update(app: &mut QellApp, ctx: &egui::Context) {
     }
     for i in done.into_iter().rev() {
         app.k8s.jobs.remove(i);
+    }
+    for msg in received {
+        match msg {
+            // An answer to a listing we have since left is dropped.
+            Msg::Table(listing, table) if listing == app.k8s.listing => {
+                app.k8s.table = *table;
+                app.k8s.error = None;
+                app.k8s.loading = false;
+                let rows = app.k8s.visible().len();
+                app.k8s.selected = app.k8s.selected.min(rows.saturating_sub(1));
+            }
+            Msg::Failed(listing, e) if listing == app.k8s.listing => {
+                app.k8s.blocked = e == Error::NotInstalled;
+                app.k8s.error = Some(e.to_string());
+                app.k8s.loading = false;
+            }
+            Msg::Text(what, object, text) => {
+                app.k8s.loading = false;
+                open_object_tab(app, what, &object, &text);
+            }
+            Msg::Applied(result) => {
+                app.k8s.loading = false;
+                match result {
+                    Ok(said) => app.notify(if said.is_empty() { "Applied.".to_string() } else { said }),
+                    Err(e) => app.notify_error(format!("kubectl apply: {}", e.lines().next().unwrap_or(&e))),
+                }
+            }
+            Msg::TextFailed(message) => {
+                app.k8s.loading = false;
+                app.notify_error(message);
+            }
+            Msg::Info(info) => {
+                // A cluster that has just said it has no metrics
+                // keeps that answer, so the next read doesn't ask again.
+                app.k8s.info = *info;
+            }
+            Msg::Contexts(list, current) => {
+                app.k8s.contexts = list;
+                if app.k8s.client.context.is_none() {
+                    app.k8s.context = current;
+                }
+            }
+            _ => app.k8s.loading = false,
+        }
     }
     // Live only while the panel has the keyboard: leaving it stops the
     // polling, and nothing runs when Qell is doing something else. The
@@ -291,7 +347,6 @@ pub fn update(app: &mut QellApp, ctx: &egui::Context) {
 
 /// The whole panel, drawn where the editor would be.
 pub fn show(app: &mut QellApp, ui: &mut egui::Ui, ctx: &egui::Context) {
-    update(app, ctx);
     if app.focus == Focus::K8s {
         keys(app, ctx);
     }
@@ -462,14 +517,16 @@ fn header(app: &mut QellApp, ui: &mut egui::Ui, font: &FontId, colors: &Colors) 
         ("<r>", "Refresh"),
         ("<?>", "Help"),
     ];
-    let keys_right = [
+    let keys_mid = [
+        ("<d>", "Describe"),
+        ("<y>", "YAML"),
+        ("<e>", "Edit"),
         ("<:>", "Resource"),
         ("</>", "Filter"),
-        ("<0-9>", "Namespace"),
-        ("<n>", "Namespaces"),
-        ("<c>", "Contexts"),
-        ("<:q>", "Close"),
+        ("<tab>", "Complete"),
+        ("", ""),
     ];
+    let keys_right = [("<0-9>", "Namespace"), ("<n>", "Namespaces"), ("<c>", "Contexts"), ("<:q>", "Close"), ("", ""), ("", "")];
 
     let char_w = ui.fonts_mut(|f| f.glyph_width(font, 'M'));
     let line_h = ui.fonts_mut(|f| f.row_height(font));
@@ -491,6 +548,8 @@ fn header(app: &mut QellApp, ui: &mut egui::Ui, font: &FontId, colors: &Colors) 
     let ns_w = ns_key_w + widest(&mut namespaces.iter().map(|(_, n, _)| elide(n, 20).chars().count())) + 3;
     let key_w = widest(&mut keys_left.iter().map(|(k, _)| k.chars().count())) + 1;
     let left_w = key_w + widest(&mut keys_left.iter().map(|(_, w)| w.chars().count())) + 2;
+    let mid_key_w = widest(&mut keys_mid.iter().map(|(k, _)| k.chars().count())) + 1;
+    let mid_w = mid_key_w + widest(&mut keys_mid.iter().map(|(_, w)| w.chars().count())) + 2;
     let right_key_w = widest(&mut keys_right.iter().map(|(k, _)| k.chars().count())) + 1;
     let right_w = right_key_w + widest(&mut keys_right.iter().map(|(_, w)| w.chars().count())) + 2;
 
@@ -516,6 +575,13 @@ fn header(app: &mut QellApp, ui: &mut egui::Ui, font: &FontId, colors: &Colors) 
         }
         x += left_w;
         keys_shown = true;
+    }
+    if columns >= x + mid_w {
+        for (row, (key, what)) in keys_mid.iter().enumerate() {
+            put(at(x, row), key, colors.key);
+            put(at(x + mid_key_w, row), what, colors.dim);
+        }
+        x += mid_w;
     }
     if columns >= x + right_w {
         for (row, (key, what)) in keys_right.iter().enumerate() {
@@ -604,6 +670,30 @@ fn bottom_line(
 ) {
     let painter = ui.painter_at(rect);
     let at = Pos2::new(rect.left() + 8.0, rect.top() + 2.0);
+    // While typing, the first match is shown greyed out after what you
+    // typed: Tab takes it, Tab again steps to the next.
+    if app.k8s.typing != Typing::No {
+        let sign = if app.k8s.typing == Typing::Filter { '/' } else { ':' };
+        let typed = format!("{sign}{}", app.k8s.line);
+        let mut job = LayoutJob::default();
+        job.append(&typed, 0.0, TextFormat { font_id: font.clone(), color: accent, ..Default::default() });
+        let suggestion = app.k8s.matches.get(app.k8s.match_at).cloned().unwrap_or_default();
+        if let Some(rest) = suggestion.strip_prefix(app.k8s.line.trim()) {
+            job.append(rest, 0.0, TextFormat { font_id: font.clone(), color: dim, ..Default::default() });
+        }
+        let others: Vec<&str> = app.k8s.matches.iter().map(String::as_str).collect();
+        if others.len() > 1 {
+            let rest = others.join("  ");
+            job.append(
+                &format!("     {rest}"),
+                0.0,
+                TextFormat { font_id: font.clone(), color: dim.gamma_multiply(0.8), ..Default::default() },
+            );
+        }
+        let galley = ui.fonts_mut(|f| f.layout_job(job));
+        painter.galley(at, galley, accent);
+        return;
+    }
     let (text, color) = match (app.k8s.typing, &app.k8s.error) {
         (Typing::Filter, _) => (format!("/{}", app.k8s.line), accent),
         (Typing::Command, _) => (format!(":{}", app.k8s.line), accent),
@@ -630,8 +720,11 @@ fn help_overlay(ctx: &egui::Context, font: &FontId, text: Color32, dim: Color32)
         ("Ctrl+d / Ctrl+u", "half a page"),
         ("Enter", "go in — a namespace, a workload, a node, a pod"),
         ("Esc", "back, or clear the filter"),
+        ("d / y", "describe it / its YAML, in a read-only tab"),
+        ("e", "edit the manifest; saving applies it to the cluster"),
         ("/", "filter the rows"),
         (":", "a resource (:po, :svc, :ns, :ctx) or :q to close"),
+        ("Tab", "take the suggestion, again for the next"),
         ("0", "every namespace"),
         ("n / c", "namespaces / contexts"),
         ("r", "refresh now"),
@@ -740,6 +833,9 @@ fn keys(app: &mut QellApp, ctx: &egui::Context) {
                     app.k8s.set(l, ctx);
                 }
             }
+            (Key::D, false) => fetch_object(app, Shown::Describe, ctx),
+            (Key::Y, false) => fetch_object(app, Shown::Yaml, ctx),
+            (Key::E, false) => fetch_object(app, Shown::Edit, ctx),
             (Key::N, false) => app.k8s.set(Listing::new("namespaces", None), ctx),
             (Key::C, false) => show_contexts(app, ctx),
             _ => {}
@@ -752,24 +848,48 @@ fn typing_keys(app: &mut QellApp, ctx: &egui::Context) {
     let events = ctx.input(|i| i.events.clone());
     for event in events {
         match event {
-            egui::Event::Text(t) => app.k8s.line.push_str(&t),
+            egui::Event::Text(t) => {
+                app.k8s.line.push_str(&t);
+                suggest(app);
+            }
             egui::Event::Key { key: Key::Backspace, pressed: true, .. } => {
                 app.k8s.line.pop();
+                suggest(app);
+            }
+            // Tab takes the suggestion; again steps to the next one.
+            egui::Event::Key { key: Key::Tab, pressed: true, modifiers, .. } => {
+                if app.k8s.matches.is_empty() {
+                    continue;
+                }
+                let back = modifiers.shift;
+                let n = app.k8s.matches.len();
+                if app.k8s.line.trim() == app.k8s.matches[app.k8s.match_at] {
+                    app.k8s.match_at = if back { (app.k8s.match_at + n - 1) % n } else { (app.k8s.match_at + 1) % n };
+                }
+                app.k8s.line = app.k8s.matches[app.k8s.match_at].clone();
+                if app.k8s.typing == Typing::Filter {
+                    app.k8s.filter = app.k8s.line.clone();
+                }
             }
             egui::Event::Key { key: Key::Escape, pressed: true, .. } => {
                 app.k8s.typing = Typing::No;
                 app.k8s.line.clear();
+                app.k8s.matches.clear();
             }
             egui::Event::Key { key: Key::Enter, pressed: true, .. } => {
+                // Enter on a half-typed word takes the suggestion with it,
+                // so `:dep` then Enter lists deployments.
+                let suggestion = app.k8s.matches.get(app.k8s.match_at).cloned();
                 let line = std::mem::take(&mut app.k8s.line);
                 let mode = app.k8s.typing;
                 app.k8s.typing = Typing::No;
+                app.k8s.matches.clear();
                 match mode {
                     Typing::Filter => {
                         app.k8s.filter = line;
                         app.k8s.selected = 0;
                     }
-                    Typing::Command => run_command(app, &line, ctx),
+                    Typing::Command => run_command(app, &suggestion.unwrap_or(line), ctx),
                     Typing::No => {}
                 }
             }
@@ -781,6 +901,40 @@ fn typing_keys(app: &mut QellApp, ctx: &egui::Context) {
         app.k8s.filter = app.k8s.line.clone();
         app.k8s.selected = 0;
     }
+}
+
+/// What the line could become: resource kinds after `:`, and the names in
+/// front of you when filtering.
+fn suggest(app: &mut QellApp) {
+    let typed = app.k8s.line.trim().to_string();
+    app.k8s.match_at = 0;
+    app.k8s.matches = if typed.is_empty() {
+        Vec::new()
+    } else if app.k8s.typing == Typing::Command {
+        let mut matches = qell_k8s::complete(&typed, &app.k8s.info.kinds);
+        // The commands that aren't resources belong in the list too.
+        for word in ["q", "ctx"] {
+            if word.starts_with(&typed.to_lowercase()) {
+                matches.insert(0, word.to_string());
+            }
+        }
+        matches
+    } else {
+        // Filtering: the names on screen, those that contain what is
+        // typed, since that is how the filter itself matches.
+        let needle = typed.to_lowercase();
+        let mut names: Vec<String> = app
+            .k8s
+            .table
+            .rows
+            .iter()
+            .map(|r| r.name.clone())
+            .filter(|n| n.to_lowercase().contains(&needle) && n.to_lowercase() != needle)
+            .collect();
+        names.dedup();
+        names.truncate(12);
+        names
+    };
 }
 
 /// `:pods`, `:po`, `:ns`, `:ctx`, `:q`.
@@ -822,6 +976,81 @@ fn show_contexts(app: &mut QellApp, ctx: &egui::Context) {
     app.k8s.selected = 0;
     app.k8s.filter.clear();
     app.k8s.error = None;
+}
+
+/// The object the cursor is on, as kubectl names it.
+fn selected_object(app: &QellApp) -> Option<qell_k8s::Object> {
+    let k = &app.k8s;
+    let row = k.visible().get(k.selected).and_then(|i| k.table.rows.get(*i))?;
+    if k.listing.kind == CONTEXTS {
+        return None;
+    }
+    // Inside a pod's containers, the object is the pod itself.
+    if let Some(pod) = &k.listing.containers_of {
+        return Some(qell_k8s::Object { kind: "pods".into(), name: pod.clone(), namespace: k.listing.namespace.clone() });
+    }
+    Some(qell_k8s::Object {
+        kind: k.listing.kind.clone(),
+        name: row.name.clone(),
+        namespace: row.namespace.clone().or_else(|| k.listing.namespace.clone()),
+    })
+}
+
+/// `d`, `y`, `e`: read the object on a worker and open it as a tab.
+fn fetch_object(app: &mut QellApp, what: Shown, ctx: &egui::Context) {
+    let Some(object) = selected_object(app) else {
+        app.notify("Nothing to open here.");
+        return;
+    };
+    let client = app.k8s.client.clone();
+    let (tx, rx) = channel();
+    let ctx2 = ctx.clone();
+    app.k8s.loading = true;
+    let spawned = std::thread::Builder::new().name("kubectl-object".into()).spawn(move || {
+        let result = match what {
+            Shown::Describe => client.describe(&object),
+            Shown::Yaml | Shown::Edit => client.manifest(&object),
+        };
+        let msg = match result {
+            Ok(text) => Msg::Text(what, Box::new(object), text),
+            Err(e) => Msg::TextFailed(e.to_string()),
+        };
+        let _ = tx.send(msg);
+        ctx2.request_repaint();
+    });
+    match spawned {
+        Ok(_) => app.k8s.jobs.push(rx),
+        Err(e) => {
+            app.k8s.loading = false;
+            app.notify_error(format!("cannot run kubectl: {e}"));
+        }
+    }
+}
+
+/// Put what came back in a tab. The panel steps aside, since it covers
+/// the editor; its shortcut brings it back as it was.
+fn open_object_tab(app: &mut QellApp, what: Shown, object: &qell_k8s::Object, text: &str) {
+    let context = app.k8s.client.context.clone().or_else(|| app.k8s.context.clone()).unwrap_or_default();
+    let place = match &object.namespace {
+        Some(ns) => format!("{ns}/{}", object.slash()),
+        None => object.slash(),
+    };
+    match what {
+        Shown::Describe => {
+            app.open_text_tab(format!("describe {place}"), text, Some("yaml"));
+        }
+        Shown::Yaml => {
+            app.open_text_tab(format!("{place}.yaml"), text, Some("yaml"));
+        }
+        Shown::Edit => match app.open_manifest_tab(object.clone(), context, text) {
+            Ok(()) => {}
+            Err(e) => {
+                app.notify_error(format!("Cannot open the manifest: {e}"));
+                return;
+            }
+        },
+    }
+    close(app);
 }
 
 /// Enter: what this row leads to.

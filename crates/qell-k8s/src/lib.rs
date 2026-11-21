@@ -132,6 +132,44 @@ impl Default for Client {
     }
 }
 
+/// A plural kind as one of it, for labels: `pods` → `pod`, `ingresses` →
+/// `ingress`, `networkpolicies` → `networkpolicy`.
+pub fn singular(kind: &str) -> String {
+    let stem = kind.split('.').next().unwrap_or(kind);
+    if let Some(head) = stem.strip_suffix("ies").filter(|h| !h.is_empty()) {
+        return format!("{head}y");
+    }
+    for ending in ["ses", "xes", "ches", "shes"] {
+        if stem.ends_with(ending) {
+            return stem[..stem.len() - 2].to_string();
+        }
+    }
+    stem.strip_suffix('s').unwrap_or(stem).to_string()
+}
+
+/// What one object is called, for the commands below.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Object {
+    pub kind: String,
+    pub name: String,
+    pub namespace: Option<String>,
+}
+
+impl Object {
+    /// `pod/api-0`, the way kubectl and k9s write it.
+    pub fn slash(&self) -> String {
+        format!("{}/{}", singular(&self.kind), self.name)
+    }
+
+    fn args(&self) -> Vec<String> {
+        let mut args = vec![self.kind.clone(), self.name.clone()];
+        if let Some(ns) = &self.namespace {
+            args.extend(["-n".to_string(), ns.clone()]);
+        }
+        args
+    }
+}
+
 impl Client {
     pub fn new(bin: impl Into<String>) -> Self {
         Self { bin: bin.into(), context: None }
@@ -189,6 +227,28 @@ impl Client {
         }
     }
 
+    /// `kubectl describe`, as the terminal would print it.
+    pub fn describe(&self, object: &Object) -> Result<String, Error> {
+        let mut args = vec!["describe".to_string()];
+        args.extend(object.args());
+        self.run(&args.iter().map(String::as_str).collect::<Vec<_>>())
+    }
+
+    /// The object's manifest, as YAML.
+    pub fn manifest(&self, object: &Object) -> Result<String, Error> {
+        let mut args = vec!["get".to_string()];
+        args.extend(object.args());
+        args.extend(["-o".to_string(), "yaml".to_string()]);
+        self.run(&args.iter().map(String::as_str).collect::<Vec<_>>())
+    }
+
+    /// Send a manifest file back to the cluster. Returns what kubectl
+    /// says it did ("deployment.apps/api configured").
+    pub fn apply(&self, path: &std::path::Path) -> Result<String, Error> {
+        let path = path.to_string_lossy().into_owned();
+        self.run(&["apply", "-f", &path]).map(|out| out.trim().to_string())
+    }
+
     /// The contexts in the kubeconfig, and which one is current.
     pub fn contexts(&self) -> Result<(Vec<String>, Option<String>), Error> {
         let names = self.run(&["config", "get-contexts", "-o", "name"])?;
@@ -230,6 +290,32 @@ impl Client {
     }
 }
 
+/// The kinds a cluster serves and the ones Qell knows, for completing
+/// what you type after `:`. Matching ignores case; a short name brings
+/// in its full kind, so `svc` offers `services`.
+pub fn complete(prefix: &str, cluster_kinds: &[String]) -> Vec<String> {
+    let prefix = prefix.trim().to_lowercase();
+    let mut out: Vec<String> = Vec::new();
+    let mut add = |name: &str| {
+        if !out.iter().any(|k| k == name) {
+            out.push(name.to_string());
+        }
+    };
+    // What Qell knows comes first: those are the kinds with real columns.
+    for kind in KINDS {
+        if kind.name.starts_with(&prefix) || kind.aliases.iter().any(|a| a.starts_with(&prefix)) {
+            add(kind.name);
+        }
+    }
+    let mut rest: Vec<&String> = cluster_kinds.iter().filter(|k| k.to_lowercase().starts_with(&prefix)).collect();
+    rest.sort();
+    for kind in rest {
+        add(kind);
+    }
+    out.truncate(12);
+    out
+}
+
 /// What the header shows about the cluster itself. Everything here is
 /// best effort: a cluster without metrics-server still gets a header.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -243,6 +329,8 @@ pub struct Info {
     pub mem: Option<u8>,
     /// For the `<0>`…`<9>` namespace keys.
     pub namespaces: Vec<String>,
+    /// Every kind this cluster serves, CRDs included, for completion.
+    pub kinds: Vec<String>,
     /// metrics-server isn't there, so don't keep asking it.
     pub no_metrics: bool,
 }
@@ -269,6 +357,21 @@ impl Client {
                     .unwrap_or_default();
                 info.namespaces.sort();
             }
+        }
+        // `api-resources` talks to the API server's discovery endpoint,
+        // so a cluster with CRDs completes its own kinds too.
+        if let Ok(text) = self.run(&["api-resources", "-o", "name"]) {
+            info.kinds = text.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect();
+            // `events.events.k8s.io` also completes as `events`.
+            let bare: Vec<String> =
+                info.kinds.iter().filter_map(|k| k.split_once('.')).map(|(head, _)| head.to_string()).collect();
+            for name in bare {
+                if !info.kinds.contains(&name) {
+                    info.kinds.push(name);
+                }
+            }
+            info.kinds.sort();
+            info.kinds.dedup();
         }
         if with_metrics {
             match self.run(&["top", "nodes", "--no-headers"]) {
@@ -389,6 +492,30 @@ mod tests {
         assert_eq!(parse_top(top), (Some(15), Some(40)));
         // metrics-server missing: kubectl prints nothing useful.
         assert_eq!(parse_top("error: Metrics API not available"), (None, None));
+    }
+
+    #[test]
+    fn completion_offers_known_kinds_first_then_the_clusters_own() {
+        let cluster = vec!["pods".to_string(), "poddisruptionbudgets".to_string(), "widgets.example.com".to_string()];
+        assert_eq!(complete("po", &cluster), vec!["pods", "poddisruptionbudgets"]);
+        // A short name brings in the kind it stands for.
+        assert_eq!(complete("svc", &cluster), vec!["services"]);
+        assert_eq!(complete("wid", &cluster), vec!["widgets.example.com"]);
+        assert!(complete("zzz", &cluster).is_empty());
+        // Everything matches an empty prefix, but not endlessly.
+        assert_eq!(complete("", &cluster).len(), 12);
+    }
+
+    #[test]
+    fn an_object_is_named_the_way_kubectl_writes_it() {
+        let pod = Object { kind: "pods".into(), name: "api-0".into(), namespace: Some("web".into()) };
+        assert_eq!(pod.slash(), "pod/api-0");
+        assert_eq!(pod.args(), ["pods", "api-0", "-n", "web"]);
+        let node = Object { kind: "nodes".into(), name: "ip-10".into(), namespace: None };
+        assert_eq!(node.slash(), "node/ip-10");
+        assert_eq!(node.args(), ["nodes", "ip-10"]);
+        let ingress = Object { kind: "ingresses".into(), name: "web".into(), namespace: None };
+        assert_eq!(ingress.slash(), "ingress/web");
     }
 
     #[test]

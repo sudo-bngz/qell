@@ -172,6 +172,14 @@ bottom, and language-server completion for the languages you actually use.
   `CrashLoopBackOff` pod and a `NotReady` node in red, a rollout still
   catching up in yellow.
 
+  `d` describes the object and `y` shows its YAML, each in a read-only
+  Qell tab; `e` opens its manifest in an ordinary tab, and **saving that
+  tab applies it to the cluster** — a strip above the text says which
+  object and context it is bound to, and kubectl's own words come back in
+  the status bar. Typing after `:` suggests resource kinds, the cluster's
+  CRDs included (`Tab` takes the suggestion, `Tab` again cycles), and
+  typing after `/` suggests the names in front of you.
+
   The header is k9s's: context, cluster, user, the Qell and Kubernetes
   revisions, cluster CPU and memory when metrics-server is there, the
   namespaces on `<0>`…`<9>`, and the keys — dropping a column at a time as
