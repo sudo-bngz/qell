@@ -329,9 +329,13 @@ pub fn run(dir: &Path, args: &[&str], input: Option<&str>) -> Result<String, Str
 /// The repository holding `path`, and `path` relative to its root (as
 /// git spells it, with forward slashes). `None` outside a repository.
 pub fn repo_of(path: &Path) -> Option<(PathBuf, String)> {
+    // Both sides are resolved first: git prints the real path, and on
+    // macOS a temporary folder is reached through a symlink.
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let dir = path.parent()?;
     let root = run(dir, &["rev-parse", "--show-toplevel"], None).ok()?;
     let root = PathBuf::from(root.trim());
+    let root = std::fs::canonicalize(&root).unwrap_or(root);
     let rel = path.strip_prefix(&root).ok()?;
     let rel = rel.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");
     (!rel.is_empty()).then_some((root, rel))
