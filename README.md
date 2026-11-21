@@ -172,6 +172,12 @@ bottom, and language-server completion for the languages you actually use.
   `CrashLoopBackOff` pod and a `NotReady` node in red, a rollout still
   catching up in yellow.
 
+  `Ctrl+D` deletes what the cursor is on, after a dialog that says what it
+  is about to delete and lets you choose the propagation (background,
+  foreground, orphan) and whether to force it — `tab` moves, `space`
+  changes, `enter` confirms, `esc` cancels. It deletes in the context the
+  list is showing, and kubectl's own words come back in the status bar.
+
   `s` opens a shell in the pod (bash where the image has it, sh
   otherwise), `l` follows its logs and `Shift+L` the previous
   container's, and `f` forwards a port, asking which with the object's own

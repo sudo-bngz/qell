@@ -132,6 +132,53 @@ impl Default for Client {
     }
 }
 
+/// What happens to what an object owns when it is deleted, which is
+/// `kubectl delete --cascade`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Cascade {
+    /// Delete it, and let the controller clean up behind it.
+    #[default]
+    Background,
+    /// Wait for everything it owns to go first.
+    Foreground,
+    /// Leave what it owns behind.
+    Orphan,
+}
+
+impl Cascade {
+    pub fn label(self) -> &'static str {
+        match self {
+            Cascade::Background => "Background",
+            Cascade::Foreground => "Foreground",
+            Cascade::Orphan => "Orphan",
+        }
+    }
+
+    /// The next one, for stepping through the field.
+    pub fn next(self, back: bool) -> Self {
+        match (self, back) {
+            (Cascade::Background, false) | (Cascade::Orphan, true) => Cascade::Foreground,
+            (Cascade::Foreground, false) | (Cascade::Background, true) => Cascade::Orphan,
+            (Cascade::Orphan, false) | (Cascade::Foreground, true) => Cascade::Background,
+        }
+    }
+}
+
+/// What `kubectl delete` is given for this object. Force is the
+/// no-waiting kind: the API server forgets it without hearing from the
+/// kubelet, which is k9s's "kill".
+pub fn delete_args(object: &Object, cascade: Cascade, force: bool) -> Vec<String> {
+    let mut args = vec!["delete".to_string(), object.kind.clone(), object.name.clone()];
+    if let Some(ns) = &object.namespace {
+        args.extend(["-n".to_string(), ns.clone()]);
+    }
+    args.push(format!("--cascade={}", cascade.label().to_lowercase()));
+    if force {
+        args.extend(["--force".to_string(), "--grace-period=0".to_string()]);
+    }
+    args
+}
+
 /// A plural kind as one of it, for labels: `pods` → `pod`, `ingresses` →
 /// `ingress`, `networkpolicies` → `networkpolicy`.
 pub fn singular(kind: &str) -> String {
@@ -247,6 +294,12 @@ impl Client {
     pub fn apply(&self, path: &std::path::Path) -> Result<String, Error> {
         let path = path.to_string_lossy().into_owned();
         self.run(&["apply", "-f", &path]).map(|out| out.trim().to_string())
+    }
+
+    /// Delete one object. Returns what kubectl says it did.
+    pub fn delete(&self, object: &Object, cascade: Cascade, force: bool) -> Result<String, Error> {
+        let args = delete_args(object, cascade, force);
+        self.run(&args.iter().map(String::as_str).collect::<Vec<_>>()).map(|out| out.trim().to_string())
     }
 
     /// The contexts in the kubeconfig, and which one is current.
@@ -562,6 +615,30 @@ mod tests {
         // Nodes also print percentages, which are skipped.
         let nodes = tables::parse_usage("ip-10   520m   26%   5321Mi   41%\n", false);
         assert_eq!(nodes["ip-10"], tables::Usage { cpu_milli: 520, mem_bytes: 5321 * 1024 * 1024 });
+    }
+
+    #[test]
+    fn deleting_says_exactly_what_it_will_do() {
+        let pod = Object { kind: "pods".into(), name: "api-0".into(), namespace: Some("web".into()) };
+        assert_eq!(
+            delete_args(&pod, Cascade::Background, false),
+            ["delete", "pods", "api-0", "-n", "web", "--cascade=background"]
+        );
+        // Force is the no-waiting kind, which needs both flags.
+        let forced = delete_args(&pod, Cascade::Orphan, true);
+        assert_eq!(forced[5..], ["--cascade=orphan", "--force", "--grace-period=0"]);
+        // Cluster-wide kinds have no namespace to pass.
+        let node = Object { kind: "nodes".into(), name: "ip-10".into(), namespace: None };
+        assert_eq!(delete_args(&node, Cascade::Foreground, false), ["delete", "nodes", "ip-10", "--cascade=foreground"]);
+    }
+
+    #[test]
+    fn the_propagation_field_steps_both_ways() {
+        assert_eq!(Cascade::default(), Cascade::Background);
+        assert_eq!(Cascade::Background.next(false), Cascade::Foreground);
+        assert_eq!(Cascade::Foreground.next(false), Cascade::Orphan);
+        assert_eq!(Cascade::Orphan.next(false), Cascade::Background);
+        assert_eq!(Cascade::Background.next(true), Cascade::Orphan);
     }
 
     #[test]

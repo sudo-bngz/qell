@@ -39,7 +39,36 @@ enum Msg {
     TextFailed(String),
     /// What `kubectl apply` said about a saved manifest.
     Applied(Result<String, String>),
+    /// What `kubectl delete` said.
+    Deleted(Result<String, String>),
     Contexts(Vec<String>, Option<String>),
+}
+
+/// The delete dialog: what it will delete, and how.
+pub struct Confirm {
+    pub object: qell_k8s::Object,
+    pub cascade: qell_k8s::Cascade,
+    pub force: bool,
+    /// Which line the keys are on.
+    pub field: Field,
+}
+
+/// The rows of the dialog, in the order Tab walks them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Field {
+    Propagation,
+    Force,
+    Cancel,
+    Ok,
+}
+
+impl Field {
+    fn next(self, back: bool) -> Self {
+        let order = [Field::Propagation, Field::Force, Field::Cancel, Field::Ok];
+        let at = order.iter().position(|f| *f == self).unwrap_or(0);
+        let n = order.len();
+        order[if back { (at + n - 1) % n } else { (at + 1) % n }]
+    }
 }
 
 /// `kubectl describe` or an object's YAML, shown in the panel itself.
@@ -106,6 +135,8 @@ pub struct K8sState {
     /// `d` and `y` show their text here, over the table, the way k9s
     /// keeps everything in the one window.
     pub text: Option<TextView>,
+    /// The delete dialog, when it is up.
+    pub confirm: Option<Confirm>,
     /// The cursor moved by key: bring its row back on screen.
     scroll_to: bool,
     /// Where the list is scrolled to, to work out whether it has to move.
@@ -146,6 +177,7 @@ impl Default for K8sState {
             help: false,
             page: 20,
             text: None,
+            confirm: None,
             scroll_to: false,
             offset: 0.0,
             offset_x: 0.0,
@@ -381,6 +413,16 @@ pub fn update(app: &mut QellApp, ctx: &egui::Context) {
                 app.k8s.loading = false;
                 show_object(app, what, &object, &text);
             }
+            Msg::Deleted(result) => {
+                app.k8s.loading = false;
+                match result {
+                    Ok(said) => {
+                        app.notify(if said.is_empty() { "Deleted.".to_string() } else { said });
+                        app.k8s.fetch(ctx);
+                    }
+                    Err(e) => app.notify_error(format!("kubectl delete: {}", e.lines().next().unwrap_or(&e))),
+                }
+            }
             Msg::Applied(result) => {
                 app.k8s.loading = false;
                 match result {
@@ -576,6 +618,170 @@ pub fn show(app: &mut QellApp, ui: &mut egui::Ui, ctx: &egui::Context) {
     if app.k8s.help {
         help_overlay(ctx, &font, text, dim);
     }
+    if app.k8s.confirm.is_some() {
+        delete_dialog(app, ctx, &font, text, dim, accent, err);
+    }
+}
+
+/// k9s's delete box: a frame with its title on the border, what it is
+/// about to do, how to do it, and two buttons.
+#[allow(clippy::too_many_arguments)]
+fn delete_dialog(
+    app: &mut QellApp,
+    ctx: &egui::Context,
+    font: &FontId,
+    text: Color32,
+    dim: Color32,
+    accent: Color32,
+    error: Color32,
+) {
+    let Some(confirm) = &app.k8s.confirm else { return };
+    let where_ = match &confirm.object.namespace {
+        Some(ns) => format!("{ns}/{}", confirm.object.name),
+        None => confirm.object.name.clone(),
+    };
+    let question = format!("Delete {} {where_}?", confirm.object.kind);
+    let (cascade, force, field) = (confirm.cascade, confirm.force, confirm.field);
+    let background = app.palette.editor_bg;
+    let (mut chosen, mut run, mut cancel) = (None, false, false);
+
+    egui::Area::new(egui::Id::new("qell-k8s-delete"))
+        .order(egui::Order::Foreground)
+        .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+        .show(ctx, |ui| {
+            let frame = egui::Frame::new()
+                .fill(background)
+                .stroke(egui::Stroke::new(1.0_f32, accent))
+                .inner_margin(egui::Margin::symmetric(18, 12));
+            frame.show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 6.0;
+                ui.set_min_width(420.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(egui::RichText::new(&question).font(font.clone()).color(error));
+                });
+                ui.add_space(4.0);
+                // Two fields; the one the keys are on is marked.
+                let mut row = |ui: &mut egui::Ui, on: Field, name: &str, value: String| {
+                    let caret = if field == on { "›" } else { " " };
+                    let colour = if field == on { text } else { dim };
+                    let label = format!("{caret} {name:<14}{value}");
+                    let r = ui.add(egui::Button::new(egui::RichText::new(label).font(font.clone()).color(colour)).frame(false));
+                    if r.clicked() {
+                        chosen = Some(on);
+                    }
+                };
+                row(ui, Field::Propagation, "Propagation:", cascade.label().to_string());
+                row(ui, Field::Force, "Force:", if force { "yes".into() } else { String::new() });
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(ui.available_width() / 2.0 - 90.0);
+                    let button = |ui: &mut egui::Ui, on: Field, name: &str| {
+                        let (fg, bg) = if field == on { (background, accent) } else { (dim, Color32::TRANSPARENT) };
+                        ui.add(
+                            egui::Button::new(egui::RichText::new(format!("  {name}  ")).font(font.clone()).color(fg))
+                                .fill(bg)
+                                .corner_radius(2.0),
+                        )
+                        .clicked()
+                    };
+                    if button(ui, Field::Cancel, "Cancel") {
+                        cancel = true;
+                    }
+                    ui.add_space(12.0);
+                    if button(ui, Field::Ok, "OK") {
+                        run = true;
+                    }
+                });
+                ui.add_space(2.0);
+                ui.vertical_centered(|ui| {
+                    let hint = "tab moves   space changes   enter confirms   esc cancels";
+                    ui.label(egui::RichText::new(hint).font(font.clone()).color(dim.gamma_multiply(0.8)));
+                });
+            });
+        });
+
+    // The title sits on the frame's top border, as k9s draws it.
+    if let Some(rect) = ctx.memory(|m| m.area_rect(egui::Id::new("qell-k8s-delete"))) {
+        let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::new("qell-k8s-delete-title"));
+        let painter = ctx.layer_painter(layer);
+        let galley = ctx.fonts_mut(|f| f.layout_no_wrap("<Delete>".to_string(), font.clone(), error));
+        let at = Pos2::new(rect.center().x - galley.size().x / 2.0, rect.top() - galley.size().y / 2.0);
+        painter.rect_filled(Rect::from_min_size(at, galley.size()).expand2(Vec2::new(4.0, 0.0)), 0.0, background);
+        painter.galley(at, galley, error);
+    }
+
+    // Tab walks the rows, space changes the one you are on.
+    let events = ctx.input(|i| i.events.clone());
+    for event in events {
+        let egui::Event::Key { key, pressed: true, modifiers, .. } = event else { continue };
+        let Some(confirm) = &mut app.k8s.confirm else { return };
+        match key {
+            Key::Tab | Key::ArrowDown => confirm.field = confirm.field.next(modifiers.shift),
+            Key::ArrowUp => confirm.field = confirm.field.next(true),
+            Key::Space | Key::ArrowRight | Key::ArrowLeft => match confirm.field {
+                Field::Propagation => confirm.cascade = confirm.cascade.next(key == Key::ArrowLeft),
+                Field::Force => confirm.force = !confirm.force,
+                Field::Cancel => confirm.field = Field::Ok,
+                Field::Ok => confirm.field = Field::Cancel,
+            },
+            Key::Enter => match confirm.field {
+                Field::Cancel => cancel = true,
+                _ => run = true,
+            },
+            Key::Escape => cancel = true,
+            _ => {}
+        }
+    }
+    if let (Some(field), Some(confirm)) = (chosen, &mut app.k8s.confirm) {
+        // Clicking a field both moves to it and changes it.
+        confirm.field = field;
+        match field {
+            Field::Propagation => confirm.cascade = confirm.cascade.next(false),
+            Field::Force => confirm.force = !confirm.force,
+            _ => {}
+        }
+    }
+    if cancel {
+        app.k8s.confirm = None;
+    } else if run {
+        delete_now(app, ctx);
+    }
+}
+
+/// Send the delete the dialog agreed on.
+fn delete_now(app: &mut QellApp, ctx: &egui::Context) {
+    let Some(confirm) = app.k8s.confirm.take() else { return };
+    let client = app.k8s.client.clone();
+    let (object, cascade, force) = (confirm.object, confirm.cascade, confirm.force);
+    let what = object.slash();
+    let (tx, rx) = channel();
+    let ctx2 = ctx.clone();
+    app.k8s.loading = true;
+    let spawned = std::thread::Builder::new().name("kubectl-delete".into()).spawn(move || {
+        let said = client.delete(&object, cascade, force).map(|out| if out.is_empty() { format!("Deleted {what}") } else { out });
+        let _ = tx.send(Msg::Deleted(said.map_err(|e| e.to_string())));
+        ctx2.request_repaint();
+    });
+    match spawned {
+        Ok(_) => app.k8s.jobs.push(rx),
+        Err(e) => {
+            app.k8s.loading = false;
+            app.notify_error(format!("cannot run kubectl: {e}"));
+        }
+    }
+}
+
+/// Ctrl+D: ask before deleting what the cursor is on.
+fn ask_delete(app: &mut QellApp) {
+    if app.k8s.listing.containers_of.is_some() {
+        app.notify("A container goes with its pod: delete the pod instead.");
+        return;
+    }
+    let Some(object) = selected_object(app) else {
+        app.notify("Nothing here to delete.");
+        return;
+    };
+    app.k8s.confirm = Some(Confirm { object, cascade: qell_k8s::Cascade::default(), force: false, field: Field::Ok });
 }
 
 /// `NAME        READY  STATUS` — cells padded to the column widths.
@@ -642,9 +848,9 @@ fn header(app: &mut QellApp, ui: &mut egui::Ui, font: &FontId, colors: &Colors) 
         ("<esc>", "Back"),
         ("<j/k>", "Move"),
         ("<g/G>", "Top/End"),
-        ("<ctrl-d/u>", "Page"),
+        ("<ctrl-f/u>", "Page"),
+        ("<ctrl-d>", "Delete"),
         ("<r>", "Refresh"),
-        ("<?>", "Help"),
     ];
     let keys_mid = [
         ("<d>", "Describe"),
@@ -654,6 +860,7 @@ fn header(app: &mut QellApp, ui: &mut egui::Ui, font: &FontId, colors: &Colors) 
         ("<l>", "Logs"),
         ("<shift-l>", "Logs previous"),
         ("<f>", "Port-forward"),
+        ("<?>", "Help"),
     ];
     let keys_right = [
         ("<:>", "Resource"),
@@ -960,7 +1167,8 @@ fn help_overlay(ctx: &egui::Context, font: &FontId, text: Color32, dim: Color32)
     let lines = [
         ("j / k, ↓ / ↑", "move"),
         ("g / G", "first / last"),
-        ("Ctrl+d / Ctrl+u", "half a page"),
+        ("Ctrl+f / Ctrl+u", "a page down / half a page up"),
+        ("Ctrl+d", "delete it, after a question"),
         ("Enter", "go in — a namespace, a workload, a node, a pod"),
         ("Esc", "back, or clear the filter"),
         ("d / y", "describe it / its YAML, here; Esc comes back"),
@@ -997,6 +1205,10 @@ fn help_overlay(ctx: &egui::Context, font: &FontId, text: Color32, dim: Color32)
 
 /// Everything the panel does with the keyboard.
 fn keys(app: &mut QellApp, ctx: &egui::Context) {
+    // The dialog takes the keys itself while it is up.
+    if app.k8s.confirm.is_some() {
+        return;
+    }
     if app.k8s.text.is_some() {
         text_keys(app, ctx);
         return;
@@ -1044,10 +1256,11 @@ fn keys(app: &mut QellApp, ctx: &egui::Context) {
                 moved(k, rows.saturating_sub(1));
                 k.scroll_to = true;
             }
-            (Key::D, true) | (Key::PageDown, false) => {
+            (Key::F, true) | (Key::PageDown, false) => {
                 moved(k, k.selected + page);
                 k.scroll_to = true;
             }
+            (Key::D, true) => ask_delete(app),
             (Key::U, true) | (Key::PageUp, false) => {
                 k.selected = k.selected.saturating_sub(page);
                 k.scroll_to = true;
@@ -1133,7 +1346,7 @@ fn text_keys(app: &mut QellApp, ctx: &egui::Context) {
             (Key::G, false) if modifiers.shift => at = last,
             (Key::G, false) | (Key::Home, false) => at = 0,
             (Key::End, false) => at = last,
-            (Key::D, true) | (Key::PageDown, false) => at = (at + page).min(last),
+            (Key::F, true) | (Key::PageDown, false) => at = (at + page).min(last),
             (Key::U, true) | (Key::PageUp, false) => at = at.saturating_sub(page),
             (Key::Escape, false) | (Key::Q, false) => back = true,
             _ => {}
