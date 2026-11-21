@@ -29,6 +29,7 @@ pub fn show_central(app: &mut QellApp, ctx: &Context) {
             return;
         }
         show_tabs(app, ui);
+        show_manifest_bar(app, ui);
         show_disk_bar(app, ui);
         if app.config.vim_mode {
             show_vim_bar(app, ui);
@@ -36,6 +37,28 @@ pub fn show_central(app: &mut QellApp, ctx: &Context) {
         show_editor(app, ui);
     });
     show_completion_popup(app, ctx);
+}
+
+/// This tab is a cluster object's manifest: a strip saying which one,
+/// and that saving sends it back.
+fn show_manifest_bar(app: &mut QellApp, ui: &mut egui::Ui) {
+    let Some(manifest) = app.active_manifest() else { return };
+    let where_ = match (&manifest.context, &manifest.object.namespace) {
+        (c, Some(ns)) if !c.is_empty() => format!("{c} · {ns}"),
+        (c, None) if !c.is_empty() => c.clone(),
+        (_, Some(ns)) => ns.clone(),
+        (_, None) => String::new(),
+    };
+    let text = format!("{} ({where_}) — saving applies it to the cluster", manifest.object.slash());
+    let (fg, accent) = (app.palette.text, app.palette.accent);
+    egui::TopBottomPanel::top("manifest_bar")
+        .show_separator_line(false)
+        .frame(egui::Frame::new().fill(accent.gamma_multiply(0.22)).inner_margin(egui::Margin::symmetric(10, 4)))
+        .show_inside(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(text).color(fg).size(12.0));
+            });
+        });
 }
 
 /// The file changed outside Qell and you have unsaved edits: a strip

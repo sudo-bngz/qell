@@ -46,6 +46,14 @@ pub struct SymbolRow {
     pub end_col: usize,
 }
 
+/// A manifest tab: which object it came from, and where it goes back to.
+#[derive(Debug, Clone)]
+pub struct Manifest {
+    pub object: qell_k8s::Object,
+    /// The context it was read from, so saving can't hit another cluster.
+    pub context: String,
+}
+
 /// Char range of `word` in `preview`, for highlighting.
 fn preview_range(preview: &str, _chars: &str, word: &str) -> (usize, usize) {
     let last = word.rsplit('.').next().unwrap_or(word);
@@ -264,6 +272,11 @@ pub struct QellApp {
     last_focus: Focus,
     /// The cluster view (k9s-style), when it is open.
     pub k8s: views::k8s::K8sState,
+    /// Manifest tabs: the temp file each one is in, and the object it
+    /// goes back to when saved.
+    pub manifests: HashMap<PathBuf, Manifest>,
+    /// A manifest that was just saved and is waiting to be applied.
+    pending_apply: Option<PathBuf>,
     /// A change mark in the gutter was clicked: its line and where its
     /// Revert / Stage menu goes.
     pub hunk_menu: Option<(usize, egui::Pos2)>,
@@ -357,6 +370,8 @@ impl QellApp {
             pending_format: None,
             last_focus: Focus::Editor,
             k8s: views::k8s::K8sState::default(),
+            manifests: HashMap::new(),
+            pending_apply: None,
             hunk_menu: None,
             tree_edit: None,
             confirm_delete: None,
@@ -584,6 +599,14 @@ impl QellApp {
             }
         }
         doc.note_disk();
+        // A manifest tab goes back to the cluster when it is saved,
+        // which is what `e` in the cluster view is for. The apply runs
+        // on a worker, so it is started from the frame loop.
+        if let Some(path) = doc.buffer.path().map(Path::to_path_buf) {
+            if self.manifests.contains_key(&path) {
+                self.pending_apply = Some(path);
+            }
+        }
         self.lsp.did_save(&doc.buffer);
         self.git.refresh();
         self.indexer.refresh();
@@ -847,6 +870,68 @@ impl QellApp {
             NavRequest::Definition { word, .. } => self.show_locations(format!("Definitions of {word}"), items, true),
             NavRequest::References { word } if items.is_empty() => self.notify(format!("No references to {word}.")),
             NavRequest::References { word } => self.show_locations(format!("References to {word}"), items, false),
+        }
+    }
+
+    // ---- text from the cluster --------------------------------------------
+
+    /// Show text Qell produced (not a file) in a read-only tab.
+    pub fn open_text_tab(&mut self, label: String, text: &str, language: Option<&str>) {
+        self.drop_pristine_tab();
+        self.docs.push(Document::text_view(label, text, language));
+        self.active = self.docs.len() - 1;
+        self.focus = Focus::Editor;
+    }
+
+    /// Open an object's manifest in a tab you can edit. It is a real file
+    /// in a temp folder, so saving works as everywhere else — and because
+    /// it is a manifest, saving also sends it back to the cluster.
+    pub fn open_manifest_tab(&mut self, object: qell_k8s::Object, context: String, text: &str) -> std::io::Result<()> {
+        let dir = std::env::temp_dir().join("qell-manifests");
+        std::fs::create_dir_all(&dir)?;
+        let safe = |s: &str| s.replace(['/', '\\', ' ', ':'], "-");
+        let name = format!(
+            "{}{}-{}.yaml",
+            object.namespace.as_ref().map(|n| format!("{}-", safe(n))).unwrap_or_default(),
+            safe(&object.kind),
+            safe(&object.name)
+        );
+        let path = dir.join(name);
+        std::fs::write(&path, text)?;
+        let label = format!("{} (manifest)", object.slash());
+        self.manifests.insert(path.clone(), Manifest { object, context });
+        self.drop_pristine_tab();
+        let mut doc = Document::open(path)?;
+        doc.label = Some(label);
+        self.docs.push(doc);
+        self.active = self.docs.len() - 1;
+        self.focus = Focus::Editor;
+        Ok(())
+    }
+
+    /// The manifest the active tab holds, if it holds one.
+    pub fn active_manifest(&self) -> Option<&Manifest> {
+        let path = self.docs.get(self.active)?.buffer.path()?;
+        self.manifests.get(path)
+    }
+
+    /// Send a saved manifest back to the cluster, off the UI thread.
+    fn apply_manifest(&mut self, path: PathBuf, ctx: &Context) {
+        let Some(manifest) = self.manifests.get(&path) else { return };
+        let mut client = self.k8s.client.clone();
+        client.context = Some(manifest.context.clone()).filter(|c| !c.is_empty());
+        let what = manifest.object.slash();
+        self.k8s.apply(client, path, what, ctx);
+    }
+
+    /// Replace a tab that holds nothing rather than piling up.
+    fn drop_pristine_tab(&mut self) {
+        if self.docs.len() == 1
+            && self.docs[0].buffer.path().is_none()
+            && self.docs[0].label.is_none()
+            && !self.docs[0].buffer.is_dirty()
+        {
+            self.docs.clear();
         }
     }
 
@@ -2613,6 +2698,13 @@ impl eframe::App for QellApp {
         for name in std::mem::take(&mut self.pending_plugin_commands) {
             self.run_plugin_command(&name);
         }
+        if let Some(path) = self.pending_apply.take() {
+            self.apply_manifest(path, ctx);
+        }
+        // The cluster view's workers answer even when it is hidden (an
+        // apply started from a manifest tab), so they are drained here
+        // rather than while drawing the panel.
+        views::k8s::update(self, ctx);
         self.handle_config(ctx);
         // The tabs changed: remember them (cursors are saved again on exit).
         if self.session_state().0 != self.session_key {
