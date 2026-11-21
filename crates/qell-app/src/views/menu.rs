@@ -43,6 +43,8 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                 item(ui, app, Command::SelectAll);
                 item(ui, app, Command::TriggerCompletion);
                 ui.separator();
+                item(ui, app, Command::FormatDocument);
+                ui.separator();
                 item(ui, app, Command::FindInFile);
                 item(ui, app, Command::ReplaceInFile);
             });

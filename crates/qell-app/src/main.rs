@@ -9,6 +9,7 @@ mod app;
 mod commands;
 mod config;
 mod document;
+mod format;
 mod icons;
 mod native_menu;
 mod recent;

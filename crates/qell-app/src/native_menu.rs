@@ -161,6 +161,8 @@ pub fn layout() -> Vec<(&'static str, Vec<Entry>)> {
                 Edit(E::Paste),
                 Edit(E::SelectAll),
                 Separator,
+                Cmd(C::FormatDocument, Some("Format Document")),
+                Separator,
                 Cmd(C::FindInFile, Some("Find…")),
                 Cmd(C::ReplaceInFile, Some("Replace…")),
                 Separator,

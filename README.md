@@ -99,6 +99,12 @@ bottom, and language-server completion for the languages you actually use.
   the pair at the cursor is boxed, and vertical guides mark each indentation
   level, with the block around the cursor highlighted. The indentation step
   (2, 4, tabs…) is detected per file. Both can be turned off in Settings.
+- **Format** (`Shift+Alt+F`, and on save) — the language server when it
+  offers formatting, otherwise the language's own tool: `gofmt`,
+  `terraform fmt`, `rustfmt`, `black`, `clang-format`, `shfmt`, `taplo`,
+  `prettier`. Nothing is installed for you: a tool is used if it's on your
+  PATH, and `[format]` in the config overrides any of them. Only the lines
+  that change are touched, so the cursor stays put and one undo reverts it.
 - **Files changed outside Qell** — a `git checkout`, a `terraform fmt` or
   another editor is noticed: an untouched file is reloaded quietly, and one
   with unsaved edits asks whether to reload or keep yours. Saving never
@@ -207,6 +213,11 @@ ignore = [".git", "target", "node_modules", ".terraform", "dist"]
 [lsp]
 # Override a language server command:
 # rust = ["rust-analyzer"]
+
+[format]
+# Override a formatter (it reads the file on stdin and writes it on stdout;
+# {path} stands for the file). An empty list turns formatting off.
+# terraform = ["tofu", "fmt", "-"]
 ```
 
 ## Architecture

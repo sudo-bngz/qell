@@ -18,6 +18,8 @@ pub struct Config {
     pub font_size: f32,
     /// Spaces inserted by the Tab key.
     pub tab_size: usize,
+    /// Format the file when it is saved, when a formatter is available.
+    pub format_on_save: bool,
     /// Ask language servers for completions while typing (not only on Ctrl+Space).
     pub auto_complete: bool,
     /// Vim keys: Normal / Insert / Visual modes and the `:` command line.
@@ -60,6 +62,11 @@ pub struct Config {
     /// Extra language-server commands, overriding the built-ins, keyed by
     /// language id. Example: `rust = ["rust-analyzer"]`.
     pub lsp: BTreeMap<String, Vec<String>>,
+    /// How to format each language, overriding Qell's built-in commands
+    /// (`[format] terraform = ["tofu", "fmt", "-"]`). An empty list turns
+    /// formatting off for that language.
+    #[serde(default)]
+    pub format: BTreeMap<String, Vec<String>>,
 }
 
 impl Default for Config {
@@ -67,6 +74,7 @@ impl Default for Config {
         Self {
             font_size: 14.0,
             tab_size: 4,
+            format_on_save: true,
             auto_complete: true,
             vim_mode: false,
             word_wrap: false,
@@ -87,6 +95,7 @@ impl Default for Config {
             tree_hidden: vec![".git".into(), ".DS_Store".into()],
             ignore: vec![".git".into(), "target".into(), "node_modules".into(), ".terraform".into(), "dist".into()],
             lsp: Default::default(),
+            format: Default::default(),
         }
     }
 }
