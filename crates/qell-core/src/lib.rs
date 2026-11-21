@@ -7,6 +7,7 @@
 
 pub mod alea;
 pub mod buffer;
+pub mod comment;
 pub mod conf;
 pub mod history;
 pub mod position;
