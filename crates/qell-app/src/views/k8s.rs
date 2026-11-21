@@ -91,6 +91,9 @@ pub struct K8sState {
     fetched: Option<Instant>,
     pub contexts: Vec<String>,
     pub context: Option<String>,
+    /// Whether the sidebar was showing before the view took over, so
+    /// leaving it puts the editor back the way it was.
+    sidebar_was: Option<bool>,
     /// Cluster, user, versions, CPU/MEM and the namespace keys.
     pub info: qell_k8s::Info,
     info_at: Option<Instant>,
@@ -127,6 +130,7 @@ impl Default for K8sState {
             fetched: None,
             contexts: Vec::new(),
             context: None,
+            sidebar_was: None,
             info: qell_k8s::Info::default(),
             info_at: None,
             help: false,
@@ -261,6 +265,12 @@ impl K8sState {
 /// Open the panel (or bring it back), and give it the keyboard.
 pub fn open(app: &mut QellApp, ctx: &egui::Context) {
     app.k8s.client.bin = app.config.kubectl.clone();
+    // The cluster is a place of its own, not a panel beside the editor:
+    // the file tree goes away with the editor and comes back with it.
+    if !app.k8s.open {
+        app.k8s.sidebar_was = Some(app.show_sidebar);
+    }
+    app.show_sidebar = false;
     app.k8s.open = true;
     app.focus = Focus::K8s;
     if app.k8s.contexts.is_empty() {
@@ -276,6 +286,9 @@ pub fn open(app: &mut QellApp, ctx: &egui::Context) {
 }
 
 pub fn close(app: &mut QellApp) {
+    if let Some(was) = app.k8s.sidebar_was.take() {
+        app.show_sidebar = was;
+    }
     app.k8s.open = false;
     app.k8s.typing = Typing::No;
     app.k8s.help = false;
@@ -1398,10 +1411,12 @@ fn show_object(app: &mut QellApp, what: Shown, object: &qell_k8s::Object, text: 
             app.k8s.scroll_to = true;
         }
         // Editing is the editor's job, so that one gets a tab.
-        Shown::Edit => match app.open_manifest_tab(object.clone(), context, text) {
-            Ok(()) => close(app),
-            Err(e) => app.notify_error(format!("Cannot open the manifest: {e}")),
-        },
+        // The tab brings the editor forward on its own.
+        Shown::Edit => {
+            if let Err(e) = app.open_manifest_tab(object.clone(), context, text) {
+                app.notify_error(format!("Cannot open the manifest: {e}"));
+            }
+        }
     }
 }
 

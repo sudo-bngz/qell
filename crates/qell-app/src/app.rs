@@ -486,12 +486,21 @@ impl QellApp {
         self.docs.get_mut(self.active)
     }
 
+    /// Bring the editor forward. The cluster view stands in its place
+    /// rather than beside it, so showing one puts the other away.
+    pub fn show_editor_area(&mut self) {
+        if self.k8s.open {
+            views::k8s::close(self);
+        }
+        self.focus = Focus::Editor;
+    }
+
     pub fn open_file(&mut self, path: PathBuf) {
         let path = std::fs::canonicalize(&path).unwrap_or(path);
         self.recent.record(&self.root, &path);
         if let Some(i) = self.docs.iter().position(|d| d.buffer.path() == Some(path.as_path())) {
             self.active = i;
-            self.focus = Focus::Editor;
+            self.show_editor_area();
             return;
         }
         match Document::open(path.clone()) {
@@ -502,7 +511,7 @@ impl QellApp {
                 }
                 self.docs.push(doc);
                 self.active = self.docs.len() - 1;
-                self.focus = Focus::Editor;
+                self.show_editor_area();
             }
             Err(e) => self.notify_error(format!("Cannot open {}: {e}", path.display())),
         }
@@ -514,7 +523,7 @@ impl QellApp {
         let label = format!("{name} ({})", commit.short_hash());
         if let Some(i) = self.docs.iter().position(|d| d.label.as_deref() == Some(label.as_str())) {
             self.active = i;
-            self.focus = Focus::Editor;
+            self.show_editor_area();
             return;
         }
         match qell_git::graph::file_diff(&self.root.join(repo), commit, file) {
@@ -539,7 +548,7 @@ impl QellApp {
                 }
                 self.docs.push(Document::diff(label, &file.path, &diff.text, marks));
                 self.active = self.docs.len() - 1;
-                self.focus = Focus::Editor;
+                self.show_editor_area();
                 self.notify(format!("{}: +{} −{} in {}", file.path.display(), diff.added, diff.removed, commit.short_hash()));
             }
             Err(e) => self.notify_error(format!("Cannot show the diff: {e}")),
@@ -676,6 +685,14 @@ impl QellApp {
     /// Show a sidebar view; asking for the one already shown hides the
     /// sidebar, like clicking its icon in VS Code.
     pub fn show_sidebar_view(&mut self, view: SidebarView) {
+        // Explorer, search and git are about files: asking for one of
+        // them is asking for the editor back.
+        if self.k8s.open {
+            views::k8s::close(self);
+            self.sidebar_view = view;
+            self.show_sidebar = true;
+            return;
+        }
         if self.show_sidebar && self.sidebar_view == view {
             self.show_sidebar = false;
         } else {
@@ -770,13 +787,13 @@ impl QellApp {
 
     /// Without a server: a whole-word search for `word`, in the Search view.
     fn text_search_for(&mut self, word: &str) {
+        self.show_editor_area();
         self.sidebar_view = SidebarView::Search;
         self.show_sidebar = true;
         self.search.whole_word = !word.contains('.');
         self.search.regex = false;
         self.search.case_sensitive = true;
         self.search.start(Some(word.to_string()));
-        self.focus = Focus::Editor;
     }
 
     /// Definitions from the index: tree-sitter tags, Terraform blocks.
@@ -911,7 +928,7 @@ impl QellApp {
         let label = format!("{} (manifest)", object.slash());
         if let Some(i) = self.docs.iter().position(|d| d.buffer.path() == Some(path.as_path())) {
             self.active = i;
-            self.focus = Focus::Editor;
+            self.show_editor_area();
             if self.docs[i].buffer.is_dirty() {
                 self.notify("This manifest is already open, with changes you haven't applied.");
             } else {
@@ -933,7 +950,7 @@ impl QellApp {
         doc.from_cluster = true;
         self.docs.push(doc);
         self.active = self.docs.len() - 1;
-        self.focus = Focus::Editor;
+        self.show_editor_area();
         Ok(())
     }
 
@@ -1442,7 +1459,7 @@ impl QellApp {
                 self.active = i;
             }
         }
-        self.focus = Focus::Editor;
+        self.show_editor_area();
         (files, places, skipped)
     }
 
@@ -1927,7 +1944,7 @@ impl QellApp {
         doc.buffer.set_cursor(start, false);
         doc.buffer.set_cursor(end, true);
         doc.scroll_to_cursor = true;
-        self.focus = Focus::Editor;
+        self.show_editor_area();
         if let Some(from) = from.filter(|f| f.path != path || f.pos.line != line) {
             self.nav_back.push(from);
             self.nav_back.truncate(100);
@@ -1951,7 +1968,7 @@ impl QellApp {
             doc.buffer.set_cursor(p, false);
             doc.scroll_to_cursor = true;
         }
-        self.focus = Focus::Editor;
+        self.show_editor_area();
     }
 
     /// Re-read config.toml after the user edited it by hand.
@@ -2122,7 +2139,7 @@ impl QellApp {
             Command::NewFile => {
                 self.docs.push(Document::untitled());
                 self.active = self.docs.len() - 1;
-                self.focus = Focus::Editor;
+                self.show_editor_area();
             }
             Command::OpenFile => {
                 if let Some(p) = rfd::FileDialog::new().set_directory(&self.root).pick_file() {
@@ -2168,7 +2185,14 @@ impl QellApp {
                 self.completion.open = false;
                 self.request_completion(None);
             }
-            Command::ToggleSidebar => self.show_sidebar = !self.show_sidebar,
+            Command::ToggleSidebar => {
+                if self.k8s.open {
+                    views::k8s::close(self);
+                    self.show_sidebar = true;
+                } else {
+                    self.show_sidebar = !self.show_sidebar;
+                }
+            }
             Command::FormatDocument => self.format_active(false),
             Command::ToggleComment => {
                 if let Some(doc) = self.docs.get_mut(self.active).filter(|d| !d.read_only) {
@@ -2585,7 +2609,7 @@ impl QellApp {
     fn after_terminal_removed(&mut self, index: usize) {
         if self.terminals.is_empty() {
             self.show_terminal = false;
-            self.focus = Focus::Editor;
+            self.focus = if self.k8s.open { Focus::K8s } else { Focus::Editor };
             self.active_terminal = 0;
             self.next_terminal_number = 1;
         } else if self.active_terminal > index || self.active_terminal >= self.terminals.len() {
@@ -2656,6 +2680,15 @@ impl QellApp {
                 Command::ToggleTerminal,
                 Command::CommandPalette,
                 Command::ToggleSidebar,
+                // Asking for a file is asking for the editor back, and
+                // these all bring it forward.
+                Command::QuickOpen,
+                Command::NewFile,
+                Command::OpenFile,
+                Command::OpenFolder,
+                Command::ShowExplorer,
+                Command::ShowSearch,
+                Command::ShowSourceControl,
                 Command::OpenSettings,
                 Command::ZoomIn,
                 Command::ZoomOut,

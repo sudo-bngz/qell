@@ -196,6 +196,12 @@ bottom, and language-server completion for the languages you actually use.
   the window narrows. The table carries its own frame and title,
   `Pods(web)[12]`. The helm icon under source control opens and closes it.
 
+  The cluster view takes the window rather than sitting beside the editor:
+  the file tree goes away with the editor and comes back with it. Anything
+  that asks for a file — clicking Explorer, Search or Source Control,
+  `Ctrl+P`, `Ctrl+B`, opening a manifest with `e` — brings the editor back,
+  and `Ctrl/⌘+Shift+K` returns you to the cluster where you left it.
+
   It reads everything through your own `kubectl`, so it uses your
   kubeconfig, your contexts and your credential plugins (`aws eks
   get-token` and the like) — Qell holds no credentials and installs
