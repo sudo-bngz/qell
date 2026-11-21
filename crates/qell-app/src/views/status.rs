@@ -75,6 +75,11 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                     let p = doc.buffer.cursor.head();
                     let lang_id = doc.buffer.language().unwrap_or("plaintext");
                     let lang_name = app.languages.get(lang_id).map(|l| l.name).unwrap_or("Plain Text");
+                    // A picture has no language, no server and no cursor;
+                    // what it is, is written above it instead.
+                    if doc.media.is_some() {
+                        return;
+                    }
                     let lsp = app.lsp.status(lang_id);
                     let lsp_color = match lsp {
                         "ready" => accent,

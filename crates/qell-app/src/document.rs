@@ -25,6 +25,8 @@ pub struct Document {
     /// Opened from the cluster view (describe, YAML, a manifest), so Esc
     /// and closing the tab go back to the list.
     pub from_cluster: bool,
+    /// A picture, a video or a sound file: looked at, not edited.
+    pub media: Option<MediaTab>,
     /// Bracket pairs, for colours and matching.
     pub brackets: Brackets,
     /// Indentation step of the file (guides), e.g. 2 or 4; 1 for tabs.
@@ -181,6 +183,43 @@ pub enum LineMark {
 /// the whole text on every keystroke would stutter.
 const HIGHLIGHT_LIMIT_BYTES: usize = 2 * 1024 * 1024;
 
+/// A tab showing a picture, a video or a sound file.
+pub struct MediaTab {
+    pub kind: crate::preview::Media,
+    pub size: u64,
+    /// The picture on screen: the file itself, or a frame of the video.
+    pub texture: Option<egui::TextureHandle>,
+    pub pixels: (usize, usize),
+    /// What ffprobe said, once it has said it.
+    pub info: Option<crate::preview::Info>,
+    /// Where in the video the frame came from, and where the slider is.
+    pub at: f64,
+    pub wanted: f64,
+    /// What went wrong, if anything: a decoder error, no ffmpeg.
+    pub error: Option<String>,
+    /// Nothing has been read yet.
+    pub pending: bool,
+    /// Show it at its own size rather than fitted to the window.
+    pub actual_size: bool,
+}
+
+impl MediaTab {
+    fn new(kind: crate::preview::Media, size: u64) -> Self {
+        Self {
+            kind,
+            size,
+            texture: None,
+            pixels: (0, 0),
+            info: None,
+            at: 0.0,
+            wanted: 0.0,
+            error: None,
+            pending: true,
+            actual_size: false,
+        }
+    }
+}
+
 impl Document {
     pub fn new(buffer: Buffer) -> Self {
         Self {
@@ -193,6 +232,7 @@ impl Document {
             line_marks: Vec::new(),
             label: None,
             from_cluster: false,
+            media: None,
             brackets: Brackets::default(),
             indent_unit: 4,
             structure_key: None,
@@ -228,9 +268,26 @@ impl Document {
     }
 
     pub fn open(path: PathBuf) -> std::io::Result<Self> {
+        // A picture or a video isn't text to be read into a buffer.
+        if let Some(kind) = crate::preview::Media::of(&path) {
+            return Ok(Self::media(path, kind));
+        }
         let mut doc = Self::new(Buffer::open(&path)?);
         doc.disk = DiskState::of(&path);
         Ok(doc)
+    }
+
+    /// A tab that shows a file rather than holding its text.
+    fn media(path: PathBuf, kind: crate::preview::Media) -> Self {
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        // The buffer keeps the path, so tabs, the file tree and the
+        // session treat it like any other open file.
+        let mut buffer = Buffer::from_text("", Some(path));
+        buffer.set_clean();
+        let mut doc = Self::new(buffer);
+        doc.read_only = true;
+        doc.media = Some(MediaTab::new(kind, size));
+        doc
     }
 
     /// Note the file as it is now: just written, or its changes accepted.
