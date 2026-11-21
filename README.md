@@ -99,6 +99,10 @@ bottom, and language-server completion for the languages you actually use.
   the pair at the cursor is boxed, and vertical guides mark each indentation
   level, with the block around the cursor highlighted. The indentation step
   (2, 4, tabs…) is detected per file. Both can be turned off in Settings.
+- **Replace across files** — the Search view's chevron opens a replace box;
+  *Replace All* asks once, then changes every match. Files open in a tab are
+  changed in the editor and left unsaved so you can read them over and undo;
+  the others are written to disk.
 - **Go to symbol in the file** (`Ctrl/⌘+Shift+O`) — everything the open file
   defines, in one list you can type into: Terraform blocks as `local.env` or
   `aws_s3_bucket.logs`, functions, types and methods elsewhere. Qell reads
@@ -183,6 +187,7 @@ npm i -g typescript typescript-language-server
 | Go to file            | `Ctrl+P`           |
 | Go to line            | `Ctrl+G`           |
 | Toggle comment        | `Ctrl+/`           |
+| Replace in files      | `Ctrl+Shift+H`     |
 | Go to symbol in file  | `Ctrl+Shift+O`     |
 | Rename symbol         | `F2`               |
 | Quick fix             | `Ctrl+.`           |

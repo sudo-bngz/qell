@@ -37,6 +37,12 @@ pub struct LocationList {
 #[derive(Default)]
 pub struct SearchState {
     pub query: String,
+    /// What to put in place of the matches, with its box shown or hidden.
+    pub replace: String,
+    pub show_replace: bool,
+    pub focus_replace: bool,
+    /// A replacement waiting to be confirmed: matches and files.
+    pub confirm: Option<(usize, usize)>,
     pub case_sensitive: bool,
     pub whole_word: bool,
     pub regex: bool,
@@ -60,13 +66,25 @@ const DEBOUNCE: Duration = Duration::from_millis(120);
 const ROW: f32 = 22.0;
 
 impl SearchState {
-    fn query(&self) -> Query {
+    pub fn query(&self) -> Query {
         Query {
             pattern: self.query.clone(),
             is_regex: self.regex,
             case_sensitive: self.case_sensitive,
             whole_word: self.whole_word,
         }
+    }
+
+    /// Run the search again, after the files changed under it.
+    pub fn search_again(&mut self) {
+        self.sent = None;
+        self.changed_at = Some(Instant::now());
+    }
+
+    /// Open the view with the replace box showing.
+    pub fn start_replace(&mut self, text: Option<String>) {
+        self.start(text);
+        self.show_replace = true;
     }
 
     /// Open the view on `text` (the selection, typically).
@@ -136,7 +154,13 @@ pub fn show_contents(app: &mut QellApp, ui: &mut egui::Ui) {
     let status = app.indexer.status();
     app.search.typing = false;
 
+    let mut toggle_replace = false;
     ui.horizontal(|ui| {
+        let chevron = if app.search.show_replace { icons::CHEVRON_DOWN } else { icons::CHEVRON_RIGHT };
+        let b = egui::Button::new(RichText::new(chevron.to_string()).font(icons::font(12.0)).color(dim))
+            .frame(false)
+            .min_size(egui::vec2(14.0, 14.0));
+        toggle_replace = ui.add(b).on_hover_text("Toggle Replace").on_hover_cursor(CursorIcon::PointingHand).clicked();
         ui.label(RichText::new("SEARCH").size(11.0).color(dim));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let label = if status.indexing && status.files == 0 {
@@ -192,9 +216,19 @@ pub fn show_contents(app: &mut QellApp, ui: &mut egui::Ui) {
             }
         });
     });
+    if toggle_replace {
+        app.search.show_replace = !app.search.show_replace;
+        app.search.focus_replace = app.search.show_replace;
+        app.search.confirm = None;
+    }
+    if app.search.show_replace {
+        ui.add_space(2.0);
+        replace_row(app, ui, dim, accent);
+    }
     if changed {
         app.search.changed_at = Some(Instant::now());
         app.search.list = None;
+        app.search.confirm = None;
     }
     ui.add_space(6.0);
 
@@ -266,6 +300,63 @@ pub fn show_contents(app: &mut QellApp, ui: &mut egui::Ui) {
             show_rows(app, ui, rows, text, dim);
         }
     }
+}
+
+/// The replace box, its button, and the confirmation it asks for.
+fn replace_row(app: &mut QellApp, ui: &mut egui::Ui, dim: Color32, accent: Color32) {
+    let (total, files) = match &app.search.results {
+        Some(Ok(r)) => (r.total, r.files.len()),
+        _ => (0, 0),
+    };
+    let mut ask = false;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let can = total > 0 && !app.search.query.is_empty();
+            let b = egui::Button::new(RichText::new("Replace All").size(11.5))
+                .fill(if can { accent.gamma_multiply(0.6) } else { Color32::TRANSPARENT })
+                .min_size(egui::vec2(22.0, 22.0));
+            let b = ui.add_enabled(can, b).on_hover_text("Replace every match in every file");
+            ask = b.on_hover_cursor(CursorIcon::PointingHand).clicked();
+            let resp = egui::TextEdit::singleline(&mut app.search.replace)
+                .id(egui::Id::new("qell-replace-input"))
+                .hint_text("Replace")
+                .desired_width(f32::INFINITY)
+                .margin(egui::vec2(6.0, 4.0))
+                .show(ui)
+                .response;
+            if app.search.focus_replace {
+                resp.request_focus();
+                app.search.focus_replace = false;
+            }
+            if resp.has_focus() {
+                app.search.typing = true;
+            }
+            if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && can {
+                ask = true;
+            }
+        });
+    });
+    if ask {
+        app.search.confirm = Some((total, files));
+    }
+    // Replacing writes to files, so it is asked for twice.
+    let Some((matches, in_files)) = app.search.confirm else { return };
+    ui.add_space(2.0);
+    let what = if app.search.replace.is_empty() { "Delete".to_string() } else { "Replace".to_string() };
+    let plural = |n: usize, s: &str| if n == 1 { format!("1 {s}") } else { format!("{n} {s}s") };
+    ui.label(
+        RichText::new(format!("{what} {} in {}?", plural(matches, "match"), plural(in_files, "file"))).size(11.5).color(dim),
+    );
+    ui.horizontal(|ui| {
+        if ui.add(egui::Button::new(RichText::new(what).size(11.5)).fill(accent.gamma_multiply(0.6))).clicked() {
+            app.search.confirm = None;
+            app.replace_in_files();
+        }
+        if ui.add(egui::Button::new(RichText::new("Cancel").size(11.5)).frame(false)).clicked() {
+            app.search.confirm = None;
+        }
+    });
 }
 
 /// Flatten items (already sorted by file) into file headers + matches.

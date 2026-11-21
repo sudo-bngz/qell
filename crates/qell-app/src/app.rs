@@ -841,6 +841,106 @@ impl QellApp {
         }
     }
 
+    // ---- replace across files ---------------------------------------------
+
+    /// Put the Search view's replacement in place of every match in the
+    /// workspace. Files open in a tab are changed in the editor, unsaved,
+    /// so you can read them over and undo; the others are written to disk,
+    /// which is what the confirmation is for.
+    pub fn replace_in_files(&mut self) {
+        let query = self.search.query();
+        let re = match query.regex() {
+            Ok(re) => re,
+            Err(e) => {
+                self.notify_error(e);
+                return;
+            }
+        };
+        let Some(Ok(results)) = &self.search.results else { return };
+        let paths: Vec<PathBuf> = results.files.iter().map(|f| f.path.clone()).collect();
+        let truncated = results.truncated;
+        let with = self.search.replace.clone();
+        // `$1` in the replacement means a capture group only when the
+        // pattern is a regular expression; otherwise it is just text.
+        let swap = |text: &str| -> String {
+            if query.is_regex {
+                re.replace_all(text, with.as_str()).into_owned()
+            } else {
+                re.replace_all(text, regex::NoExpand(with.as_str())).into_owned()
+            }
+        };
+        let (mut places, mut in_tabs, mut on_disk, mut failed) = (0usize, 0usize, 0usize, 0usize);
+        for path in paths {
+            let open = self.docs.iter().position(|d| d.buffer.path() == Some(path.as_path()));
+            match open {
+                Some(i) => {
+                    let Some(doc) = self.docs.get_mut(i) else { continue };
+                    if doc.read_only {
+                        failed += 1;
+                        continue;
+                    }
+                    let old = doc.buffer.text();
+                    let hits = re.find_iter(&old).count();
+                    let new = swap(&old);
+                    if hits == 0 || new == old {
+                        continue;
+                    }
+                    apply_text(doc, &old, &new);
+                    places += hits;
+                    in_tabs += 1;
+                }
+                None => {
+                    // Read the file again rather than trust the index.
+                    let Ok(old) = std::fs::read_to_string(&path) else {
+                        failed += 1;
+                        continue;
+                    };
+                    let hits = re.find_iter(&old).count();
+                    let new = swap(&old);
+                    if hits == 0 || new == old {
+                        continue;
+                    }
+                    match std::fs::write(&path, &new) {
+                        Ok(()) => {
+                            places += hits;
+                            on_disk += 1;
+                        }
+                        Err(e) => {
+                            log::warn!("replace in {}: {e}", path.display());
+                            failed += 1;
+                        }
+                    }
+                }
+            }
+        }
+        let plural = |n: usize, s: &str| if n == 1 { format!("1 {s}") } else { format!("{n} {s}s") };
+        if places == 0 {
+            self.notify("Nothing to replace: the files no longer match.");
+        } else {
+            let mut msg = format!("Replaced {}", plural(places, "match"));
+            match (on_disk, in_tabs) {
+                (0, t) => msg.push_str(&format!(" in {}, unsaved", plural(t, "open file"))),
+                (d, 0) => msg.push_str(&format!(" in {}, written to disk", plural(d, "file"))),
+                (d, t) => msg.push_str(&format!(
+                    " in {} written to disk and {} left unsaved",
+                    plural(d, "file"),
+                    plural(t, "open file")
+                )),
+            }
+            msg.push('.');
+            if truncated {
+                msg.push_str(" The result list was cut short, so search again to see if any are left.");
+            }
+            self.notify(msg);
+        }
+        if failed > 0 {
+            self.notify_error(format!("{} could not be changed.", plural(failed, "file")));
+        }
+        // The index and the results are now out of date.
+        self.indexer.refresh();
+        self.search.search_again();
+    }
+
     // ---- go to symbol -----------------------------------------------------
 
     /// Ctrl/Cmd+Shift+O: list what the open file defines and jump to one.
@@ -1412,7 +1512,7 @@ impl QellApp {
         let cwd = path.parent().filter(|p| p.is_dir()).unwrap_or(&root).to_path_buf();
         match crate::format::run(cmd, &text, &path, &cwd) {
             Ok(formatted) => {
-                let count = apply_format(doc, &text, &formatted);
+                let count = apply_text(doc, &text, &formatted);
                 if !then_save && count == 0 {
                     self.notify("Already formatted.");
                 }
@@ -1907,6 +2007,12 @@ impl QellApp {
                 self.sidebar_view = SidebarView::Search;
                 self.show_sidebar = true;
                 self.search.start(selection);
+            }
+            Command::ReplaceInFiles => {
+                let selection = self.docs.get(self.active).map(|d| d.buffer.selected_text());
+                self.sidebar_view = SidebarView::Search;
+                self.show_sidebar = true;
+                self.search.start_replace(selection);
             }
             Command::FindInFile | Command::ReplaceInFile => {
                 let selection = self.docs.get(self.active).map(|d| d.buffer.selected_text());
@@ -2408,16 +2514,17 @@ impl eframe::App for QellApp {
 }
 
 /// Whether two paths name the same file (resolving symlinks and `..`).
-/// Put a formatter's text back into the buffer, changing only the lines
-/// that moved, as one undo step. Returns how many places changed.
-fn apply_format(doc: &mut Document, old: &str, new: &str) -> usize {
+/// Put new text into the buffer, changing only the lines that moved, as
+/// one undo step. Returns how many places changed.
+fn apply_text(doc: &mut Document, old: &str, new: &str) -> usize {
     let edits = crate::format::edits(old, new);
     if edits.is_empty() {
         return 0;
     }
     let head = doc.buffer.cursor.head();
     doc.buffer.begin_undo_group();
-    for (start, end, text) in &edits {
+    // Last first: an earlier edit would move the lines of the later ones.
+    for (start, end, text) in edits.iter().rev() {
         doc.buffer.replace_range(*start, *end, text);
     }
     doc.buffer.end_undo_group();

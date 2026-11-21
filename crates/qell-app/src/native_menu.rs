@@ -168,6 +168,7 @@ pub fn layout() -> Vec<(&'static str, Vec<Entry>)> {
                 Separator,
                 Cmd(C::FindInFile, Some("Find…")),
                 Cmd(C::ReplaceInFile, Some("Replace…")),
+                Cmd(C::ReplaceInFiles, Some("Replace in Files…")),
                 Separator,
                 Cmd(C::TriggerCompletion, None),
             ],
