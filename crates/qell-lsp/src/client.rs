@@ -45,6 +45,11 @@ pub enum Event {
         id: RequestId,
         locations: Vec<Location>,
     },
+    /// Answer to a formatting request: the edits to apply.
+    Edits {
+        id: RequestId,
+        edits: Vec<TextEdit>,
+    },
     Hover {
         id: RequestId,
         hover: Option<Hover>,
@@ -77,6 +82,7 @@ enum Pending {
     Completion,
     Resolve,
     Locations,
+    Formatting,
     Hover,
     Other,
 }
@@ -349,6 +355,30 @@ impl Client {
         caps.as_ref().and_then(|c| c.references_provider.as_ref()).is_some_and(|p| !matches!(p, OneOf::Left(false)))
     }
 
+    /// Whether the server can format a whole file.
+    pub fn supports_formatting(&self) -> bool {
+        let caps = self.capabilities.lock().unwrap();
+        caps.as_ref().and_then(|c| c.document_formatting_provider.as_ref()).is_some_and(|p| !matches!(p, OneOf::Left(false)))
+    }
+
+    pub fn formatting(&self, uri: Uri, tab_size: u32, insert_spaces: bool) -> RequestId {
+        self.request(
+            "textDocument/formatting",
+            DocumentFormattingParams {
+                text_document: TextDocumentIdentifier { uri },
+                options: FormattingOptions {
+                    tab_size,
+                    insert_spaces,
+                    trim_trailing_whitespace: Some(true),
+                    insert_final_newline: Some(true),
+                    ..Default::default()
+                },
+                work_done_progress_params: Default::default(),
+            },
+            Pending::Formatting,
+        )
+    }
+
     pub fn definition(&self, uri: Uri, position: Position) -> RequestId {
         self.request(
             "textDocument/definition",
@@ -505,6 +535,10 @@ fn dispatch(
                 None => Vec::new(),
             };
             let _ = events.send(Event::Locations { id, locations });
+        }
+        Some(Pending::Formatting) => {
+            let edits = parse::<Vec<TextEdit>>(result).unwrap_or_default();
+            let _ = events.send(Event::Edits { id, edits });
         }
         Some(Pending::Resolve) => {
             if let Some(item) = parse::<CompletionItem>(result) {

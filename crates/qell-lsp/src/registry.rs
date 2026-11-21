@@ -184,6 +184,21 @@ impl Registry {
         Some(client.resolve_completion(item))
     }
 
+    /// Ask the server to format the whole file. `None` when no ready
+    /// server for the language can do it.
+    pub fn request_formatting(
+        &mut self,
+        languages: &LanguageRegistry,
+        buffer: &mut Buffer,
+        tab_size: usize,
+    ) -> Option<RequestId> {
+        self.sync(languages, buffer);
+        let lang = buffer.language()?;
+        let uri = buffer.path().and_then(path_to_uri)?;
+        let client = self.clients.get(lang).filter(|c| c.is_ready())?;
+        client.supports_formatting().then(|| client.formatting(uri, tab_size as u32, true))
+    }
+
     /// Ask where the symbol at the cursor is defined. `None` when no ready
     /// server for the language can answer.
     pub fn request_definition(&mut self, languages: &LanguageRegistry, buffer: &mut Buffer) -> Option<RequestId> {
