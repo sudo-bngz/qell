@@ -66,6 +66,7 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                 item(ui, app, Command::ToggleMinimap);
                 item(ui, app, Command::ToggleVimMode);
                 item(ui, app, Command::ToggleTerminal);
+                item(ui, app, Command::ToggleCluster);
                 item(ui, app, Command::NewTerminal);
                 ui.separator();
                 item(ui, app, Command::ZoomIn);

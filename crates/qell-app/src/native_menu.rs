@@ -187,6 +187,7 @@ pub fn layout() -> Vec<(&'static str, Vec<Entry>)> {
                 Cmd(C::ToggleVimMode, Some("Vim Mode")),
                 Separator,
                 Cmd(C::ToggleTerminal, Some("Toggle Terminal")),
+                Cmd(C::ToggleCluster, Some("Toggle Kubernetes Cluster")),
                 Cmd(C::NewTerminal, Some("New Terminal")),
                 Separator,
                 Cmd(C::ZoomIn, Some("Zoom In")),

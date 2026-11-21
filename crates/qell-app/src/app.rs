@@ -86,6 +86,8 @@ pub struct NavPoint {
 pub enum Focus {
     Editor,
     Terminal,
+    /// The cluster view (k9s-style) has the keyboard.
+    K8s,
 }
 
 /// Completion popup state.
@@ -260,6 +262,8 @@ pub struct QellApp {
     /// Which pane had the keyboard last frame, to notice coming back to
     /// the editor from the terminal.
     last_focus: Focus,
+    /// The cluster view (k9s-style), when it is open.
+    pub k8s: views::k8s::K8sState,
     /// A change mark in the gutter was clicked: its line and where its
     /// Revert / Stage menu goes.
     pub hunk_menu: Option<(usize, egui::Pos2)>,
@@ -352,6 +356,7 @@ impl QellApp {
             pending_vim: Vec::new(),
             pending_format: None,
             last_focus: Focus::Editor,
+            k8s: views::k8s::K8sState::default(),
             hunk_menu: None,
             tree_edit: None,
             confirm_delete: None,
@@ -2111,6 +2116,13 @@ impl QellApp {
             Command::GoBack => self.navigate(true),
             Command::GoForward => self.navigate(false),
             Command::ShowSourceControl => self.show_sidebar_view(SidebarView::SourceControl),
+            Command::ToggleCluster => {
+                if self.k8s.open {
+                    views::k8s::close(self);
+                } else {
+                    views::k8s::open(self, ctx);
+                }
+            }
             Command::ToggleTerminal => {
                 self.show_terminal = !self.show_terminal;
                 self.focus = if self.show_terminal { Focus::Terminal } else { Focus::Editor };
@@ -2478,6 +2490,7 @@ impl QellApp {
         if self.settings.open
             || self.scm.typing
             || self.search.typing
+            || self.k8s.typing != views::k8s::Typing::No
             || self.find.typing
             || self.tree_edit.is_some()
             || self.confirm_delete.is_some()
@@ -2491,6 +2504,27 @@ impl QellApp {
                 allowed.extend([Command::FindInFile, Command::ReplaceInFile, Command::FindNext, Command::FindPrevious]);
             }
             for cmd in allowed {
+                if let Some(sc) = cmd.shortcut() {
+                    if ctx.input_mut(|i| i.consume_shortcut(&sc)) {
+                        self.pending_commands.push(cmd);
+                    }
+                }
+            }
+            return;
+        }
+        // The cluster view is driven by bare keys (j, k, r, 0, :), and by
+        // Ctrl+D / Ctrl+U for paging: only the few view commands go past it.
+        if self.focus == Focus::K8s && self.k8s.open {
+            for cmd in [
+                Command::ToggleCluster,
+                Command::ToggleTerminal,
+                Command::CommandPalette,
+                Command::ToggleSidebar,
+                Command::OpenSettings,
+                Command::ZoomIn,
+                Command::ZoomOut,
+                Command::Quit,
+            ] {
                 if let Some(sc) = cmd.shortcut() {
                     if ctx.input_mut(|i| i.consume_shortcut(&sc)) {
                         self.pending_commands.push(cmd);

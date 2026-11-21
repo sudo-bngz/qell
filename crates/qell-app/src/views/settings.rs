@@ -126,6 +126,12 @@ fn defs() -> Vec<Def> {
             "Command for new terminals, e.g. zsh -l. Empty uses $SHELL. Restart a terminal to apply.",
         ),
         def("terminal_font_size", "Terminal", "Font Size", "Terminal font size in points. 0 follows the editor."),
+        def(
+            "kubectl",
+            "Kubernetes",
+            "kubectl Command",
+            "What the cluster view runs to read your cluster, e.g. kubectl or /opt/homebrew/bin/kubectl.",
+        ),
         def("tree_hidden", "Files", "Hidden in File Tree", "Comma-separated names the file tree doesn't show."),
         def("ignore", "Files", "Quick Open Ignore", "Comma-separated directory and file names Go to File skips."),
     ];
@@ -173,6 +179,7 @@ fn is_modified(key: &str, c: &Config) -> bool {
         "show_sidebar" => c.show_sidebar != d.show_sidebar,
         "show_terminal" => c.show_terminal != d.show_terminal,
         "shell" => c.shell != d.shell,
+        "kubectl" => c.kubectl != d.kubectl,
         "terminal_font_size" => c.terminal_font_size != d.terminal_font_size,
         "tree_hidden" => c.tree_hidden != d.tree_hidden,
         "ignore" => c.ignore != d.ignore,
@@ -202,6 +209,7 @@ fn reset(key: &str, c: &mut Config) {
         "show_sidebar" => c.show_sidebar = d.show_sidebar,
         "show_terminal" => c.show_terminal = d.show_terminal,
         "shell" => c.shell = d.shell,
+        "kubectl" => c.kubectl = d.kubectl,
         "terminal_font_size" => c.terminal_font_size = d.terminal_font_size,
         "tree_hidden" => c.tree_hidden = d.tree_hidden,
         "ignore" => c.ignore = d.ignore,
@@ -320,6 +328,11 @@ fn control(ui: &mut egui::Ui, key: &str, c: &mut Config, drafts: &mut HashMap<St
             let shell_env = std::env::var("SHELL").unwrap_or_else(|_| "sh".into());
             if let Some(v) = text_field(ui, drafts, key, &c.shell, &shell_env) {
                 c.shell = v;
+            }
+        }
+        "kubectl" => {
+            if let Some(v) = text_field(ui, drafts, key, &c.kubectl, "kubectl") {
+                c.kubectl = v;
             }
         }
         "tree_hidden" => {
@@ -490,6 +503,7 @@ mod tests {
                 "show_sidebar" => c.show_sidebar = false,
                 "show_terminal" => c.show_terminal = false,
                 "shell" => c.shell = "zsh".into(),
+                "kubectl" => c.kubectl = "/opt/homebrew/bin/kubectl".into(),
                 "terminal_font_size" => c.terminal_font_size = 12.0,
                 "tree_hidden" => c.tree_hidden.clear(),
                 "ignore" => c.ignore.clear(),

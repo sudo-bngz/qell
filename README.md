@@ -161,6 +161,23 @@ bottom, and language-server completion for the languages you actually use.
   macOS) go back and forward.
 - **Command palette** (`Ctrl+Shift+P`), **quick open** (`Ctrl+P`),
   **go to line** (`Ctrl+G`).
+- **Kubernetes cluster view** (`Ctrl/⌘+Shift+K`) — a k9s-style table where
+  the editor is: pods, deployments, services, nodes, events and anything
+  else your cluster serves, in a monospace list you drive from the
+  keyboard. `j`/`k` move, `Enter` goes in (a namespace's pods, a workload's
+  or a service's pods, a node's pods, a pod's containers), `Esc` comes
+  back, `/` filters, `:` switches resource by name or short name (`:po`,
+  `:svc`, `:ns`, `:ctx`), `0` shows every namespace, `r` refreshes, `?`
+  lists the keys. Rows are coloured by what the cluster says: a
+  `CrashLoopBackOff` pod and a `NotReady` node in red, a rollout still
+  catching up in yellow.
+
+  It reads everything through your own `kubectl`, so it uses your
+  kubeconfig, your contexts and your credential plugins (`aws eks
+  get-token` and the like) — Qell holds no credentials and installs
+  nothing. The list refreshes every two seconds **only while the panel has
+  the keyboard**, and stops the moment you click elsewhere; the header says
+  which it is doing. Nothing talks to a cluster in the background.
 
 ## Install
 
@@ -213,6 +230,7 @@ npm i -g typescript typescript-language-server
 | Toggle sidebar        | `Ctrl+B`           |
 | Toggle word wrap      | `Alt+Z`            |
 | Explorer / Source Control | `Ctrl+Shift+E` / `Ctrl+Shift+G` |
+| Kubernetes cluster    | `Ctrl+Shift+K`     |
 | Toggle terminal       | `` Ctrl+` ``       |
 | New terminal          | `` Ctrl+Shift+` `` |
 | Next / prev terminal  | `Ctrl+PageDown/Up` |
@@ -268,6 +286,7 @@ crates/
   qell-lsp       LSP client: process + JSON-RPC framing + document sync + completion
   qell-index     workspace index: file text + trigrams for search, tree-sitter tags for definitions
   qell-term      PTY + VT emulation (alacritty_terminal) rendered as plain cell snapshots
+  qell-k8s       reading a cluster through kubectl: contexts, listings, k9s-style columns
   qell-plugins   Wasmtime host and the plugin ABI
   qell-app       the egui/eframe application: panels, keymap, palette
 plugins/

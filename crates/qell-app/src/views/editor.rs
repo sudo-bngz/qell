@@ -23,6 +23,11 @@ const TEXT_PAD: f32 = 8.0;
 pub fn show_central(app: &mut QellApp, ctx: &Context) {
     let bg = app.palette.editor_bg;
     egui::CentralPanel::default().frame(egui::Frame::new().fill(bg)).show(ctx, |ui| {
+        // The cluster view takes the whole area, k9s-style.
+        if app.k8s.open {
+            super::k8s::show(app, ui, ctx);
+            return;
+        }
         show_tabs(app, ui);
         show_disk_bar(app, ui);
         if app.config.vim_mode {

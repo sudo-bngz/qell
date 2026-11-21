@@ -1,0 +1,317 @@
+//! Reading a Kubernetes cluster for Qell's cluster view.
+//!
+//! Everything goes through `kubectl`, on purpose: it already knows the
+//! kubeconfig, the contexts and the credential plugins (`aws eks get-token`
+//! and friends), so Qell doesn't hold credentials or speak to the API
+//! server itself. Nothing is installed and nothing runs on its own; the
+//! view asks, this crate runs one command and parses what comes back.
+
+pub mod tables;
+
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::time::Duration;
+
+pub use tables::{age, Health, Row, Table};
+
+/// How long one `kubectl` call may take before it is given up on. A
+/// cluster behind a dead VPN would otherwise hang the worker.
+const TIMEOUT: Duration = Duration::from_secs(15);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Error {
+    /// `kubectl` isn't on the PATH.
+    NotInstalled,
+    /// It ran and said no (no cluster, no permission, unknown resource).
+    Failed(String),
+    /// It took longer than [`TIMEOUT`].
+    TimedOut,
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::NotInstalled => write!(
+                f,
+                "kubectl isn't installed, and Qell reads your cluster through it. Install it the way you install your other \
+                 tools (brew install kubectl, or your distribution's package), then press r. Qell never installs anything \
+                 for you."
+            ),
+            Error::TimedOut => write!(f, "kubectl didn't answer within {}s. Is the cluster reachable?", TIMEOUT.as_secs()),
+            Error::Failed(message) => write!(f, "{message}"),
+        }
+    }
+}
+
+/// One kind the view can list, with the short names people type.
+pub struct Kind {
+    pub name: &'static str,
+    pub aliases: &'static [&'static str],
+    /// Whether it lives in a namespace (nodes and namespaces don't).
+    pub namespaced: bool,
+}
+
+/// The kinds `:` completes. Anything else you type is passed to kubectl
+/// as it is, so custom resources work too, with name and age for columns.
+pub const KINDS: &[Kind] = &[
+    Kind { name: "pods", aliases: &["po", "pod"], namespaced: true },
+    Kind { name: "deployments", aliases: &["deploy", "deployment"], namespaced: true },
+    Kind { name: "statefulsets", aliases: &["sts", "statefulset"], namespaced: true },
+    Kind { name: "daemonsets", aliases: &["ds", "daemonset"], namespaced: true },
+    Kind { name: "services", aliases: &["svc", "service"], namespaced: true },
+    Kind { name: "ingresses", aliases: &["ing", "ingress"], namespaced: true },
+    Kind { name: "configmaps", aliases: &["cm", "configmap"], namespaced: true },
+    Kind { name: "secrets", aliases: &["secret"], namespaced: true },
+    Kind { name: "jobs", aliases: &["job"], namespaced: true },
+    Kind { name: "cronjobs", aliases: &["cj", "cronjob"], namespaced: true },
+    Kind { name: "persistentvolumeclaims", aliases: &["pvc"], namespaced: true },
+    Kind { name: "events", aliases: &["ev", "event"], namespaced: true },
+    Kind { name: "nodes", aliases: &["no", "node"], namespaced: false },
+    Kind { name: "namespaces", aliases: &["ns", "namespace"], namespaced: false },
+    Kind { name: "persistentvolumes", aliases: &["pv"], namespaced: false },
+];
+
+/// The kind a typed word means (`po` → `pods`), or the word itself.
+pub fn resolve(word: &str) -> String {
+    let word = word.trim().to_lowercase();
+    KINDS.iter().find(|k| k.name == word || k.aliases.contains(&word.as_str())).map(|k| k.name.to_string()).unwrap_or(word)
+}
+
+/// Whether a kind lives in a namespace. Unknown kinds are assumed to.
+pub fn is_namespaced(kind: &str) -> bool {
+    KINDS.iter().find(|k| k.name == kind).map(|k| k.namespaced).unwrap_or(true)
+}
+
+/// What to list: the kind, where, and how it was narrowed down.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Listing {
+    pub kind: String,
+    /// `None` means every namespace (`-A`).
+    pub namespace: Option<String>,
+    /// `-l app=api`, for the pods of a deployment or a service.
+    pub selector: Option<String>,
+    /// `--field-selector spec.nodeName=…`, for the pods of a node.
+    pub field_selector: Option<String>,
+    /// One pod's containers instead of a kubectl listing.
+    pub containers_of: Option<String>,
+}
+
+impl Listing {
+    pub fn new(kind: &str, namespace: Option<String>) -> Self {
+        Self { kind: kind.to_string(), namespace, ..Default::default() }
+    }
+
+    /// The line the view shows above the table.
+    pub fn title(&self) -> String {
+        if let Some(pod) = &self.containers_of {
+            return format!("containers of {pod}");
+        }
+        let mut title = self.kind.clone();
+        if let Some(sel) = &self.selector {
+            title.push_str(&format!("  -l {sel}"));
+        }
+        if let Some(f) = &self.field_selector {
+            title.push_str(&format!("  {f}"));
+        }
+        title
+    }
+}
+
+/// Runs `kubectl`. The binary is configurable because people keep it in
+/// odd places (asdf, a version manager, a wrapper script).
+#[derive(Debug, Clone)]
+pub struct Client {
+    pub bin: String,
+    /// The context to use, or the kubeconfig's current one when `None`.
+    pub context: Option<String>,
+}
+
+impl Default for Client {
+    fn default() -> Self {
+        Self { bin: "kubectl".to_string(), context: None }
+    }
+}
+
+impl Client {
+    pub fn new(bin: impl Into<String>) -> Self {
+        Self { bin: bin.into(), context: None }
+    }
+
+    /// Run kubectl with these arguments and give back its stdout.
+    pub fn run(&self, args: &[&str]) -> Result<String, Error> {
+        let mut cmd = Command::new(&self.bin);
+        if let Some(ctx) = &self.context {
+            cmd.args(["--context", ctx]);
+        }
+        cmd.args(args);
+        cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(Error::NotInstalled),
+            Err(e) => return Err(Error::Failed(e.to_string())),
+        };
+        // `wait_with_output` has no deadline of its own, so it waits on a
+        // thread and the child is killed if it overstays.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        std::thread::Builder::new()
+            .name("kubectl".into())
+            .spawn(move || {
+                use std::io::Read;
+                let mut out = String::new();
+                let mut err = String::new();
+                if let Some(mut s) = stdout {
+                    let _ = s.read_to_string(&mut out);
+                }
+                if let Some(mut s) = stderr {
+                    let _ = s.read_to_string(&mut err);
+                }
+                let _ = tx.send((out, err));
+            })
+            .map_err(|e| Error::Failed(e.to_string()))?;
+        let output = rx.recv_timeout(TIMEOUT);
+        let (out, err) = match output {
+            Ok(pair) => pair,
+            Err(_) => {
+                let _ = child.kill();
+                return Err(Error::TimedOut);
+            }
+        };
+        let status = match child.wait() {
+            Ok(s) => s,
+            Err(e) => return Err(Error::Failed(e.to_string())),
+        };
+        if status.success() {
+            Ok(out)
+        } else {
+            Err(Error::Failed(tidy_error(&err)))
+        }
+    }
+
+    /// The contexts in the kubeconfig, and which one is current.
+    pub fn contexts(&self) -> Result<(Vec<String>, Option<String>), Error> {
+        let names = self.run(&["config", "get-contexts", "-o", "name"])?;
+        let current = self.run(&["config", "current-context"]).ok().map(|c| c.trim().to_string());
+        let mut list: Vec<String> = names.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect();
+        list.sort();
+        Ok((list, current.filter(|c| !c.is_empty())))
+    }
+
+    /// Run the listing and build its table. `now` is the time in seconds
+    /// since the epoch, for the age column.
+    pub fn list(&self, listing: &Listing, now: i64) -> Result<Table, Error> {
+        if let Some(pod) = &listing.containers_of {
+            let mut args = vec!["get", "pod", pod.as_str(), "-o", "json"];
+            if let Some(ns) = &listing.namespace {
+                args.extend(["-n", ns.as_str()]);
+            }
+            let json: serde_json::Value = parse(&self.run(&args)?)?;
+            return Ok(tables::containers(&json, now));
+        }
+        let mut args: Vec<String> = vec!["get".into(), listing.kind.clone(), "-o".into(), "json".into()];
+        let namespaced = is_namespaced(&listing.kind);
+        match (&listing.namespace, namespaced) {
+            (Some(ns), true) => args.extend(["-n".to_string(), ns.clone()]),
+            (None, true) => args.push("--all-namespaces".to_string()),
+            (_, false) => {}
+        }
+        if let Some(sel) = &listing.selector {
+            args.extend(["-l".to_string(), sel.clone()]);
+        }
+        if let Some(f) = &listing.field_selector {
+            args.extend(["--field-selector".to_string(), f.clone()]);
+        }
+        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+        let json: serde_json::Value = parse(&self.run(&borrowed)?)?;
+        let items = json["items"].as_array().cloned().unwrap_or_default();
+        let across = namespaced && listing.namespace.is_none();
+        Ok(tables::build(&listing.kind, &items, now, across))
+    }
+}
+
+fn parse(text: &str) -> Result<serde_json::Value, Error> {
+    serde_json::from_str(text).map_err(|e| Error::Failed(format!("kubectl's answer wasn't JSON: {e}")))
+}
+
+/// kubectl's errors are readable already; this only drops the noise.
+fn tidy_error(stderr: &str) -> String {
+    let line = stderr
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with("Unable to connect to the server: dial tcp"))
+        .unwrap_or_else(|| stderr.trim());
+    let line = line.strip_prefix("error: ").unwrap_or(line);
+    if line.is_empty() {
+        "kubectl failed without saying why.".to_string()
+    } else {
+        line.to_string()
+    }
+}
+
+/// Where a `kubectl` is, for the status line. `None` when it isn't on the
+/// PATH: the view says so instead of pretending the cluster is empty.
+pub fn which(bin: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).map(|d| d.join(bin)).find(|p| p.is_file())
+}
+
+/// Seconds since the epoch, for the age column.
+pub fn now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_names_resolve() {
+        assert_eq!(resolve("po"), "pods");
+        assert_eq!(resolve("SVC"), "services");
+        assert_eq!(resolve(" deploy "), "deployments");
+        // Anything else is handed to kubectl as typed.
+        assert_eq!(resolve("widgets.example.com"), "widgets.example.com");
+    }
+
+    #[test]
+    fn cluster_wide_kinds_are_known() {
+        assert!(!is_namespaced("nodes"));
+        assert!(!is_namespaced("namespaces"));
+        assert!(is_namespaced("pods"));
+        assert!(is_namespaced("widgets"));
+    }
+
+    #[test]
+    fn a_listing_says_what_it_is() {
+        let mut l = Listing::new("pods", Some("web".into()));
+        assert_eq!(l.title(), "pods");
+        l.selector = Some("app=api".into());
+        assert_eq!(l.title(), "pods  -l app=api");
+        l.containers_of = Some("api-0".into());
+        assert_eq!(l.title(), "containers of api-0");
+    }
+
+    #[test]
+    fn a_missing_kubectl_is_its_own_error() {
+        let client = Client::new("kubectl-that-does-not-exist");
+        assert_eq!(client.run(&["version"]), Err(Error::NotInstalled));
+        assert!(Error::NotInstalled.to_string().contains("install"));
+    }
+
+    #[test]
+    fn errors_keep_the_line_that_matters() {
+        assert_eq!(
+            tidy_error("error: the server doesn't have a resource type \"widgets\"\n"),
+            "the server doesn't have a resource type \"widgets\""
+        );
+        assert_eq!(tidy_error("   \n"), "kubectl failed without saying why.");
+    }
+
+    #[test]
+    fn a_failing_command_keeps_what_it_said() {
+        // `false` exists everywhere and says nothing, which is the awkward case.
+        let client = Client::new("false");
+        assert_eq!(client.run(&["anything"]), Err(Error::Failed("kubectl failed without saying why.".into())));
+    }
+}

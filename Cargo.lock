@@ -2636,6 +2636,7 @@ dependencies = [
  "qell-core",
  "qell-git",
  "qell-index",
+ "qell-k8s",
  "qell-lsp",
  "qell-plugins",
  "qell-term",
@@ -2707,6 +2708,14 @@ dependencies = [
  "tree-sitter-rust",
  "tree-sitter-tags",
  "tree-sitter-typescript",
+]
+
+[[package]]
+name = "qell-k8s"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "serde_json",
 ]
 
 [[package]]
