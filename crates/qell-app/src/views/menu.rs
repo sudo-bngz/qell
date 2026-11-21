@@ -50,6 +50,7 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                 ui.separator();
                 item(ui, app, Command::FindInFile);
                 item(ui, app, Command::ReplaceInFile);
+                item(ui, app, Command::ReplaceInFiles);
             });
             ui.menu_button("View", |ui| {
                 item(ui, app, Command::CommandPalette);

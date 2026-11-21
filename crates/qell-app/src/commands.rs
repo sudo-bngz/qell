@@ -35,6 +35,7 @@ pub enum Command {
     ShowSearch,
     FindInFile,
     ReplaceInFile,
+    ReplaceInFiles,
     FindNext,
     FindPrevious,
     ShowSourceControl,
@@ -90,6 +91,7 @@ impl Command {
         Command::ShowSearch,
         Command::FindInFile,
         Command::ReplaceInFile,
+        Command::ReplaceInFiles,
         Command::FindNext,
         Command::FindPrevious,
         Command::ShowSourceControl,
@@ -145,6 +147,7 @@ impl Command {
             Command::ShowSearch => "View: Search in Files",
             Command::FindInFile => "Find",
             Command::ReplaceInFile => "Replace",
+            Command::ReplaceInFiles => "Replace in Files",
             Command::FindNext => "Find Next",
             Command::FindPrevious => "Find Previous",
             Command::GoToDefinition => "Go: Go to Definition",
@@ -220,6 +223,7 @@ impl Command {
                     s(cmd, Key::H)
                 }
             }
+            Command::ReplaceInFiles => s(cmd_shift, Key::H),
             Command::FindNext => s(Modifiers::NONE, Key::F3),
             Command::FindPrevious => s(Modifiers::SHIFT, Key::F3),
             Command::GoToDefinition => s(Modifiers::NONE, Key::F12),
