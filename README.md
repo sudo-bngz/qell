@@ -99,6 +99,9 @@ bottom, and language-server completion for the languages you actually use.
   the pair at the cursor is boxed, and vertical guides mark each indentation
   level, with the block around the cursor highlighted. The indentation step
   (2, 4, tabs…) is detected per file. Both can be turned off in Settings.
+- **Brackets and quotes close themselves** as you type, a selection gets
+  wrapped when you type one around it, and backspace between an empty pair
+  takes both halves. Off with `auto_close` in the settings.
 - **Toggle comment** (`Ctrl/⌘+/`) — comments the lines the cursors are on,
   or uncomments them when they all already are, lining the markers up with
   the least indented line.

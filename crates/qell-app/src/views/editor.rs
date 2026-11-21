@@ -367,6 +367,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
     let bracket_colors = app.config.bracket_pair_colors;
     let word_wrap = app.config.word_wrap;
     let vim_on = app.config.vim_mode;
+    let auto_close = app.config.auto_close;
     let indent_guides = app.config.indent_guides;
 
     let has_focus_before = app.focus == Focus::Editor && !app.modal_open();
@@ -485,7 +486,12 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                         if (mods.ctrl && !mods.alt) || mods.mac_cmd {
                             used = false;
                         } else {
-                            b.insert(t);
+                            // A bracket or quote may bring its other half.
+                            let paired =
+                                auto_close && t.chars().count() == 1 && b.insert_pair(t.chars().next().expect("one char"));
+                            if !paired {
+                                b.insert(t);
+                            }
                             doc.scroll_to_cursor = true;
                             let ident = t.chars().all(|c| c.is_alphanumeric() || c == '_');
                             let single = t.chars().next().filter(|_| t.chars().count() == 1);
@@ -599,7 +605,9 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                                 if word && b.cursor.selection.is_empty() {
                                     b.move_word(false, true);
                                     b.delete_selection();
-                                } else {
+                                } else if !(auto_close && b.backspace_pair()) {
+                                    // Between the two halves of an empty
+                                    // pair, both go.
                                     b.backspace();
                                 }
                                 let w = b.word_before_cursor();

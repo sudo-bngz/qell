@@ -710,6 +710,89 @@ impl Buffer {
         self.set_cursors(kept);
     }
 
+    /// The character that closes `open`, for the pairs Qell closes for you.
+    fn closer_of(open: char) -> Option<char> {
+        Some(match open {
+            '(' => ')',
+            '[' => ']',
+            '{' => '}',
+            '"' => '"',
+            '\'' => '\'',
+            '`' => '`',
+            _ => return None,
+        })
+    }
+
+    /// Type `ch` with its closing half added, the selection wrapped in the
+    /// pair, or the cursor stepped over a closer you typed yourself.
+    /// Returns false when `ch` is nothing special and should just be typed.
+    pub fn insert_pair(&mut self, ch: char) -> bool {
+        let quote = matches!(ch, '"' | '\'' | '`');
+        let closers = [')', ']', '}', '"', '\'', '`'];
+        let next_char = |b: &Buffer, c: &Cursor| {
+            let at = b.pos_to_char(c.head());
+            (at < b.rope.len_chars()).then(|| b.rope.char(at))
+        };
+        // Typing the closing half where it already sits: step over it.
+        if closers.contains(&ch) && self.cursors().iter().all(|c| c.selection.is_empty() && next_char(self, c) == Some(ch)) {
+            self.move_right(false);
+            return true;
+        }
+        let Some(close) = Self::closer_of(ch) else { return false };
+        // Something is selected: put the pair around it.
+        if self.cursors().iter().any(|c| !c.selection.is_empty()) {
+            self.history.commit();
+            self.edit_each(|b, c| {
+                let (s, e) = c.selection.ordered();
+                (s != e).then(|| {
+                    let (a, z) = (b.pos_to_char(s), b.pos_to_char(e));
+                    let inner = b.rope.slice(a..z).to_string();
+                    (a, z, format!("{ch}{inner}{close}"))
+                })
+            });
+            self.history.commit();
+            return true;
+        }
+        // Not before a letter: `fo|o` + `(` types a plain bracket.
+        let before_word = self.cursors().iter().any(|c| next_char(self, c).is_some_and(|n| n.is_alphanumeric() || n == '_'));
+        // A quote right after a word is an apostrophe or a lifetime.
+        let prev_word = quote
+            && self.cursors().iter().any(|c| {
+                let at = self.pos_to_char(c.head());
+                at > 0 && {
+                    let p = self.rope.char(at - 1);
+                    p.is_alphanumeric() || p == '_' || p == '\\'
+                }
+            });
+        if before_word || prev_word {
+            return false;
+        }
+        self.insert(&format!("{ch}{close}"));
+        self.move_left(false);
+        true
+    }
+
+    /// Backspace between the two halves of an empty pair takes both.
+    pub fn backspace_pair(&mut self) -> bool {
+        let pair_around = |b: &Buffer, c: &Cursor| {
+            if !c.selection.is_empty() {
+                return false;
+            }
+            let at = b.pos_to_char(c.head());
+            at > 0 && at < b.rope.len_chars() && Self::closer_of(b.rope.char(at - 1)) == Some(b.rope.char(at))
+        };
+        if !self.cursors().iter().all(|c| pair_around(self, c)) {
+            return false;
+        }
+        self.history.commit();
+        self.edit_each(|b, c| {
+            let at = b.pos_to_char(c.head());
+            Some((at - 1, at + 1, String::new()))
+        });
+        self.history.commit();
+        true
+    }
+
     /// Put the one cursor here (any others are dropped).
     pub fn set_cursor(&mut self, p: Position, extend: bool) {
         self.extra.clear();
@@ -995,5 +1078,74 @@ mod comment_tests {
         let mut b = Buffer::from_text("x\n", Some(PathBuf::from("notes.txt")));
         b.toggle_comment();
         assert_eq!(b.text(), "x\n");
+    }
+}
+
+#[cfg(test)]
+mod pair_tests {
+    use super::*;
+
+    fn buf(text: &str, col: usize) -> Buffer {
+        let mut b = Buffer::from_text(text, Some(PathBuf::from("a.rs")));
+        b.set_cursor(Position::new(0, col), false);
+        b
+    }
+
+    #[test]
+    fn typing_an_opener_adds_its_closer() {
+        let mut b = buf("", 0);
+        assert!(b.insert_pair('('));
+        assert_eq!((b.text(), b.cursor.head().col), ("()".to_string(), 1));
+        assert!(b.insert_pair('"'));
+        assert_eq!(b.text(), "(\"\")");
+    }
+
+    #[test]
+    fn typing_the_closer_steps_over_it() {
+        let mut b = buf("()", 1);
+        assert!(b.insert_pair(')'));
+        assert_eq!((b.text(), b.cursor.head().col), ("()".to_string(), 2));
+        // With nothing to step over it is typed as usual.
+        let mut b = buf("", 0);
+        assert!(!b.insert_pair(')'));
+    }
+
+    #[test]
+    fn a_selection_is_wrapped() {
+        let mut b = Buffer::from_text("hello world", Some(PathBuf::from("a.rs")));
+        b.set_cursor(Position::new(0, 0), false);
+        b.set_cursor(Position::new(0, 5), true);
+        assert!(b.insert_pair('"'));
+        assert_eq!(b.text(), "\"hello\" world");
+    }
+
+    #[test]
+    fn no_pair_in_front_of_a_word_or_after_one() {
+        // `(` right before a letter stays a lone bracket.
+        let mut b = buf("foo", 0);
+        assert!(!b.insert_pair('('));
+        // An apostrophe after a word (don't, 'a) isn't a pair either.
+        let mut b = buf("don", 3);
+        assert!(!b.insert_pair('\''));
+    }
+
+    #[test]
+    fn backspace_between_the_halves_takes_both() {
+        let mut b = buf("()", 1);
+        assert!(b.backspace_pair());
+        assert_eq!(b.text(), "");
+        // Only when they really are a pair.
+        let mut b = buf("(x)", 2);
+        assert!(!b.backspace_pair());
+    }
+
+    #[test]
+    fn pairs_work_at_every_cursor() {
+        let mut b = Buffer::from_text("a\nb\n", Some(PathBuf::from("a.rs")));
+        b.set_cursors(vec![Cursor::at(Position::new(0, 1)), Cursor::at(Position::new(1, 1))]);
+        assert!(b.insert_pair('('));
+        assert_eq!(b.text(), "a()\nb()\n");
+        assert!(b.backspace_pair());
+        assert_eq!(b.text(), "a\nb\n");
     }
 }

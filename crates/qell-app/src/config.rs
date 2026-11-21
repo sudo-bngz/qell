@@ -18,6 +18,9 @@ pub struct Config {
     pub font_size: f32,
     /// Spaces inserted by the Tab key.
     pub tab_size: usize,
+    /// Close brackets and quotes as you type them, and wrap a selection
+    /// when you type one around it.
+    pub auto_close: bool,
     /// Format the file when it is saved, when a formatter is available.
     pub format_on_save: bool,
     /// Ask language servers for completions while typing (not only on Ctrl+Space).
@@ -74,6 +77,7 @@ impl Default for Config {
         Self {
             font_size: 14.0,
             tab_size: 4,
+            auto_close: true,
             format_on_save: true,
             auto_complete: true,
             vim_mode: false,

@@ -55,6 +55,12 @@ fn defs() -> Vec<Def> {
         def("tab_size", "Editor", "Tab Size", "Spaces inserted by the Tab key."),
         def("auto_complete", "Editor", "Auto Complete", "Suggest completions while typing, not only on Ctrl+Space."),
         def(
+            "auto_close",
+            "Editor",
+            "Close Brackets and Quotes",
+            "Add the closing half as you type, wrap a selection when you type a bracket or quote around it, and take both away on backspace.",
+        ),
+        def(
             "format_on_save",
             "Editor",
             "Format on Save",
@@ -151,6 +157,7 @@ fn is_modified(key: &str, c: &Config) -> bool {
         "font_size" => c.font_size != d.font_size,
         "tab_size" => c.tab_size != d.tab_size,
         "auto_complete" => c.auto_complete != d.auto_complete,
+        "auto_close" => c.auto_close != d.auto_close,
         "format_on_save" => c.format_on_save != d.format_on_save,
         "vim_mode" => c.vim_mode != d.vim_mode,
         "word_wrap" => c.word_wrap != d.word_wrap,
@@ -179,6 +186,7 @@ fn reset(key: &str, c: &mut Config) {
         "font_size" => c.font_size = d.font_size,
         "tab_size" => c.tab_size = d.tab_size,
         "auto_complete" => c.auto_complete = d.auto_complete,
+        "auto_close" => c.auto_close = d.auto_close,
         "format_on_save" => c.format_on_save = d.format_on_save,
         "vim_mode" => c.vim_mode = d.vim_mode,
         "word_wrap" => c.word_wrap = d.word_wrap,
@@ -265,6 +273,9 @@ fn control(ui: &mut egui::Ui, key: &str, c: &mut Config, drafts: &mut HashMap<St
         }
         "auto_complete" => {
             ui.checkbox(&mut c.auto_complete, "Enabled");
+        }
+        "auto_close" => {
+            ui.checkbox(&mut c.auto_close, "Enabled");
         }
         "format_on_save" => {
             ui.checkbox(&mut c.format_on_save, "Enabled");
@@ -463,6 +474,7 @@ mod tests {
                 "font_size" => c.font_size = 20.0,
                 "tab_size" => c.tab_size = 2,
                 "auto_complete" => c.auto_complete = false,
+                "auto_close" => c.auto_close = false,
                 "format_on_save" => c.format_on_save = false,
                 "vim_mode" => c.vim_mode = true,
                 "word_wrap" => c.word_wrap = true,
