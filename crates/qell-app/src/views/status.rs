@@ -112,7 +112,15 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                             }
                         }
                         None => {
-                            ui.label(small(format!("LSP {lsp}")).color(lsp_color));
+                            // Which project the server was started in,
+                            // which isn't always the folder you opened.
+                            let tip = match app.lsp.server_root(lang_id) {
+                                Some(root) if root != app.lsp.root() => {
+                                    format!("{lang_name} language server, rooted at {}", root.display())
+                                }
+                                _ => format!("{lang_name} language server"),
+                            };
+                            ui.label(small(format!("LSP {lsp}")).color(lsp_color)).on_hover_text(tip);
                         }
                     }
                     ui.label(small(lang_name.to_string()));

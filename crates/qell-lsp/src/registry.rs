@@ -1,4 +1,8 @@
-//! Lazily-started language servers, one per language id.
+//! Lazily-started language servers: one per language *and* project.
+//!
+//! A folder of projects (`~/go/src`, a monorepo) gets one server per
+//! project you actually open a file in, each rooted where its own
+//! `go.mod`, `Cargo.toml` or repository is — see [`crate::roots`].
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -11,15 +15,22 @@ use qell_core::{Buffer, LanguageRegistry};
 use crate::client::{Client, Event, RequestId, Waker};
 use crate::convert::{path_to_uri, to_lsp_position};
 
+/// A server is one per language and project root, so two Go modules in
+/// the same folder get a gopls each, rooted where their module is.
+type Key = (String, PathBuf);
+
 pub struct Registry {
     root: PathBuf,
     /// User-configured server commands, overriding the built-in ones.
     overrides: HashMap<String, Vec<String>>,
-    clients: HashMap<String, Client>,
-    /// Languages whose server failed to start; we don't retry every keystroke.
-    failed: HashSet<String>,
-    /// Languages whose server program isn't installed, with that program.
-    missing: HashMap<String, String>,
+    clients: HashMap<Key, Client>,
+    /// Servers that failed to start; we don't retry every keystroke.
+    failed: HashSet<Key>,
+    /// Servers whose program isn't installed, with that program.
+    missing: HashMap<Key, String>,
+    /// The project each language was last used in, for the calls that
+    /// carry only a language id.
+    current: HashMap<String, PathBuf>,
     /// Wakes the UI when a server sends something.
     waker: Option<Waker>,
     /// Documents already sent with `didOpen`, keyed by uri.
@@ -37,6 +48,7 @@ impl Registry {
             clients: HashMap::new(),
             failed: HashSet::new(),
             missing: HashMap::new(),
+            current: HashMap::new(),
             waker: None,
             open: HashSet::new(),
             events_tx,
@@ -66,14 +78,18 @@ impl Registry {
             match ev {
                 Event::Exited { language, reason } => {
                     log::warn!("language server for {language} exited: {reason}");
-                    self.clients.remove(language);
-                    self.failed.insert(language.clone());
+                    // The event doesn't say which project it was, so the
+                    // one in front is the one that gives up.
+                    let key = self.key_of(language);
+                    self.clients.remove(&key);
+                    self.failed.insert(key);
                 }
                 // A proxy (rustup) started but the real server isn't there.
                 Event::NotInstalled { language, program } => {
-                    self.clients.remove(language);
-                    self.failed.insert(language.clone());
-                    self.missing.insert(language.clone(), program.clone());
+                    let key = self.key_of(language);
+                    self.clients.remove(&key);
+                    self.failed.insert(key.clone());
+                    self.missing.insert(key, program.clone());
                 }
                 _ => {}
             }
@@ -82,35 +98,64 @@ impl Registry {
         out
     }
 
+    /// Where the server for this file belongs: its own project, not
+    /// necessarily the folder you opened.
+    pub fn project_root(&self, lang_id: &str, file: Option<&Path>) -> PathBuf {
+        crate::roots::project_root(file, &self.root, lang_id)
+    }
+
+    /// The key of the project a language was last used in.
+    fn key_of(&self, lang_id: &str) -> Key {
+        let root = self.current.get(lang_id).cloned().unwrap_or_else(|| self.root.clone());
+        (lang_id.to_string(), root)
+    }
+
+    /// The server of the project last worked in, if it is running.
+    fn client(&self, lang_id: &str) -> Option<&Client> {
+        self.clients.get(&self.key_of(lang_id))
+    }
+
+    /// The server of the project this file belongs to. Saving or closing
+    /// a file of another project must reach that project's server, not
+    /// whichever one the cursor happens to be in.
+    fn client_at(&self, lang_id: &str, file: Option<&Path>) -> Option<&Client> {
+        self.clients.get(&(lang_id.to_string(), self.project_root(lang_id, file)))
+    }
+
     /// The client for a language, starting it if needed and possible.
-    pub fn client_for(&mut self, languages: &LanguageRegistry, lang_id: &str) -> Option<&Client> {
-        if !self.clients.contains_key(lang_id) && !self.failed.contains(lang_id) {
+    /// `file` decides which project it is rooted at.
+    pub fn client_for(&mut self, languages: &LanguageRegistry, lang_id: &str, file: Option<&Path>) -> Option<&Client> {
+        let root = self.project_root(lang_id, file);
+        self.current.insert(lang_id.to_string(), root.clone());
+        let key: Key = (lang_id.to_string(), root.clone());
+        if !self.clients.contains_key(&key) && !self.failed.contains(&key) {
             let owned: Vec<String> = match self.overrides.get(lang_id) {
                 Some(c) if !c.is_empty() => c.clone(),
                 _ => languages.get(lang_id)?.lsp?.iter().map(|s| s.to_string()).collect(),
             };
             let cmd: Vec<&str> = owned.iter().map(String::as_str).collect();
-            match Client::start(lang_id, &cmd, &self.root, self.events_tx.clone(), self.waker.clone()) {
+            log::debug!("starting {} for {lang_id} in {}", cmd.first().copied().unwrap_or_default(), root.display());
+            match Client::start(lang_id, &cmd, &root, self.events_tx.clone(), self.waker.clone()) {
                 Ok(c) => {
-                    self.clients.insert(lang_id.to_string(), c);
+                    self.clients.insert(key.clone(), c);
                 }
                 Err(e) if is_not_found(&e) => {
                     let program = cmd.first().copied().unwrap_or_default().to_string();
                     log::debug!("{program} not installed: no language server for {lang_id}");
-                    self.failed.insert(lang_id.to_string());
-                    self.missing.insert(lang_id.to_string(), program.clone());
+                    self.failed.insert(key.clone());
+                    self.missing.insert(key, program.clone());
                     let _ = self.events_tx.send(Event::NotInstalled { language: lang_id.to_string(), program });
                     return None;
                 }
                 Err(e) => {
                     log::warn!("{e:#}");
-                    self.failed.insert(lang_id.to_string());
+                    self.failed.insert(key);
                     let _ = self.events_tx.send(Event::Exited { language: lang_id.to_string(), reason: format!("{e:#}") });
                     return None;
                 }
             }
         }
-        self.clients.get(lang_id)
+        self.clients.get(&key)
     }
 
     /// Keep the server's copy of `buffer` in sync: sends `didOpen` the first
@@ -122,12 +167,13 @@ impl Registry {
         let Some(uri) = buffer.path().and_then(path_to_uri) else { return };
         let changes = buffer.take_changes();
 
-        // Make sure the server exists (this may start it).
-        if self.client_for(languages, &lang).is_none() {
+        // Make sure the server for this file's project exists.
+        let path = buffer.path().map(Path::to_path_buf);
+        if self.client_for(languages, &lang, path.as_deref()).is_none() {
             return;
         }
         let already_open = self.open.contains(&uri);
-        let Some(client) = self.clients.get(&lang) else { return };
+        let Some(client) = self.client(&lang) else { return };
         if !client.is_ready() {
             // Dropping the changes is fine: didOpen sends the full text.
             return;
@@ -144,7 +190,7 @@ impl Registry {
 
     pub fn did_save(&mut self, buffer: &Buffer) {
         if let (Some(lang), Some(uri)) = (buffer.language(), buffer.path().and_then(path_to_uri)) {
-            if let Some(c) = self.clients.get(lang) {
+            if let Some(c) = self.client_at(lang, buffer.path()) {
                 c.did_save(uri);
             }
         }
@@ -152,7 +198,7 @@ impl Registry {
 
     pub fn did_close(&mut self, buffer: &Buffer) {
         if let (Some(lang), Some(uri)) = (buffer.language(), buffer.path().and_then(path_to_uri)) {
-            if let Some(c) = self.clients.get(lang) {
+            if let Some(c) = self.client_at(lang, buffer.path()) {
                 c.did_close(uri.clone());
             }
             self.open.remove(&uri);
@@ -172,7 +218,7 @@ impl Registry {
         self.sync(languages, buffer);
         let lang = buffer.language()?;
         let uri = buffer.path().and_then(path_to_uri)?;
-        let client = self.clients.get(lang).filter(|c| c.is_ready())?;
+        let client = self.client(lang).filter(|c| c.is_ready())?;
         let p = buffer.cursor.head();
         Some(client.completion(uri, to_lsp_position(&buffer.line(p.line), p), trigger, refresh_incomplete))
     }
@@ -180,7 +226,7 @@ impl Registry {
     /// Fetch the documentation / edits a server left out of a completion
     /// item. `None` when the server doesn't do that.
     pub fn resolve_completion(&self, lang_id: &str, item: &lsp_types::CompletionItem) -> Option<RequestId> {
-        let client = self.clients.get(lang_id).filter(|c| c.is_ready() && c.resolves_completions())?;
+        let client = self.client(lang_id).filter(|c| c.is_ready() && c.resolves_completions())?;
         Some(client.resolve_completion(item))
     }
 
@@ -195,7 +241,7 @@ impl Registry {
         self.sync(languages, buffer);
         let lang = buffer.language()?;
         let uri = buffer.path().and_then(path_to_uri)?;
-        let client = self.clients.get(lang).filter(|c| c.is_ready())?;
+        let client = self.client(lang).filter(|c| c.is_ready())?;
         client.supports_formatting().then(|| client.formatting(uri, tab_size as u32, true))
     }
 
@@ -214,7 +260,7 @@ impl Registry {
         self.sync(languages, buffer);
         let lang = buffer.language()?;
         let uri = buffer.path().and_then(path_to_uri)?;
-        let client = self.clients.get(lang).filter(|c| c.is_ready())?;
+        let client = self.client(lang).filter(|c| c.is_ready())?;
         let p = buffer.cursor.head();
         let pos = to_lsp_position(&buffer.line(p.line), p);
         if references {
@@ -230,7 +276,7 @@ impl Registry {
         self.sync(languages, buffer);
         let lang = buffer.language()?;
         let uri = buffer.path().and_then(path_to_uri)?;
-        let client = self.clients.get(lang).filter(|c| c.is_ready())?;
+        let client = self.client(lang).filter(|c| c.is_ready())?;
         let p = buffer.cursor.head();
         let pos = to_lsp_position(&buffer.line(p.line), p);
         client.supports_rename().then(|| client.rename(uri, pos, new_name.to_string()))
@@ -238,8 +284,9 @@ impl Registry {
 
     /// Whether a ready server can rename symbols for this buffer.
     pub fn can_rename(&mut self, languages: &LanguageRegistry, buffer: &Buffer) -> bool {
-        let Some(lang) = buffer.language() else { return false };
-        self.client_for(languages, lang).is_some_and(|c| c.is_ready() && c.supports_rename())
+        let Some(lang) = buffer.language().map(str::to_string) else { return false };
+        let path = buffer.path().map(Path::to_path_buf);
+        self.client_for(languages, &lang, path.as_deref()).is_some_and(|c| c.is_ready() && c.supports_rename())
     }
 
     /// Ask what the server can do over the cursor's line or selection.
@@ -253,7 +300,7 @@ impl Registry {
         self.sync(languages, buffer);
         let lang = buffer.language()?;
         let uri = buffer.path().and_then(path_to_uri)?;
-        let client = self.clients.get(lang).filter(|c| c.is_ready())?;
+        let client = self.client(lang).filter(|c| c.is_ready())?;
         let (s, e) = buffer.cursor.selection.ordered();
         let range =
             lsp_types::Range { start: to_lsp_position(&buffer.line(s.line), s), end: to_lsp_position(&buffer.line(e.line), e) };
@@ -266,48 +313,54 @@ impl Registry {
         self.sync(languages, buffer);
         let lang = buffer.language()?;
         let uri = buffer.path().and_then(path_to_uri)?;
-        let client = self.clients.get(lang).filter(|c| c.is_ready())?;
+        let client = self.client(lang).filter(|c| c.is_ready())?;
         client.supports_document_symbols().then(|| client.document_symbols(uri))
     }
 
     /// Fill in the edit of an action the server sent without one.
     pub fn resolve_code_action(&self, lang_id: &str, action: &lsp_types::CodeAction) -> Option<RequestId> {
-        let client = self.clients.get(lang_id).filter(|c| c.is_ready())?;
+        let client = self.client(lang_id).filter(|c| c.is_ready())?;
         Some(client.resolve_code_action(action))
     }
 
     /// Run a command an action asked for.
     pub fn execute_command(&self, lang_id: &str, command: &lsp_types::Command) -> Option<RequestId> {
-        let client = self.clients.get(lang_id).filter(|c| c.is_ready())?;
+        let client = self.client(lang_id).filter(|c| c.is_ready())?;
         Some(client.execute_command(command))
     }
 
     /// Characters that open the completion list for a language.
     pub fn completion_triggers(&self, lang_id: &str) -> Vec<String> {
-        self.clients.get(lang_id).map(|c| c.completion_triggers()).unwrap_or_default()
+        self.client(lang_id).map(|c| c.completion_triggers()).unwrap_or_default()
     }
 
     pub fn request_hover(&mut self, buffer: &Buffer) -> Option<RequestId> {
         let lang = buffer.language()?;
         let uri = buffer.path().and_then(path_to_uri)?;
-        let client = self.clients.get(lang).filter(|c| c.is_ready())?;
+        let client = self.client_at(lang, buffer.path()).filter(|c| c.is_ready())?;
         let p = buffer.cursor.head();
         Some(client.hover(uri, to_lsp_position(&buffer.line(p.line), p)))
     }
 
     pub fn status(&self, lang_id: &str) -> &'static str {
-        match self.clients.get(lang_id) {
+        let key = self.key_of(lang_id);
+        match self.clients.get(&key) {
             Some(c) if c.is_ready() => "ready",
             Some(_) => "starting",
-            None if self.missing.contains_key(lang_id) => "not installed",
-            None if self.failed.contains(lang_id) => "unavailable",
+            None if self.missing.contains_key(&key) => "not installed",
+            None if self.failed.contains(&key) => "unavailable",
             None => "off",
         }
     }
 
     /// The server program of a language, when it isn't installed.
     pub fn missing_program(&self, lang_id: &str) -> Option<&str> {
-        self.missing.get(lang_id).map(String::as_str)
+        self.missing.get(&self.key_of(lang_id)).map(String::as_str)
+    }
+
+    /// Where the server for this language is rooted, for the status bar.
+    pub fn server_root(&self, lang_id: &str) -> Option<&Path> {
+        self.current.get(lang_id).map(PathBuf::as_path)
     }
 
     pub fn shutdown_all(&mut self) {
@@ -377,7 +430,7 @@ mod tests {
         let langs = qell_core::LanguageRegistry::new();
         let mut reg = Registry::new(std::env::temp_dir());
         reg.set_override("go", vec!["qell-no-such-server-xyz".into()]);
-        assert!(reg.client_for(&langs, "go").is_none());
+        assert!(reg.client_for(&langs, "go", None).is_none());
         assert_eq!(reg.status("go"), "not installed");
         assert_eq!(reg.missing_program("go"), Some("qell-no-such-server-xyz"));
         let events = reg.poll();
@@ -401,7 +454,7 @@ mod tests {
         let langs = qell_core::LanguageRegistry::new();
         let mut reg = Registry::new(dir.clone());
         reg.set_override("rust", vec![fake.to_string_lossy().into_owned()]);
-        let _ = reg.client_for(&langs, "rust");
+        let _ = reg.client_for(&langs, "rust", None);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while reg.status("rust") != "not installed" {
             let _ = reg.poll();
