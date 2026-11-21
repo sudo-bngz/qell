@@ -65,6 +65,20 @@ impl History {
         }
     }
 
+    /// Open a group for one keystroke made at several cursors. A run of
+    /// single-character inserts joins the group before it, so typing at
+    /// many cursors undoes in the same bites as typing at one.
+    pub fn begin_keystroke(&mut self, merge: bool) {
+        if self.grouping.is_none() {
+            self.grouping = Some(merge && !self.boundary && !self.undo.is_empty());
+        }
+    }
+
+    pub fn end_keystroke(&mut self, merge: bool) {
+        self.grouping = None;
+        self.boundary = !merge;
+    }
+
     pub fn end_group(&mut self) {
         self.grouping = None;
         self.boundary = true;
