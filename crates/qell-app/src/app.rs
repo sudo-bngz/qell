@@ -1523,6 +1523,12 @@ impl QellApp {
             }
             Command::ToggleSidebar => self.show_sidebar = !self.show_sidebar,
             Command::FormatDocument => self.format_active(false),
+            Command::ToggleComment => {
+                if let Some(doc) = self.docs.get_mut(self.active).filter(|d| !d.read_only) {
+                    doc.buffer.toggle_comment();
+                    doc.scroll_to_cursor = true;
+                }
+            }
             Command::AddNextOccurrence => self.add_occurrence(false),
             Command::SelectAllOccurrences => self.add_occurrence(true),
             Command::AddCursorAbove => self.add_cursor_line(-1),

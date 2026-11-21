@@ -26,6 +26,7 @@ pub enum Command {
     ToggleMinimap,
     ToggleVimMode,
     FormatDocument,
+    ToggleComment,
     AddNextOccurrence,
     SelectAllOccurrences,
     AddCursorAbove,
@@ -77,6 +78,7 @@ impl Command {
         Command::ToggleMinimap,
         Command::ToggleVimMode,
         Command::FormatDocument,
+        Command::ToggleComment,
         Command::AddNextOccurrence,
         Command::SelectAllOccurrences,
         Command::AddCursorAbove,
@@ -128,6 +130,7 @@ impl Command {
             Command::ToggleMinimap => "View: Toggle Minimap",
             Command::ToggleVimMode => "View: Toggle Vim Mode",
             Command::FormatDocument => "Format Document",
+            Command::ToggleComment => "Toggle Line Comment",
             Command::AddNextOccurrence => "Selection: Add Next Occurrence",
             Command::SelectAllOccurrences => "Selection: Select All Occurrences",
             Command::AddCursorAbove => "Selection: Add Cursor Above",
@@ -190,6 +193,7 @@ impl Command {
             Command::ToggleVimMode => None,
             // VS Code's ⇧⌥F / Shift+Alt+F.
             Command::FormatDocument => s(Modifiers::SHIFT | Modifiers::ALT, Key::F),
+            Command::ToggleComment => s(cmd, Key::Slash),
             Command::AddNextOccurrence => s(cmd, Key::D),
             Command::SelectAllOccurrences => s(cmd_shift, Key::L),
             // VS Code: ⌥⌘↑/↓ on macOS, Ctrl+Alt+↑/↓ elsewhere.

@@ -99,6 +99,9 @@ bottom, and language-server completion for the languages you actually use.
   the pair at the cursor is boxed, and vertical guides mark each indentation
   level, with the block around the cursor highlighted. The indentation step
   (2, 4, tabs…) is detected per file. Both can be turned off in Settings.
+- **Toggle comment** (`Ctrl/⌘+/`) — comments the lines the cursors are on,
+  or uncomments them when they all already are, lining the markers up with
+  the least indented line.
 - **Several cursors** — `Ctrl/⌘+D` selects the word under the cursor and
   then one more occurrence each time, `Ctrl/⌘+Shift+L` takes them all,
   `Alt+click` puts a cursor anywhere (click again to remove it), and
@@ -165,6 +168,7 @@ npm i -g typescript typescript-language-server
 | Command palette       | `Ctrl+Shift+P`     |
 | Go to file            | `Ctrl+P`           |
 | Go to line            | `Ctrl+G`           |
+| Toggle comment        | `Ctrl+/`           |
 | Add cursor at next occurrence | `Ctrl+D`     |
 | Select all occurrences | `Ctrl+Shift+L`     |
 | Add cursor above / below | `Ctrl+Alt+↑` / `Ctrl+Alt+↓` |

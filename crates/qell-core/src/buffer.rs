@@ -613,6 +613,103 @@ impl Buffer {
         self.cursor.goal_col = None;
     }
 
+    /// Comment the lines the cursors are on, or uncomment them when they
+    /// are all commented already (⌘/).
+    pub fn toggle_comment(&mut self) {
+        let Some(language) = self.language.clone() else { return };
+        let style = crate::comment::style_for(&language);
+        // Every line touched by a cursor or its selection.
+        let mut lines: Vec<usize> = Vec::new();
+        for c in self.cursors() {
+            let (s, e) = c.selection.ordered();
+            // A selection ending at column 0 doesn't reach into that line.
+            let last = if e.line > s.line && e.col == 0 { e.line - 1 } else { e.line };
+            lines.extend(s.line..=last);
+        }
+        lines.sort_unstable();
+        lines.dedup();
+        let Some(&first) = lines.first() else { return };
+        let Some(&last) = lines.last() else { return };
+        let text: Vec<(usize, String)> = lines.iter().map(|l| (*l, self.line(*l))).collect();
+        // Put the cursors back where they were, allowing for the markers.
+        let before = self.cursors();
+        self.history.commit();
+        let action = crate::comment::toggle(style, &text);
+        let shift: Box<dyn Fn(Position) -> Position> = match &action {
+            crate::comment::Action::Comment { lines, col, marker } => {
+                let (lines, col, len) = (lines.clone(), *col, marker.chars().count());
+                Box::new(
+                    move |p: Position| {
+                        if lines.contains(&p.line) && p.col >= col {
+                            Position::new(p.line, p.col + len)
+                        } else {
+                            p
+                        }
+                    },
+                )
+            }
+            crate::comment::Action::Uncomment { at, len } => {
+                let (at, len) = (at.clone(), *len);
+                Box::new(move |p: Position| match at.iter().find(|(l, _)| *l == p.line) {
+                    Some((_, col)) if p.col > *col => Position::new(p.line, p.col.saturating_sub(len).max(*col)),
+                    _ => p,
+                })
+            }
+            _ => Box::new(|p| p),
+        };
+        match action {
+            crate::comment::Action::Nothing => {}
+            crate::comment::Action::Comment { lines, col, marker } => {
+                self.history.begin_group();
+                for line in lines.iter().rev() {
+                    let at = Position::new(*line, col.min(self.line_len(*line)));
+                    let start = self.pos_to_char(at);
+                    self.apply(start, 0, &marker, true);
+                }
+                self.history.end_group();
+            }
+            crate::comment::Action::Uncomment { at, len } => {
+                self.history.begin_group();
+                for (line, col) in at.iter().rev() {
+                    let start = self.pos_to_char(Position::new(*line, *col));
+                    let len = len.min(self.line_len(*line).saturating_sub(*col));
+                    self.apply(start, len, "", true);
+                }
+                self.history.end_group();
+            }
+            crate::comment::Action::Wrap { open, close } => {
+                let (s, e) = self.cursor.selection.ordered();
+                let (s, e) = if s == e { (Position::new(first, 0), Position::new(last, self.line_len(last))) } else { (s, e) };
+                let inside = {
+                    let (a, b) = (self.pos_to_char(s), self.pos_to_char(e));
+                    self.rope.slice(a..b).to_string()
+                };
+                let trimmed = inside.trim();
+                self.history.begin_group();
+                // Already wrapped: take the markers off again.
+                let text = match trimmed.strip_prefix(open).and_then(|t| t.strip_suffix(close)) {
+                    Some(bare) => bare.trim().to_string(),
+                    None => format!("{open} {trimmed} {close}"),
+                };
+                let (a, b) = (self.pos_to_char(s), self.pos_to_char(e));
+                self.apply(a, b - a, &text, true);
+                self.history.end_group();
+            }
+        }
+        self.history.commit();
+        let kept: Vec<Cursor> = before
+            .iter()
+            .map(|c| {
+                let mut moved = *c;
+                moved.selection.anchor = self.clamp(shift(c.selection.anchor));
+                moved.selection.head = self.clamp(shift(c.selection.head));
+                moved.goal_col = None;
+                moved
+            })
+            .collect();
+        self.set_cursors(kept);
+    }
+
     /// Put the one cursor here (any others are dropped).
     pub fn set_cursor(&mut self, p: Position, extend: bool) {
         self.extra.clear();
@@ -847,5 +944,56 @@ mod multi_cursor_tests {
         let mut b = with_cursors("abcd\n", &[(0, 2), (0, 3)]);
         b.backspace();
         assert_eq!(b.text(), "ad\n");
+    }
+}
+
+#[cfg(test)]
+mod comment_tests {
+    use super::*;
+
+    fn tf(text: &str) -> Buffer {
+        Buffer::from_text(text, Some(PathBuf::from("main.tf")))
+    }
+
+    #[test]
+    fn comments_and_uncomments_the_cursor_line() {
+        let mut b = tf("a = 1\nb = 2\n");
+        b.toggle_comment();
+        assert_eq!(b.text(), "# a = 1\nb = 2\n");
+        b.toggle_comment();
+        assert_eq!(b.text(), "a = 1\nb = 2\n");
+        // And it is one undo step either way.
+        assert!(b.undo());
+        assert_eq!(b.text(), "# a = 1\nb = 2\n");
+    }
+
+    #[test]
+    fn comments_every_line_of_a_selection() {
+        let mut b = tf("locals {\n  a = 1\n  b = 2\n}\n");
+        b.set_cursor(Position::new(1, 0), false);
+        b.set_cursor(Position::new(2, 5), true);
+        b.toggle_comment();
+        assert_eq!(b.text(), "locals {\n  # a = 1\n  # b = 2\n}\n");
+        b.toggle_comment();
+        assert_eq!(b.text(), "locals {\n  a = 1\n  b = 2\n}\n");
+    }
+
+    #[test]
+    fn comments_the_lines_of_every_cursor() {
+        let mut b = tf("a\nb\nc\n");
+        b.set_cursors(vec![Cursor::at(Position::new(0, 0)), Cursor::at(Position::new(2, 0))]);
+        b.toggle_comment();
+        assert_eq!(b.text(), "# a\nb\n# c\n");
+        // Both cursors are still there, moved along by the markers.
+        assert_eq!(b.cursors().len(), 2);
+        b.toggle_comment();
+        assert_eq!(b.text(), "a\nb\nc\n");
+    }
+
+    #[test]
+    fn a_language_without_comments_is_left_alone() {
+        let mut b = Buffer::from_text("x\n", Some(PathBuf::from("notes.txt")));
+        b.toggle_comment();
+        assert_eq!(b.text(), "x\n");
     }
 }
