@@ -21,6 +21,8 @@ const CONTEXTS: &str = "contexts";
 
 /// How often the list is re-read while the panel has the keyboard.
 const REFRESH: Duration = Duration::from_secs(2);
+/// How often the header's cluster facts are read again.
+const INFO_REFRESH: Duration = Duration::from_secs(10);
 /// A row's height is the line height; this is its padding.
 const ROW_PAD: f32 = 2.0;
 
@@ -28,6 +30,7 @@ const ROW_PAD: f32 = 2.0;
 enum Msg {
     Table(Listing, Box<Table>),
     Failed(Listing, Error),
+    Info(Box<qell_k8s::Info>),
     Contexts(Vec<String>, Option<String>),
 }
 
@@ -61,6 +64,9 @@ pub struct K8sState {
     fetched: Option<Instant>,
     pub contexts: Vec<String>,
     pub context: Option<String>,
+    /// Cluster, user, versions, CPU/MEM and the namespace keys.
+    pub info: qell_k8s::Info,
+    info_at: Option<Instant>,
     pub help: bool,
     /// Rows that fit on screen, for Ctrl+D and page keys.
     page: usize,
@@ -85,6 +91,8 @@ impl Default for K8sState {
             fetched: None,
             contexts: Vec::new(),
             context: None,
+            info: qell_k8s::Info::default(),
+            info_at: None,
             help: false,
             page: 20,
         }
@@ -124,6 +132,26 @@ impl K8sState {
                 self.loading = false;
                 self.error = Some(format!("cannot run kubectl: {e}"));
             }
+        }
+    }
+
+    /// Read what the header shows. Cheap enough for its own timer, and
+    /// it skips `kubectl top` once a cluster has said it has no metrics.
+    fn fetch_info(&mut self, ctx: &egui::Context) {
+        let client = self.client.clone();
+        let with_metrics = !self.info.no_metrics;
+        let (tx, rx) = channel();
+        let ctx = ctx.clone();
+        self.info_at = Some(Instant::now());
+        if std::thread::Builder::new()
+            .name("kubectl-info".into())
+            .spawn(move || {
+                let _ = tx.send(Msg::Info(Box::new(client.info(with_metrics))));
+                ctx.request_repaint();
+            })
+            .is_ok()
+        {
+            self.jobs.push(rx);
         }
     }
 
@@ -182,6 +210,9 @@ pub fn open(app: &mut QellApp, ctx: &egui::Context) {
     if app.k8s.contexts.is_empty() {
         app.k8s.fetch_contexts(ctx);
     }
+    if app.k8s.info_at.is_none() {
+        app.k8s.fetch_info(ctx);
+    }
     if app.k8s.table.rows.is_empty() {
         let listing = app.k8s.listing.clone();
         app.k8s.set(listing, ctx);
@@ -219,6 +250,11 @@ pub fn update(app: &mut QellApp, ctx: &egui::Context) {
                         app.k8s.error = Some(e.to_string());
                         app.k8s.loading = false;
                     }
+                    Msg::Info(info) => {
+                        // A cluster that has just said it has no metrics
+                        // keeps that answer, so the next read doesn't ask again.
+                        app.k8s.info = *info;
+                    }
                     Msg::Contexts(list, current) => {
                         app.k8s.contexts = list;
                         if app.k8s.client.context.is_none() {
@@ -243,6 +279,11 @@ pub fn update(app: &mut QellApp, ctx: &egui::Context) {
     if live && !app.k8s.loading && app.k8s.fetched.is_some_and(|t| t.elapsed() >= REFRESH) {
         app.k8s.fetch(ctx);
     }
+    // The header moves slowly (a version never, CPU every few seconds),
+    // so it has a timer of its own.
+    if live && app.k8s.info_at.is_some_and(|t| t.elapsed() >= INFO_REFRESH) {
+        app.k8s.fetch_info(ctx);
+    }
     if live {
         ctx.request_repaint_after(REFRESH);
     }
@@ -259,7 +300,15 @@ pub fn show(app: &mut QellApp, ui: &mut egui::Ui, ctx: &egui::Context) {
     let font = FontId::monospace(app.config.font_size.max(11.0) - 1.0);
     let row_h = ui.fonts_mut(|f| f.row_height(&font)) + ROW_PAD;
 
-    header(app, ui, &font, dim, accent);
+    let colors = Colors {
+        label: warn,
+        value: text,
+        key: accent,
+        key_ns: app.palette.token(qell_core::TokenKind::Keyword),
+        dim,
+        logo: accent.gamma_multiply(0.8),
+    };
+    let keys_in_header = header(app, ui, &font, &colors);
     ui.add_space(2.0);
 
     let visible = app.k8s.visible();
@@ -268,8 +317,10 @@ pub fn show(app: &mut QellApp, ui: &mut egui::Ui, ctx: &egui::Context) {
     // Two rows: a long kubectl error wraps instead of running off.
     let bottom = row_h * 2.0 + 6.0;
     let area = ui.available_rect_before_wrap();
-    let table_rect = Rect::from_min_max(area.min, Pos2::new(area.max.x, area.max.y - bottom));
+    let frame_rect = Rect::from_min_max(area.min + Vec2::new(6.0, 8.0), Pos2::new(area.max.x - 6.0, area.max.y - bottom));
+    let table_rect = frame_rect.shrink2(Vec2::new(6.0, 5.0));
     app.k8s.page = ((table_rect.height() / row_h) as usize).saturating_sub(2).max(1);
+    table_frame(app, ui, frame_rect, &font, accent, dim);
 
     let mut open_row = None;
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(table_rect));
@@ -342,7 +393,7 @@ pub fn show(app: &mut QellApp, ui: &mut egui::Ui, ctx: &egui::Context) {
     }
 
     let line_rect = Rect::from_min_max(Pos2::new(area.min.x, area.max.y - bottom), area.max);
-    bottom_line(app, ui, line_rect, &font, dim, accent, err);
+    bottom_line(app, ui, line_rect, &font, dim, accent, err, keys_in_header);
     if app.k8s.help {
         help_overlay(ctx, &font, text, dim);
     }
@@ -374,45 +425,183 @@ fn column_header(table: &Table, widths: &[usize], ui: &mut egui::Ui, font: &Font
 }
 
 /// The block at the top: where we are and what we are looking at.
-fn header(app: &mut QellApp, ui: &mut egui::Ui, font: &FontId, dim: Color32, accent: Color32) {
+/// Draws the header block; says whether the key columns fitted, so the
+/// bottom line only repeats them when they didn't.
+fn header(app: &mut QellApp, ui: &mut egui::Ui, font: &FontId, colors: &Colors) -> bool {
     let k = &app.k8s;
+    let live = app.focus == Focus::K8s && k.open;
     let context = k.client.context.clone().or_else(|| k.context.clone()).unwrap_or_else(|| "—".into());
-    let namespace = k.listing.namespace.clone().unwrap_or_else(|| "all".into());
-    let live = app.focus == Focus::K8s;
-    let rows = k.visible().len();
-    let pairs = [
-        ("Context", context),
-        ("Namespace", namespace),
-        ("Resource", k.listing.title()),
-        ("Count", rows.to_string()),
-        (
-            "Refresh",
-            match (k.listing.kind.as_str(), live) {
-                (CONTEXTS, _) => "from your kubeconfig".to_string(),
-                (_, true) => "live, every 2s".to_string(),
-                (_, false) => "paused — click to resume".to_string(),
-            },
-        ),
+    let dash = |text: &str| if text.is_empty() { "—".to_string() } else { text.to_string() };
+    let percent = |v: Option<u8>| match (v, k.info.no_metrics) {
+        (Some(p), _) => format!("{p}%"),
+        (None, true) => "n/a".into(),
+        (None, false) => "…".into(),
+    };
+    let facts = [
+        ("Context", dash(&context)),
+        ("Refresh", if live { "live, every 2s".into() } else { "paused".to_string() }),
+        ("Cluster", dash(&k.info.cluster)),
+        ("User", dash(&k.info.user)),
+        ("Qell Rev", env!("CARGO_PKG_VERSION").to_string()),
+        ("K8s Rev", dash(&k.info.server)),
+        ("CPU", percent(k.info.cpu)),
+        ("MEM", percent(k.info.mem)),
     ];
-    let mut job = LayoutJob::default();
-    let label = TextFormat { font_id: font.clone(), color: dim, ..Default::default() };
-    let value = TextFormat { font_id: font.clone(), color: accent, ..Default::default() };
-    for (i, (name, text)) in pairs.iter().enumerate() {
-        if i > 0 {
-            job.append("   ", 0.0, label.clone());
-        }
-        job.append(&format!("{name}: "), 0.0, label.clone());
-        job.append(text, 0.0, value.clone());
+    // <0> every namespace, then the first few of the cluster's own.
+    let current = k.listing.namespace.clone();
+    let mut namespaces: Vec<(String, String, bool)> = vec![("0".into(), "all".into(), current.is_none())];
+    for (i, ns) in k.info.namespaces.iter().take(9).enumerate() {
+        namespaces.push(((i + 1).to_string(), ns.clone(), current.as_ref() == Some(ns)));
     }
-    ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        ui.add_space(8.0);
-        ui.label(job);
-    });
+    let keys_left = [
+        ("<enter>", "In"),
+        ("<esc>", "Back"),
+        ("<j/k>", "Move"),
+        ("<g/G>", "Top/End"),
+        ("<ctrl-d/u>", "Page"),
+        ("<r>", "Refresh"),
+        ("<?>", "Help"),
+    ];
+    let keys_right = [
+        ("<:>", "Resource"),
+        ("</>", "Filter"),
+        ("<0-9>", "Namespace"),
+        ("<n>", "Namespaces"),
+        ("<c>", "Contexts"),
+        ("<:q>", "Close"),
+    ];
+
+    let char_w = ui.fonts_mut(|f| f.glyph_width(font, 'M'));
+    let line_h = ui.fonts_mut(|f| f.row_height(font));
+    let rows = facts.len().max(namespaces.len()).max(keys_left.len());
+    let height = rows as f32 * line_h + 8.0;
+    let full = ui.available_rect_before_wrap();
+    let rect = Rect::from_min_size(full.min, Vec2::new(full.width(), height));
+    let painter = ui.painter_at(rect);
+    let at = |col: usize, row: usize| Pos2::new(rect.left() + 8.0 + col as f32 * char_w, rect.top() + 4.0 + row as f32 * line_h);
+    let put = |pos: Pos2, text: &str, color: Color32| {
+        painter.text(pos, Align2::LEFT_TOP, text, font.clone(), color);
+    };
+    // Columns are laid out from what they hold, so a long cluster name
+    // pushes the rest along instead of being written over.
+    let widest = |it: &mut dyn Iterator<Item = usize>| it.max().unwrap_or(0);
+    let label_w = widest(&mut facts.iter().map(|(l, _)| l.chars().count() + 1)) + 1;
+    let value_w = widest(&mut facts.iter().map(|(_, v)| elide(v, 34).chars().count())) + 3;
+    let ns_key_w = 5;
+    let ns_w = ns_key_w + widest(&mut namespaces.iter().map(|(_, n, _)| elide(n, 20).chars().count())) + 3;
+    let key_w = widest(&mut keys_left.iter().map(|(k, _)| k.chars().count())) + 1;
+    let left_w = key_w + widest(&mut keys_left.iter().map(|(_, w)| w.chars().count())) + 2;
+    let right_key_w = widest(&mut keys_right.iter().map(|(k, _)| k.chars().count())) + 1;
+    let right_w = right_key_w + widest(&mut keys_right.iter().map(|(_, w)| w.chars().count())) + 2;
+
+    let columns = ((rect.width() - 16.0) / char_w) as usize;
+    let mut x = 0;
+    let mut keys_shown = false;
+    for (row, (name, value)) in facts.iter().enumerate() {
+        put(at(x, row), &format!("{name}:"), colors.label);
+        put(at(x + label_w, row), &elide(value, 34), colors.value);
+    }
+    x += label_w + value_w;
+    if columns >= x + ns_w {
+        for (row, (key, ns, on)) in namespaces.iter().enumerate() {
+            put(at(x, row), &format!("<{key}>"), colors.key_ns);
+            put(at(x + ns_key_w, row), &elide(ns, 20), if *on { colors.value } else { colors.dim });
+        }
+        x += ns_w;
+    }
+    if columns >= x + left_w {
+        for (row, (key, what)) in keys_left.iter().enumerate() {
+            put(at(x, row), key, colors.key);
+            put(at(x + key_w, row), what, colors.dim);
+        }
+        x += left_w;
+        keys_shown = true;
+    }
+    if columns >= x + right_w {
+        for (row, (key, what)) in keys_right.iter().enumerate() {
+            put(at(x, row), key, colors.key);
+            put(at(x + right_key_w, row), what, colors.dim);
+        }
+        x += right_w;
+    }
+    // The logo, right-aligned, when the rest has left room for it whole.
+    let logo_w = LOGO.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    if columns >= x + logo_w + 2 {
+        for (row, line) in LOGO.iter().enumerate() {
+            let left = rect.right() - 12.0 - logo_w as f32 * char_w;
+            painter.text(Pos2::new(left, at(0, row).y), Align2::LEFT_TOP, *line, font.clone(), colors.logo);
+        }
+    }
+    ui.advance_cursor_after_rect(rect);
+    keys_shown
+}
+
+/// Cut a value that would run into the next column, with an ellipsis.
+fn elide(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    text.chars().take(max.saturating_sub(1)).chain(std::iter::once('…')).collect()
+}
+
+/// Qell, in the spirit of the thing.
+const LOGO: [&str; 5] = [
+    r"  ___  _____ _     _     ",
+    r" / _ \| ____| |   | |    ",
+    r"| | | |  _| | |   | |    ",
+    r"| |_| | |___| |___| |___ ",
+    r" \__\_\_____|_____|_____|",
+];
+
+/// The header's palette, so the colours are named where they are chosen.
+struct Colors {
+    label: Color32,
+    value: Color32,
+    key: Color32,
+    key_ns: Color32,
+    dim: Color32,
+    logo: Color32,
+}
+
+/// The border around the table, with what it is listing on the top edge:
+/// `Pods(web)[12]`, as k9s puts it.
+fn table_frame(app: &QellApp, ui: &mut egui::Ui, rect: Rect, font: &FontId, accent: Color32, dim: Color32) {
+    // The title sits on the top edge, so the clip reaches above it.
+    let painter = ui.painter_at(rect.expand(10.0));
+    painter.rect_stroke(rect, 4.0, egui::Stroke::new(1.0_f32, accent.gamma_multiply(0.5)), egui::StrokeKind::Inside);
+    let kind = &app.k8s.listing.kind;
+    let mut title = kind.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
+    title.push_str(&kind.chars().skip(1).collect::<String>());
+    let where_ = match (&app.k8s.listing.containers_of, &app.k8s.listing.namespace) {
+        (Some(pod), _) => pod.clone(),
+        (None, Some(ns)) => ns.clone(),
+        (None, None) => "all".to_string(),
+    };
+    let count = app.k8s.visible().len();
+    let mut job = LayoutJob::default();
+    let fmt = |c: Color32| TextFormat { font_id: font.clone(), color: c, ..Default::default() };
+    job.append(&title, 0.0, fmt(accent));
+    job.append(&format!("({where_})"), 0.0, fmt(dim));
+    job.append(&format!("[{count}]"), 0.0, fmt(accent));
+    let galley = ui.fonts_mut(|f| f.layout_job(job));
+    let at = Pos2::new(rect.center().x - galley.size().x / 2.0, rect.top() - galley.size().y / 2.0);
+    // The border runs behind the title, so it is painted over.
+    painter.rect_filled(Rect::from_min_size(at, galley.size()).expand2(Vec2::new(4.0, 0.0)), 0.0, app.palette.editor_bg);
+    painter.galley(at, galley, accent);
 }
 
 /// The last line: what is being typed, the error, or the keys.
-fn bottom_line(app: &mut QellApp, ui: &mut egui::Ui, rect: Rect, font: &FontId, dim: Color32, accent: Color32, error: Color32) {
+#[allow(clippy::too_many_arguments)]
+fn bottom_line(
+    app: &mut QellApp,
+    ui: &mut egui::Ui,
+    rect: Rect,
+    font: &FontId,
+    dim: Color32,
+    accent: Color32,
+    error: Color32,
+    keys_in_header: bool,
+) {
     let painter = ui.painter_at(rect);
     let at = Pos2::new(rect.left() + 8.0, rect.top() + 2.0);
     let (text, color) = match (app.k8s.typing, &app.k8s.error) {
@@ -420,6 +609,9 @@ fn bottom_line(app: &mut QellApp, ui: &mut egui::Ui, rect: Rect, font: &FontId, 
         (Typing::Command, _) => (format!(":{}", app.k8s.line), accent),
         (_, Some(e)) => (e.clone(), error),
         _ if !app.k8s.filter.is_empty() => (format!("filter: {}  (esc clears)", app.k8s.filter), accent),
+        // The header lists the keys when it has the room; no point
+        // saying them twice.
+        _ if keys_in_header => (String::new(), dim),
         _ => {
             ("j/k move   enter open   esc back   / filter   : resource   0 all namespaces   r refresh   ? help".to_string(), dim)
         }
@@ -520,16 +712,33 @@ fn keys(app: &mut QellApp, ctx: &egui::Context) {
             (Key::R, false) => {
                 app.k8s.error = None;
                 app.k8s.blocked = false;
+                app.k8s.info.no_metrics = false;
+                app.k8s.fetch_info(ctx);
                 if app.k8s.listing.kind == CONTEXTS {
                     show_contexts(app, ctx);
                 } else {
                     app.k8s.fetch(ctx);
                 }
             }
+            // <0> every namespace, <1>…<9> the ones in the header.
             (Key::Num0, false) => {
                 let mut l = app.k8s.listing.clone();
                 l.namespace = None;
                 app.k8s.set(l, ctx);
+            }
+            (
+                Key::Num1 | Key::Num2 | Key::Num3 | Key::Num4 | Key::Num5 | Key::Num6 | Key::Num7 | Key::Num8 | Key::Num9,
+                false,
+            ) => {
+                let nth = key as usize - Key::Num1 as usize;
+                if let Some(ns) = app.k8s.info.namespaces.get(nth).cloned() {
+                    let mut l = app.k8s.listing.clone();
+                    l.namespace = Some(ns);
+                    l.selector = None;
+                    l.field_selector = None;
+                    l.containers_of = None;
+                    app.k8s.set(l, ctx);
+                }
             }
             (Key::N, false) => app.k8s.set(Listing::new("namespaces", None), ctx),
             (Key::C, false) => show_contexts(app, ctx),
@@ -626,6 +835,8 @@ fn drill_in(app: &mut QellApp, ctx: &egui::Context) {
             app.k8s.client.context = Some(row.name.clone());
             app.k8s.context = Some(row.name.clone());
             app.k8s.stack.clear();
+            app.k8s.info = qell_k8s::Info::default();
+            app.k8s.fetch_info(ctx);
             app.k8s.set(Listing::new("pods", None), ctx);
             app.notify(format!("Context {}", row.name));
         }
@@ -674,6 +885,13 @@ fn trim_s(kind: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn long_values_are_cut_so_columns_never_collide() {
+        assert_eq!(elide("prod-eks", 10), "prod-eks");
+        assert_eq!(elide("arn:aws:eks:eu-west-3:1234:cluster/prod", 10), "arn:aws:e…");
+        assert_eq!(elide("abc", 3), "abc");
+    }
 
     #[test]
     fn cells_are_padded_into_columns() {

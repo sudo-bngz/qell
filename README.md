@@ -172,6 +172,12 @@ bottom, and language-server completion for the languages you actually use.
   `CrashLoopBackOff` pod and a `NotReady` node in red, a rollout still
   catching up in yellow.
 
+  The header is k9s's: context, cluster, user, the Qell and Kubernetes
+  revisions, cluster CPU and memory when metrics-server is there, the
+  namespaces on `<0>`…`<9>`, and the keys — dropping a column at a time as
+  the window narrows. The table carries its own frame and title,
+  `Pods(web)[12]`. The helm icon under source control opens and closes it.
+
   It reads everything through your own `kubectl`, so it uses your
   kubeconfig, your contexts and your credential plugins (`aws eks
   get-token` and the like) — Qell holds no credentials and installs
