@@ -58,6 +58,8 @@ pub struct Config {
     pub shell: String,
     /// The kubectl the cluster view runs (a path, or a name on the PATH).
     pub kubectl: String,
+    /// The aws CLI the AWS view runs (a path, or a name on the PATH).
+    pub aws: String,
     /// Terminal font size in points. 0: same as the editor.
     pub terminal_font_size: f32,
     /// Names hidden from the file tree.
@@ -98,6 +100,7 @@ impl Default for Config {
             show_terminal: true,
             shell: String::new(),
             kubectl: "kubectl".into(),
+            aws: "aws".into(),
             terminal_font_size: 0.0,
             tree_hidden: vec![".git".into(), ".DS_Store".into()],
             ignore: vec![".git".into(), "target".into(), "node_modules".into(), ".terraform".into(), "dist".into()],
