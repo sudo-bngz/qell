@@ -2,6 +2,7 @@
 //! whole app so it can read state and queue commands; none of them keeps
 //! state of its own beyond what egui remembers between frames.
 
+pub mod aws;
 pub mod editor;
 pub mod find;
 pub mod k8s;

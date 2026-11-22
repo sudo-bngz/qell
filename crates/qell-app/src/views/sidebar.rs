@@ -504,8 +504,50 @@ pub fn show_activity_bar(app: &mut QellApp, ctx: &Context) {
                     }
                 }
                 cluster_button(app, ui);
+                aws_button(app, ui);
             });
         });
+}
+
+/// A cloud, under the helm: opens and closes the AWS view. Drawn, like
+/// the helm, since the icon font has neither.
+fn aws_button(app: &mut QellApp, ui: &mut egui::Ui) {
+    let open = app.aws.open;
+    let color = if open { app.palette.text } else { app.palette.text_dim };
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(44.0, 44.0), egui::Sense::click());
+    let resp = resp.on_hover_text("AWS (Ctrl+Shift+A)").on_hover_cursor(egui::CursorIcon::PointingHand);
+    let painter = ui.painter_at(rect);
+    let centre = rect.center() + egui::vec2(0.0, 1.0);
+    // Three overlapping bumps on a flat base; the outline is found by
+    // walking outwards from the middle in every direction.
+    let bumps = [(egui::vec2(-5.5, 1.5), 5.0_f32), (egui::vec2(0.5, -2.5), 6.5), (egui::vec2(6.5, 2.0), 4.5)];
+    let base = 6.5;
+    let inside = |p: egui::Vec2| {
+        p.y <= base && bumps.iter().any(|(c, r)| (p - *c).length() <= *r || (p.y > c.y && (p.x - c.x).abs() <= *r))
+    };
+    let points: Vec<egui::Pos2> = (0..72)
+        .map(|i| {
+            let a = std::f32::consts::TAU * i as f32 / 72.0;
+            let dir = egui::vec2(a.cos(), a.sin());
+            let mut reach = 0.0;
+            let mut t = 0.0;
+            while t < 16.0 {
+                if inside(egui::vec2(0.0, 2.0) + dir * t) {
+                    reach = t;
+                }
+                t += 0.2;
+            }
+            centre + egui::vec2(0.0, 2.0) + dir * reach
+        })
+        .collect();
+    let stroke = egui::Stroke::new(if open { 1.6_f32 } else { 1.3_f32 }, color);
+    painter.add(egui::Shape::closed_line(points, stroke));
+    if open {
+        painter.vline(rect.left() + 1.0, rect.y_range().shrink(6.0), egui::Stroke::new(2.0_f32, app.palette.accent));
+    }
+    if resp.clicked() {
+        app.pending_commands.push(crate::commands::Command::ToggleAws);
+    }
 }
 
 /// The Kubernetes helm, under the git icon: opens and closes the cluster

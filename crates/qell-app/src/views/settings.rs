@@ -132,6 +132,12 @@ fn defs() -> Vec<Def> {
             "kubectl Command",
             "What the cluster view runs to read your cluster, e.g. kubectl or /opt/homebrew/bin/kubectl.",
         ),
+        def(
+            "aws",
+            "AWS",
+            "aws Command",
+            "What the AWS view runs to read your account, e.g. aws or /opt/homebrew/bin/aws.",
+        ),
         def("tree_hidden", "Files", "Hidden in File Tree", "Comma-separated names the file tree doesn't show."),
         def("ignore", "Files", "Quick Open Ignore", "Comma-separated directory and file names Go to File skips."),
     ];
@@ -180,6 +186,7 @@ fn is_modified(key: &str, c: &Config) -> bool {
         "show_terminal" => c.show_terminal != d.show_terminal,
         "shell" => c.shell != d.shell,
         "kubectl" => c.kubectl != d.kubectl,
+        "aws" => c.aws != d.aws,
         "terminal_font_size" => c.terminal_font_size != d.terminal_font_size,
         "tree_hidden" => c.tree_hidden != d.tree_hidden,
         "ignore" => c.ignore != d.ignore,
@@ -210,6 +217,7 @@ fn reset(key: &str, c: &mut Config) {
         "show_terminal" => c.show_terminal = d.show_terminal,
         "shell" => c.shell = d.shell,
         "kubectl" => c.kubectl = d.kubectl,
+        "aws" => c.aws = d.aws,
         "terminal_font_size" => c.terminal_font_size = d.terminal_font_size,
         "tree_hidden" => c.tree_hidden = d.tree_hidden,
         "ignore" => c.ignore = d.ignore,
@@ -328,6 +336,11 @@ fn control(ui: &mut egui::Ui, key: &str, c: &mut Config, drafts: &mut HashMap<St
             let shell_env = std::env::var("SHELL").unwrap_or_else(|_| "sh".into());
             if let Some(v) = text_field(ui, drafts, key, &c.shell, &shell_env) {
                 c.shell = v;
+            }
+        }
+        "aws" => {
+            if let Some(v) = text_field(ui, drafts, key, &c.aws, "aws") {
+                c.aws = v;
             }
         }
         "kubectl" => {
@@ -504,6 +517,7 @@ mod tests {
                 "show_terminal" => c.show_terminal = false,
                 "shell" => c.shell = "zsh".into(),
                 "kubectl" => c.kubectl = "/opt/homebrew/bin/kubectl".into(),
+                "aws" => c.aws = "/opt/homebrew/bin/aws".into(),
                 "terminal_font_size" => c.terminal_font_size = 12.0,
                 "tree_hidden" => c.tree_hidden.clear(),
                 "ignore" => c.ignore.clear(),

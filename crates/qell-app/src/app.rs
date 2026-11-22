@@ -96,6 +96,8 @@ pub enum Focus {
     Terminal,
     /// The cluster view (k9s-style) has the keyboard.
     K8s,
+    /// The AWS view has the keyboard.
+    Aws,
 }
 
 /// Completion popup state.
@@ -277,6 +279,7 @@ pub struct QellApp {
     last_focus: Focus,
     /// The cluster view (k9s-style), when it is open.
     pub k8s: views::k8s::K8sState,
+    pub aws: views::aws::AwsState,
     /// Manifest tabs: the temp file each one is in, and the object it
     /// goes back to when saved.
     pub manifests: HashMap<PathBuf, Manifest>,
@@ -378,6 +381,7 @@ impl QellApp {
             pending_format: None,
             last_focus: Focus::Editor,
             k8s: views::k8s::K8sState::default(),
+            aws: views::aws::AwsState::default(),
             manifests: HashMap::new(),
             pending_apply: None,
             back_to_cluster: false,
@@ -489,10 +493,37 @@ impl QellApp {
     /// Bring the editor forward. The cluster view stands in its place
     /// rather than beside it, so showing one puts the other away.
     pub fn show_editor_area(&mut self) {
+        self.close_places();
+        self.focus = Focus::Editor;
+    }
+
+    /// Whether the cluster or the AWS view is standing where the editor
+    /// would be.
+    pub fn in_a_place(&self) -> bool {
+        self.k8s.open || self.aws.open
+    }
+
+    /// Put the cluster and AWS views away; says whether one was up.
+    pub fn close_places(&mut self) -> bool {
+        let was = self.in_a_place();
         if self.k8s.open {
             views::k8s::close(self);
         }
-        self.focus = Focus::Editor;
+        if self.aws.open {
+            views::aws::close(self);
+        }
+        was
+    }
+
+    /// Who gets the keyboard when the terminal lets go of it.
+    fn focus_behind_terminal(&self) -> Focus {
+        if self.k8s.open {
+            Focus::K8s
+        } else if self.aws.open {
+            Focus::Aws
+        } else {
+            Focus::Editor
+        }
     }
 
     pub fn open_file(&mut self, path: PathBuf) {
@@ -687,8 +718,7 @@ impl QellApp {
     pub fn show_sidebar_view(&mut self, view: SidebarView) {
         // Explorer, search and git are about files: asking for one of
         // them is asking for the editor back.
-        if self.k8s.open {
-            views::k8s::close(self);
+        if self.close_places() {
             self.sidebar_view = view;
             self.show_sidebar = true;
             return;
@@ -2186,8 +2216,7 @@ impl QellApp {
                 self.request_completion(None);
             }
             Command::ToggleSidebar => {
-                if self.k8s.open {
-                    views::k8s::close(self);
+                if self.close_places() {
                     self.show_sidebar = true;
                 } else {
                     self.show_sidebar = !self.show_sidebar;
@@ -2260,14 +2289,15 @@ impl QellApp {
                 (true, true) => views::k8s::close(self),
                 (false, _) => views::k8s::open(self, ctx),
             },
+            Command::ToggleAws => match (self.aws.open, self.focus == Focus::Aws) {
+                (true, false) => self.focus = Focus::Aws,
+                (true, true) => views::aws::close(self),
+                (false, _) => views::aws::open(self, ctx),
+            },
             Command::ToggleTerminal => {
                 self.show_terminal = !self.show_terminal;
                 // Closing it hands the keyboard back to whatever is behind.
-                self.focus = match (self.show_terminal, self.k8s.open) {
-                    (true, _) => Focus::Terminal,
-                    (false, true) => Focus::K8s,
-                    (false, false) => Focus::Editor,
-                };
+                self.focus = if self.show_terminal { Focus::Terminal } else { self.focus_behind_terminal() };
             }
             Command::NewTerminal => {
                 self.show_terminal = true;
@@ -2609,7 +2639,7 @@ impl QellApp {
     fn after_terminal_removed(&mut self, index: usize) {
         if self.terminals.is_empty() {
             self.show_terminal = false;
-            self.focus = if self.k8s.open { Focus::K8s } else { Focus::Editor };
+            self.focus = self.focus_behind_terminal();
             self.active_terminal = 0;
             self.next_terminal_number = 1;
         } else if self.active_terminal > index || self.active_terminal >= self.terminals.len() {
@@ -2651,6 +2681,7 @@ impl QellApp {
             || self.scm.typing
             || self.search.typing
             || self.k8s.typing != views::k8s::Typing::No
+            || self.aws.typing != views::aws::Typing::No
             || self.find.typing
             || self.tree_edit.is_some()
             || self.confirm_delete.is_some()
@@ -2674,9 +2705,10 @@ impl QellApp {
         }
         // The cluster view is driven by bare keys (j, k, r, 0, :), and by
         // Ctrl+D / Ctrl+U for paging: only the few view commands go past it.
-        if self.focus == Focus::K8s && self.k8s.open {
+        if (self.focus == Focus::K8s && self.k8s.open) || (self.focus == Focus::Aws && self.aws.open) {
             for cmd in [
                 Command::ToggleCluster,
+                Command::ToggleAws,
                 Command::ToggleTerminal,
                 Command::CommandPalette,
                 Command::ToggleSidebar,
@@ -2715,6 +2747,7 @@ impl QellApp {
                     cmd,
                     Command::ToggleTerminal
                         | Command::ToggleCluster
+                        | Command::ToggleAws
                         | Command::NewTerminal
                         | Command::NextTerminal
                         | Command::PrevTerminal
@@ -2788,6 +2821,7 @@ impl eframe::App for QellApp {
         // apply started from a manifest tab), so they are drained here
         // rather than while drawing the panel.
         views::k8s::update(self, ctx);
+        views::aws::update(self);
         self.handle_config(ctx);
         // The tabs changed: remember them (cursors are saved again on exit).
         if self.session_state().0 != self.session_key {

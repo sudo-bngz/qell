@@ -242,6 +242,24 @@ bottom, and language-server completion for the languages you actually use.
   nothing. The list refreshes every two seconds **only while the panel has
   the keyboard**, and stops the moment you click elsewhere; the header says
   which it is doing. Nothing talks to a cluster in the background.
+- **AWS view** (`Ctrl/⌘+Shift+A`, or the cloud under the helm) — the same
+  kind of table for an AWS account: Lambda functions, CloudFront
+  distributions, CodeDeploy applications, S3 buckets and EC2 instances.
+  `:` picks the service (`:lambda`, `:cf`, `:cd`, `:s3`, `:ec2`), `Enter`
+  goes in (a distribution's invalidations, an application's latest
+  deployments with why a failed one failed, a bucket's folders and
+  objects), `Esc` comes back, `/` filters and `d` shows everything aws
+  said about the row. `1`–`9` change region, `p` or `:profile prod`
+  changes profile, and the header says which account and identity you are
+  looking through. `l` follows a function's logs and `s` opens a Session
+  Manager shell on an instance, each in a terminal tab; `c` copies the
+  row's ARN, `s3://` address or name.
+
+  It reads everything through your own `aws` CLI, so your profiles, SSO
+  sessions and assumed roles are used as they are — Qell holds no
+  credentials and installs nothing. Nothing is on a timer: a list is read
+  when you open it and again when you press `r`. This first version only
+  reads; it changes nothing in your account.
 
 ## Install
 
@@ -295,6 +313,7 @@ npm i -g typescript typescript-language-server
 | Toggle word wrap      | `Alt+Z`            |
 | Explorer / Source Control | `Ctrl+Shift+E` / `Ctrl+Shift+G` |
 | Kubernetes cluster    | `Ctrl+Shift+K`     |
+| AWS                   | `Ctrl+Shift+A`     |
 | Toggle terminal       | `` Ctrl+` ``       |
 | New terminal          | `` Ctrl+Shift+` `` |
 | Next / prev terminal  | `Ctrl+PageDown/Up` |
@@ -351,6 +370,8 @@ crates/
   qell-index     workspace index: file text + trigrams for search, tree-sitter tags for definitions
   qell-term      PTY + VT emulation (alacritty_terminal) rendered as plain cell snapshots
   qell-k8s       reading a cluster through kubectl: contexts, listings, k9s-style columns
+  qell-aws       reading an AWS account through the aws CLI: profiles, regions, listings
+  qell-table     the table both views list: columns, rows, ages and sizes
   qell-plugins   Wasmtime host and the plugin ABI
   qell-app       the egui/eframe application: panels, keymap, palette
 plugins/

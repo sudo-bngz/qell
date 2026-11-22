@@ -2665,12 +2665,14 @@ dependencies = [
  "image",
  "log",
  "muda",
+ "qell-aws",
  "qell-core",
  "qell-git",
  "qell-index",
  "qell-k8s",
  "qell-lsp",
  "qell-plugins",
+ "qell-table",
  "qell-term",
  "regex",
  "rfd",
@@ -2681,6 +2683,15 @@ dependencies = [
  "toml",
  "toml_edit",
  "trash",
+]
+
+[[package]]
+name = "qell-aws"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "qell-table",
+ "serde_json",
 ]
 
 [[package]]
@@ -2775,6 +2786,13 @@ dependencies = [
  "serde_json",
  "wasmtime",
  "wat",
+]
+
+[[package]]
+name = "qell-table"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

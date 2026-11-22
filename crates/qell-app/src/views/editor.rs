@@ -28,6 +28,10 @@ pub fn show_central(app: &mut QellApp, ctx: &Context) {
             super::k8s::show(app, ui, ctx);
             return;
         }
+        if app.aws.open {
+            super::aws::show(app, ui, ctx);
+            return;
+        }
         show_tabs(app, ui);
         // A picture or a video is looked at, not edited.
         if super::media::show(app, ui, ctx) {

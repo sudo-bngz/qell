@@ -1,0 +1,11 @@
+[package]
+name = "qell-table"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The table a resource browser shows: columns, rows, and how each row is doing."
+
+[dependencies]
+serde_json.workspace = true

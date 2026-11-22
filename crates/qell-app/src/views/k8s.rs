@@ -341,6 +341,10 @@ impl K8sState {
 /// Open the panel (or bring it back), and give it the keyboard.
 pub fn open(app: &mut QellApp, ctx: &egui::Context) {
     app.k8s.client.bin = app.config.kubectl.clone();
+    // One place at a time: the cluster, the account or the editor.
+    if app.aws.open {
+        super::aws::close(app);
+    }
     // The cluster is a place of its own, not a panel beside the editor:
     // the file tree goes away with the editor and comes back with it.
     if !app.k8s.open {
@@ -532,7 +536,7 @@ pub fn show(app: &mut QellApp, ui: &mut egui::Ui, ctx: &egui::Context) {
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(table_rect));
     child.spacing_mut().item_spacing.y = 0.0;
     // Column header, then the rows.
-    column_header(&app.k8s.table, &widths, &mut child, &font, row_h, accent, app.k8s.offset_x);
+    column_header(&app.k8s.table.columns, &widths, &mut child, &font, row_h, accent, app.k8s.offset_x);
     let rows = visible.len();
     let selected = app.k8s.selected.min(rows.saturating_sub(1));
     if rows == 0 {
@@ -785,7 +789,7 @@ fn ask_delete(app: &mut QellApp) {
 }
 
 /// `NAME        READY  STATUS` — cells padded to the column widths.
-fn cells_line(cells: &[String], widths: &[usize]) -> String {
+pub(super) fn cells_line(cells: &[String], widths: &[usize]) -> String {
     let mut out = String::new();
     for (i, cell) in cells.iter().enumerate() {
         let w = widths.get(i).copied().unwrap_or(0);
@@ -799,13 +803,21 @@ fn cells_line(cells: &[String], widths: &[usize]) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn column_header(table: &Table, widths: &[usize], ui: &mut egui::Ui, font: &FontId, row_h: f32, accent: Color32, offset_x: f32) {
+pub(super) fn column_header(
+    columns: &[String],
+    widths: &[usize],
+    ui: &mut egui::Ui,
+    font: &FontId,
+    row_h: f32,
+    accent: Color32,
+    offset_x: f32,
+) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), row_h), Sense::hover());
     // The header follows the rows when the table is scrolled sideways.
     ui.painter_at(rect).text(
         Pos2::new(rect.left() + 8.0 - offset_x, rect.center().y),
         Align2::LEFT_CENTER,
-        cells_line(&table.columns, widths),
+        cells_line(columns, widths),
         font.clone(),
         accent,
     );
@@ -976,7 +988,7 @@ const SPARK_WIDTH: usize = 30;
 const BLOCKS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
 /// Cut a value that would run into the next column, with an ellipsis.
-fn elide(text: &str, max: usize) -> String {
+pub(super) fn elide(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
     }
@@ -984,7 +996,7 @@ fn elide(text: &str, max: usize) -> String {
 }
 
 /// Qell, in the spirit of the thing.
-const LOGO: [&str; 5] = [
+pub(super) const LOGO: [&str; 5] = [
     r"  ___  _____ _     _     ",
     r" / _ \| ____| |   | |    ",
     r"| | | |  _| | |   | |    ",
@@ -993,15 +1005,15 @@ const LOGO: [&str; 5] = [
 ];
 
 /// The header's palette, so the colours are named where they are chosen.
-struct Colors {
-    label: Color32,
+pub(super) struct Colors {
+    pub label: Color32,
     /// The CPU and memory sparklines.
-    chart: Color32,
-    value: Color32,
-    key: Color32,
-    key_ns: Color32,
-    dim: Color32,
-    logo: Color32,
+    pub chart: Color32,
+    pub value: Color32,
+    pub key: Color32,
+    pub key_ns: Color32,
+    pub dim: Color32,
+    pub logo: Color32,
 }
 
 /// `kubectl describe` or a manifest, in the panel. The name of a field
@@ -1046,7 +1058,7 @@ fn text_view(app: &mut QellApp, ui: &mut egui::Ui, rect: Rect, font: &FontId, ro
 
 /// Where a list must be scrolled to for `row` to be on screen: as it is
 /// when the row is already there, otherwise just far enough.
-fn keep_visible(offset: f32, view_h: f32, row: usize, row_h: f32) -> f32 {
+pub(super) fn keep_visible(offset: f32, view_h: f32, row: usize, row_h: f32) -> f32 {
     let top = row as f32 * row_h;
     let bottom = top + row_h;
     if top < offset {
@@ -1060,7 +1072,7 @@ fn keep_visible(offset: f32, view_h: f32, row: usize, row_h: f32) -> f32 {
 
 /// Where a line's field name ends (`Name:` → 5), for colouring. Only a
 /// name at the start of the line counts, so URLs keep their colon.
-fn field_of(line: &str) -> Option<usize> {
+pub(super) fn field_of(line: &str) -> Option<usize> {
     let name = line.trim_start();
     let indent = line.len() - name.len();
     let end = name.find(':')?;
@@ -1164,7 +1176,7 @@ fn bottom_line(
 }
 
 fn help_overlay(ctx: &egui::Context, font: &FontId, text: Color32, dim: Color32) {
-    let lines = [
+    let lines: &[(&str, &str)] = &[
         ("j / k, ↓ / ↑", "move"),
         ("g / G", "first / last"),
         ("Ctrl+f / Ctrl+u", "a page down / half a page up"),
@@ -1184,12 +1196,16 @@ fn help_overlay(ctx: &egui::Context, font: &FontId, text: Color32, dim: Color32)
         ("r", "refresh now"),
         ("?", "this list"),
     ];
-    egui::Area::new(egui::Id::new("qell-k8s-help"))
-        .order(egui::Order::Foreground)
-        .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
-        .show(ctx, |ui| {
+    help_box(ctx, "qell-k8s-help", lines, font, text, dim);
+}
+
+/// A list of keys and what they do, in the middle of the window.
+pub(super) fn help_box(ctx: &egui::Context, id: &str, lines: &[(&str, &str)], font: &FontId, text: Color32, dim: Color32) {
+    egui::Area::new(egui::Id::new(id.to_string())).order(egui::Order::Foreground).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(
+        ctx,
+        |ui| {
             egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
-                for (keys, what) in lines {
+                for (keys, what) in lines.iter().copied() {
                     let mut job = LayoutJob::default();
                     job.append(
                         &format!("{keys:<16}"),
@@ -1200,7 +1216,8 @@ fn help_overlay(ctx: &egui::Context, font: &FontId, text: Color32, dim: Color32)
                     ui.label(job);
                 }
             });
-        });
+        },
+    );
 }
 
 /// Everything the panel does with the keyboard.

@@ -30,6 +30,8 @@ qell-plugins.workspace = true
 qell-git.workspace = true
 qell-index.workspace = true
 qell-k8s.workspace = true
+qell-table.workspace = true
+qell-aws.workspace = true
 image.workspace = true
 # Native menu bar. Built on every platform (without GTK) so the menu code is
 # compiled and tested everywhere; it is only installed on macOS.
