@@ -254,6 +254,10 @@ impl Command {
             Command::ToggleCluster => s(cmd_shift, Key::K),
             Command::ToggleAws => s(cmd_shift, Key::A),
             Command::ToggleTerminal => s(Modifiers::CTRL, Key::Backtick),
+            // ⌘T on macOS, as in its terminals. Elsewhere Ctrl+T belongs
+            // to the shell (it swaps two characters), so the VS Code
+            // chord stays.
+            Command::NewTerminal if cfg!(target_os = "macos") => s(Modifiers::MAC_CMD, Key::T),
             Command::NewTerminal => s(Modifiers::CTRL | Modifiers::SHIFT, Key::Backtick),
             Command::KillTerminal => None,
             Command::NextTerminal => s(Modifiers::CTRL, Key::PageDown),

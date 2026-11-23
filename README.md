@@ -56,7 +56,7 @@ bottom, and language-server completion for the languages you actually use.
   commit to copy its hash or message.
 - **Integrated terminals** — the Alacritty terminal core in a panel
   (`` Ctrl+` ``), with 256/true colour, scrollback and application-cursor mode.
-  Run several shells as tabs: `` Ctrl+Shift+` `` opens a new one,
+  Run several shells as tabs: `` Ctrl+Shift+` `` (`⌘T` on macOS) opens a new one,
   `Ctrl+PageUp`/`Ctrl+PageDown` switch between them, and typing `exit`
   closes a tab. Select text with the mouse (double-click: word, triple-click:
   line) and copy it with `⌘C` / `Ctrl+Shift+C`; right-click for Copy, Paste,
@@ -336,7 +336,7 @@ npm i -g typescript typescript-language-server
 | Kubernetes cluster    | `Ctrl+Shift+K`     |
 | AWS                   | `Ctrl+Shift+A`     |
 | Toggle terminal       | `` Ctrl+` ``       |
-| New terminal          | `` Ctrl+Shift+` `` |
+| New terminal          | `` Ctrl+Shift+` ``, `⌘T` on macOS |
 | Next / prev terminal  | `Ctrl+PageDown/Up` |
 | Zoom                  | `Ctrl+=` / `Ctrl+-` |
 | Settings              | `Ctrl+,`           |
