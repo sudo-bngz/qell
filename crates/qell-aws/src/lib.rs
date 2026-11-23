@@ -67,6 +67,55 @@ pub enum Listing {
         prefix: String,
     },
     Instances,
+    Pipelines,
+    /// Where one pipeline stands: its stages and their actions.
+    PipelineState {
+        pipeline: String,
+    },
+    BuildProjects,
+    /// The latest builds of one CodeBuild project.
+    Builds {
+        project: String,
+    },
+    Roles,
+    /// The policies attached to one role.
+    RolePolicies {
+        role: String,
+    },
+    Users,
+    /// ECS clusters.
+    Clusters,
+    Services {
+        cluster: String,
+    },
+    Tasks {
+        cluster: String,
+        service: String,
+    },
+    /// RDS instances, Aurora's included.
+    Databases,
+    /// Aurora clusters.
+    DbClusters,
+    /// Parameter Store: names and types, never values.
+    Parameters,
+    StateMachines,
+    /// The latest executions of one state machine.
+    Executions {
+        machine: String,
+        name: String,
+    },
+    Queues,
+    UserPools,
+    /// The app clients of one Cognito user pool.
+    PoolClients {
+        pool: String,
+    },
+    /// REST, HTTP and WebSocket APIs together.
+    Apis,
+    Stages {
+        api: String,
+        v2: bool,
+    },
     /// The profiles in `~/.aws/config`: Qell's own table, no call made.
     Profiles,
     /// The regions to pick from, likewise.
@@ -85,6 +134,26 @@ impl Listing {
             Listing::Buckets => "S3".into(),
             Listing::Objects { bucket, prefix } => format!("s3://{bucket}/{prefix}"),
             Listing::Instances => "EC2".into(),
+            Listing::Pipelines => "CodePipeline".into(),
+            Listing::PipelineState { pipeline } => format!("Pipeline({pipeline})"),
+            Listing::BuildProjects => "CodeBuild".into(),
+            Listing::Builds { project } => format!("Builds({project})"),
+            Listing::Roles => "IAM roles".into(),
+            Listing::RolePolicies { role } => format!("Policies({role})"),
+            Listing::Users => "IAM users".into(),
+            Listing::Clusters => "ECS".into(),
+            Listing::Services { cluster } => format!("Services({cluster})"),
+            Listing::Tasks { service, .. } => format!("Tasks({service})"),
+            Listing::Databases => "RDS".into(),
+            Listing::DbClusters => "Aurora".into(),
+            Listing::Parameters => "Parameters".into(),
+            Listing::StateMachines => "Step Functions".into(),
+            Listing::Executions { name, .. } => format!("Executions({name})"),
+            Listing::Queues => "SQS".into(),
+            Listing::UserPools => "Cognito".into(),
+            Listing::PoolClients { pool } => format!("Clients({pool})"),
+            Listing::Apis => "API Gateway".into(),
+            Listing::Stages { api, .. } => format!("Stages({api})"),
             Listing::Profiles => "Profiles".into(),
             Listing::Regions => "Regions".into(),
         }
@@ -98,38 +167,16 @@ impl Listing {
     /// Whether the answer is the same in every region. CloudFront and the
     /// list of buckets are account-wide, and the header says so.
     pub fn global(&self) -> bool {
-        matches!(self, Listing::Distributions | Listing::Invalidations { .. } | Listing::Buckets | Listing::Objects { .. })
-    }
-
-    /// The `aws` arguments that list it.
-    fn args(&self) -> Vec<String> {
-        let words: Vec<&str> = match self {
-            Listing::Functions => vec!["lambda", "list-functions"],
-            Listing::Distributions => vec!["cloudfront", "list-distributions"],
-            Listing::Invalidations { distribution } => {
-                vec!["cloudfront", "list-invalidations", "--distribution-id", distribution, "--max-items", "50"]
-            }
-            Listing::Applications => vec!["deploy", "list-applications"],
-            Listing::Deployments { application } => {
-                vec!["deploy", "list-deployments", "--application-name", application, "--max-items", "25"]
-            }
-            Listing::Buckets => vec!["s3api", "list-buckets"],
-            Listing::Objects { bucket, prefix } => vec![
-                "s3api",
-                "list-objects-v2",
-                "--bucket",
-                bucket,
-                "--delimiter",
-                "/",
-                "--prefix",
-                prefix,
-                "--max-items",
-                "1000",
-            ],
-            Listing::Instances => vec!["ec2", "describe-instances"],
-            Listing::Profiles | Listing::Regions => vec![],
-        };
-        words.into_iter().map(str::to_string).collect()
+        matches!(
+            self,
+            Listing::Distributions
+                | Listing::Invalidations { .. }
+                | Listing::Buckets
+                | Listing::Objects { .. }
+                | Listing::Roles
+                | Listing::RolePolicies { .. }
+                | Listing::Users
+        )
     }
 
     /// What Enter on `row` leads to, if anything.
@@ -138,6 +185,16 @@ impl Listing {
             Listing::Distributions => Some(Listing::Invalidations { distribution: row.name.clone() }),
             Listing::Applications => Some(Listing::Deployments { application: row.name.clone() }),
             Listing::Buckets => Some(Listing::Objects { bucket: row.name.clone(), prefix: String::new() }),
+            Listing::Pipelines => Some(Listing::PipelineState { pipeline: row.name.clone() }),
+            Listing::BuildProjects => Some(Listing::Builds { project: row.name.clone() }),
+            Listing::Roles => Some(Listing::RolePolicies { role: row.name.clone() }),
+            Listing::Clusters => Some(Listing::Services { cluster: row.name.clone() }),
+            Listing::Services { cluster } => Some(Listing::Tasks { cluster: cluster.clone(), service: row.name.clone() }),
+            Listing::StateMachines => {
+                Some(Listing::Executions { machine: row.object["stateMachineArn"].as_str()?.to_string(), name: row.name.clone() })
+            }
+            Listing::UserPools => Some(Listing::PoolClients { pool: row.name.clone() }),
+            Listing::Apis => Some(Listing::Stages { api: row.name.clone(), v2: row.object["ApiId"].is_string() }),
             // A folder goes one level down; an object is the end of it.
             Listing::Objects { bucket, .. } if row.name.ends_with('/') => {
                 Some(Listing::Objects { bucket: bucket.clone(), prefix: row.name.clone() })
@@ -146,15 +203,54 @@ impl Listing {
         }
     }
 
-    /// The CloudWatch log group of a row, for following its logs.
-    pub fn log_group(&self, row: &Row) -> Option<String> {
+    /// What follows `aws logs` to follow a row's logs, when it has some:
+    /// a function's own group, or the stream of one build.
+    pub fn logs(&self, row: &Row) -> Option<Vec<String>> {
+        let tail = |group: &str, rest: &[&str]| {
+            let mut args = vec!["logs".to_string(), "tail".to_string(), group.to_string()];
+            args.extend(rest.iter().map(|s| s.to_string()));
+            args.extend(["--follow", "--format", "short"].map(str::to_string));
+            args
+        };
         match self {
-            Listing::Functions => Some(
-                row.object["LoggingConfig"]["LogGroup"]
+            Listing::Functions => {
+                let group = row.object["LoggingConfig"]["LogGroup"]
                     .as_str()
                     .map(str::to_string)
-                    .unwrap_or_else(|| format!("/aws/lambda/{}", row.name)),
-            ),
+                    .unwrap_or_else(|| format!("/aws/lambda/{}", row.name));
+                Some(tail(&group, &["--since", "10m"]))
+            }
+            Listing::Builds { .. } => {
+                let logs = &row.object["logs"];
+                let (group, stream) = (logs["groupName"].as_str()?, logs["streamName"].as_str()?);
+                // The whole build, then whatever it still says.
+                Some(tail(group, &["--log-stream-names", stream, "--since", "7d"]))
+            }
+            _ => None,
+        }
+    }
+
+    /// The `aws` arguments that open a shell on a row: Session Manager
+    /// on an instance, ECS Exec in a task. `Err` says why not this one.
+    pub fn shell(&self, row: &Row) -> Option<Result<Vec<String>, String>> {
+        let words = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        match self {
+            Listing::Instances => Some(match row.object["State"]["Name"].as_str().unwrap_or("") {
+                "running" => Ok(words(&["ssm", "start-session", "--target", &row.name])),
+                state => Err(format!("{} is {state}; a session needs it running.", row.name)),
+            }),
+            Listing::Tasks { cluster, .. } => Some(match row.object["lastStatus"].as_str().unwrap_or("") {
+                "RUNNING" => {
+                    let mut args = words(&["ecs", "execute-command", "--cluster", cluster, "--task", &row.name]);
+                    // With several containers the CLI wants one named.
+                    if let Some(container) = row.object["containers"][0]["name"].as_str() {
+                        args.extend(words(&["--container", container]));
+                    }
+                    args.extend(words(&["--interactive", "--command", "/bin/sh"]));
+                    Ok(args)
+                }
+                state => Err(format!("{} is {state}; a shell needs it running.", row.name)),
+            }),
             _ => None,
         }
     }
@@ -165,8 +261,20 @@ pub const KINDS: &[(&str, &[&str])] = &[
     ("lambda", &["fn", "functions", "lambdas"]),
     ("cloudfront", &["cf", "cdn", "distributions"]),
     ("codedeploy", &["cd", "deploy", "deployments"]),
+    ("codepipeline", &["cp", "pipelines", "pipeline"]),
+    ("codebuild", &["cb", "builds", "build"]),
     ("s3", &["buckets", "bucket"]),
     ("ec2", &["instances", "vm"]),
+    ("ecs", &["containers", "fargate"]),
+    ("rds", &["db", "databases"]),
+    ("aurora", &["dbclusters"]),
+    ("iam", &["roles", "role"]),
+    ("users", &["iam-users"]),
+    ("ssm", &["params", "parameters"]),
+    ("stepfunctions", &["sfn", "states", "machines"]),
+    ("sqs", &["queues", "queue"]),
+    ("cognito", &["pools", "userpools"]),
+    ("apigateway", &["api", "apis", "apigw"]),
 ];
 
 /// The listing a typed word means, if it means one.
@@ -177,7 +285,19 @@ pub fn resolve(word: &str) -> Option<Listing> {
         "lambda" => Listing::Functions,
         "cloudfront" => Listing::Distributions,
         "codedeploy" => Listing::Applications,
+        "codepipeline" => Listing::Pipelines,
+        "codebuild" => Listing::BuildProjects,
         "s3" => Listing::Buckets,
+        "ecs" => Listing::Clusters,
+        "rds" => Listing::Databases,
+        "aurora" => Listing::DbClusters,
+        "iam" => Listing::Roles,
+        "users" => Listing::Users,
+        "ssm" => Listing::Parameters,
+        "stepfunctions" => Listing::StateMachines,
+        "sqs" => Listing::Queues,
+        "cognito" => Listing::UserPools,
+        "apigateway" => Listing::Apis,
         _ => Listing::Instances,
     })
 }
@@ -356,6 +476,25 @@ impl Client {
         Ok(tables::identity(&v))
     }
 
+    /// Run `aws` with these words and read its JSON.
+    fn call(&self, words: &[&str]) -> Result<Value, Error> {
+        self.json(&words.iter().map(|w| w.to_string()).collect::<Vec<_>>())
+    }
+
+    /// The same call for each chunk of `ids` (the APIs take a few at a
+    /// time), with the arrays under `key` joined into one answer.
+    fn in_chunks(&self, words: &[&str], ids: &[String], size: usize, key: &str) -> Result<Value, Error> {
+        let mut all = Vec::new();
+        for chunk in ids.chunks(size) {
+            let mut args: Vec<String> = words.iter().map(|w| w.to_string()).collect();
+            args.extend(chunk.iter().cloned());
+            if let Value::Array(items) = self.json(&args)?[key].take() {
+                all.extend(items);
+            }
+        }
+        Ok(serde_json::json!({ key: all }))
+    }
+
     /// Run the listing and build its table.
     pub fn list(&self, listing: &Listing, now: i64) -> Result<Table, Error> {
         match listing {
@@ -363,23 +502,116 @@ impl Client {
             Listing::Regions => return Ok(tables::regions(self.region.as_deref())),
             _ => {}
         }
-        let answer = self.json(&listing.args())?;
-        // CodeDeploy answers with ids only; the deployments themselves
-        // are a second call.
-        if let Listing::Deployments { .. } = listing {
-            let ids: Vec<String> = answer["deployments"]
-                .as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).take(25).collect())
-                .unwrap_or_default();
-            if ids.is_empty() {
-                return Ok(tables::build(listing, &Value::Null, now));
+        Ok(tables::build(listing, &self.answer(listing)?, now))
+    }
+
+    /// What the service says about a listing. Most are one call; the
+    /// services that list ids and describe them separately take two.
+    fn answer(&self, listing: &Listing) -> Result<Value, Error> {
+        let strings = |v: &Value| -> Vec<String> {
+            v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default()
+        };
+        match listing {
+            Listing::Functions => self.call(&["lambda", "list-functions"]),
+            Listing::Distributions => self.call(&["cloudfront", "list-distributions"]),
+            Listing::Invalidations { distribution } => {
+                self.call(&["cloudfront", "list-invalidations", "--distribution-id", distribution, "--max-items", "50"])
             }
-            let mut args = vec!["deploy".to_string(), "batch-get-deployments".to_string(), "--deployment-ids".to_string()];
-            args.extend(ids);
-            let details = self.json(&args)?;
-            return Ok(tables::build(listing, &details, now));
+            Listing::Applications => self.call(&["deploy", "list-applications"]),
+            Listing::Deployments { application } => {
+                let ids = strings(
+                    &self.call(&["deploy", "list-deployments", "--application-name", application, "--max-items", "25"])?
+                        ["deployments"],
+                );
+                self.in_chunks(&["deploy", "batch-get-deployments", "--deployment-ids"], &ids, 25, "deploymentsInfo")
+            }
+            Listing::Buckets => self.call(&["s3api", "list-buckets"]),
+            Listing::Objects { bucket, prefix } => self.call(&[
+                "s3api",
+                "list-objects-v2",
+                "--bucket",
+                bucket,
+                "--delimiter",
+                "/",
+                "--prefix",
+                prefix,
+                "--max-items",
+                "1000",
+            ]),
+            Listing::Instances => self.call(&["ec2", "describe-instances"]),
+            Listing::Pipelines => self.call(&["codepipeline", "list-pipelines"]),
+            Listing::PipelineState { pipeline } => self.call(&["codepipeline", "get-pipeline-state", "--name", pipeline]),
+            Listing::BuildProjects => self.call(&["codebuild", "list-projects"]),
+            Listing::Builds { project } => {
+                let ids = strings(
+                    &self.call(&["codebuild", "list-builds-for-project", "--project-name", project, "--max-items", "25"])?["ids"],
+                );
+                self.in_chunks(&["codebuild", "batch-get-builds", "--ids"], &ids, 25, "builds")
+            }
+            Listing::Roles => self.call(&["iam", "list-roles"]),
+            Listing::RolePolicies { role } => self.call(&["iam", "list-attached-role-policies", "--role-name", role]),
+            Listing::Users => self.call(&["iam", "list-users"]),
+            Listing::Clusters => {
+                let arns = strings(&self.call(&["ecs", "list-clusters"])?["clusterArns"]);
+                self.in_chunks(&["ecs", "describe-clusters", "--clusters"], &arns, 100, "clusters")
+            }
+            Listing::Services { cluster } => {
+                let arns = strings(&self.call(&["ecs", "list-services", "--cluster", cluster])?["serviceArns"]);
+                self.in_chunks(&["ecs", "describe-services", "--cluster", cluster, "--services"], &arns, 10, "services")
+            }
+            Listing::Tasks { cluster, service } => {
+                let arns =
+                    strings(&self.call(&["ecs", "list-tasks", "--cluster", cluster, "--service-name", service])?["taskArns"]);
+                self.in_chunks(&["ecs", "describe-tasks", "--cluster", cluster, "--tasks"], &arns, 100, "tasks")
+            }
+            Listing::Databases => self.call(&["rds", "describe-db-instances"]),
+            Listing::DbClusters => self.call(&["rds", "describe-db-clusters"]),
+            Listing::Parameters => self.call(&["ssm", "describe-parameters"]),
+            Listing::StateMachines => self.call(&["stepfunctions", "list-state-machines"]),
+            Listing::Executions { machine, .. } => {
+                self.call(&["stepfunctions", "list-executions", "--state-machine-arn", machine, "--max-items", "25"])
+            }
+            Listing::Queues => {
+                let urls = strings(&self.call(&["sqs", "list-queues"])?["QueueUrls"]);
+                Ok(serde_json::json!({ "Queues": self.queues(&urls) }))
+            }
+            Listing::UserPools => self.call(&["cognito-idp", "list-user-pools", "--max-results", "60"]),
+            Listing::PoolClients { pool } => {
+                self.call(&["cognito-idp", "list-user-pool-clients", "--user-pool-id", pool, "--max-results", "60"])
+            }
+            // Two generations of the service, one list.
+            Listing::Apis => {
+                let rest = self.call(&["apigateway", "get-rest-apis"])?;
+                let v2 = self.call(&["apigatewayv2", "get-apis"])?;
+                Ok(serde_json::json!({ "rest": rest["items"], "v2": v2["Items"] }))
+            }
+            Listing::Stages { api, v2: false } => self.call(&["apigateway", "get-stages", "--rest-api-id", api]),
+            Listing::Stages { api, v2: true } => self.call(&["apigatewayv2", "get-stages", "--api-id", api]),
+            Listing::Profiles | Listing::Regions => Ok(Value::Null),
         }
-        Ok(tables::build(listing, &answer, now))
+    }
+
+    /// How full each queue is. SQS only says so one queue at a time, so
+    /// the questions are asked a few at once; a queue that doesn't answer
+    /// keeps its line, without numbers.
+    fn queues(&self, urls: &[String]) -> Vec<Value> {
+        const AT_ONCE: usize = 8;
+        let ask = |url: &String| {
+            let attributes = self
+                .call(&["sqs", "get-queue-attributes", "--queue-url", url, "--attribute-names", "All"])
+                .map(|mut v| v["Attributes"].take())
+                .unwrap_or(Value::Null);
+            serde_json::json!({ "QueueUrl": url, "Attributes": attributes })
+        };
+        let mut out = Vec::with_capacity(urls.len());
+        for batch in urls.chunks(AT_ONCE) {
+            let answers: Vec<Value> = std::thread::scope(|scope| {
+                let handles: Vec<_> = batch.iter().map(|url| scope.spawn(move || ask(url))).collect();
+                handles.into_iter().map(|h| h.join().unwrap_or(Value::Null)).collect()
+            });
+            out.extend(answers);
+        }
+        out
     }
 }
 
@@ -412,10 +644,14 @@ mod tests {
         assert_eq!(resolve("CF"), Some(Listing::Distributions));
         assert_eq!(resolve(" s3 "), Some(Listing::Buckets));
         assert_eq!(resolve("ec2"), Some(Listing::Instances));
-        assert_eq!(resolve("rds"), None);
-        assert_eq!(complete("c"), vec!["cloudfront", "codedeploy"]);
+        assert_eq!(resolve("dynamodb"), None);
+        assert_eq!(complete("code"), vec!["codedeploy", "codepipeline", "codebuild"]);
+        assert_eq!(resolve("sfn"), Some(Listing::StateMachines));
+        assert_eq!(resolve("api"), Some(Listing::Apis));
+        assert_eq!(resolve("params"), Some(Listing::Parameters));
         assert_eq!(complete("buck"), vec!["s3"]);
-        assert_eq!(complete("cd"), vec!["codedeploy", "cloudfront"]);
+        assert_eq!(complete("cd")[0], "codedeploy");
+        assert_eq!(complete("cp")[0], "codepipeline");
         assert_eq!(complete("cf"), vec!["cloudfront"]);
     }
 
@@ -440,11 +676,72 @@ mod tests {
 
     #[test]
     fn a_lambda_logs_where_it_says_or_where_lambdas_do() {
-        assert_eq!(Listing::Functions.log_group(&row("api")).as_deref(), Some("/aws/lambda/api"));
+        let args = Listing::Functions.logs(&row("api")).expect("a function has logs");
+        assert_eq!(args, ["logs", "tail", "/aws/lambda/api", "--since", "10m", "--follow", "--format", "short"]);
         let mut custom = row("api");
         custom.object = serde_json::json!({ "LoggingConfig": { "LogGroup": "/custom/api" } });
-        assert_eq!(Listing::Functions.log_group(&custom).as_deref(), Some("/custom/api"));
-        assert_eq!(Listing::Buckets.log_group(&row("assets")), None);
+        assert_eq!(Listing::Functions.logs(&custom).expect("logs")[2], "/custom/api");
+        assert_eq!(Listing::Buckets.logs(&row("assets")), None);
+    }
+
+    #[test]
+    fn a_build_logs_from_its_own_stream() {
+        let mut build = row("web:1");
+        build.object = serde_json::json!({ "logs": { "groupName": "/aws/codebuild/web", "streamName": "abc" } });
+        let args = Listing::Builds { project: "web".into() }.logs(&build).expect("a build has logs");
+        assert_eq!(args[..5], ["logs", "tail", "/aws/codebuild/web", "--log-stream-names", "abc"]);
+        // A build that never started has nowhere to read from.
+        assert_eq!(Listing::Builds { project: "web".into() }.logs(&row("web:2")), None);
+    }
+
+    #[test]
+    fn a_shell_goes_through_ssm_or_ecs_exec() {
+        let mut vm = row("i-0a");
+        vm.object = serde_json::json!({ "State": { "Name": "running" } });
+        assert_eq!(
+            Listing::Instances.shell(&vm),
+            Some(Ok(vec!["ssm".into(), "start-session".into(), "--target".into(), "i-0a".into()]))
+        );
+        vm.object = serde_json::json!({ "State": { "Name": "stopped" } });
+        assert!(matches!(Listing::Instances.shell(&vm), Some(Err(why)) if why.contains("stopped")));
+        let tasks = Listing::Tasks { cluster: "prod".into(), service: "api".into() };
+        let mut task = row("0123abcd");
+        task.object = serde_json::json!({ "lastStatus": "RUNNING", "containers": [{ "name": "app" }, { "name": "envoy" }] });
+        let args = tasks.shell(&task).expect("a task takes a shell").expect("it is running");
+        assert_eq!(
+            args,
+            [
+                "ecs",
+                "execute-command",
+                "--cluster",
+                "prod",
+                "--task",
+                "0123abcd",
+                "--container",
+                "app",
+                "--interactive",
+                "--command",
+                "/bin/sh"
+            ]
+        );
+        assert_eq!(Listing::Functions.shell(&row("api")), None);
+    }
+
+    #[test]
+    fn the_new_services_lead_where_they_should() {
+        assert_eq!(Listing::Clusters.enter(&row("prod")), Some(Listing::Services { cluster: "prod".into() }));
+        assert_eq!(
+            Listing::Services { cluster: "prod".into() }.enter(&row("api")),
+            Some(Listing::Tasks { cluster: "prod".into(), service: "api".into() })
+        );
+        let mut machine = row("nightly");
+        machine.object = serde_json::json!({ "stateMachineArn": "arn:aws:states:eu-west-3:1:stateMachine:nightly" });
+        assert!(matches!(Listing::StateMachines.enter(&machine), Some(Listing::Executions { name, .. }) if name == "nightly"));
+        let mut http = row("a1b2");
+        http.object = serde_json::json!({ "ApiId": "a1b2" });
+        assert_eq!(Listing::Apis.enter(&http), Some(Listing::Stages { api: "a1b2".into(), v2: true }));
+        assert_eq!(Listing::Apis.enter(&row("r9")), Some(Listing::Stages { api: "r9".into(), v2: false }));
+        assert!(Listing::Roles.global() && !Listing::Clusters.global());
     }
 
     #[test]

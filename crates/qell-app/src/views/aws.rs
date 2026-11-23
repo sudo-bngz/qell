@@ -464,7 +464,7 @@ fn header(app: &mut QellApp, ui: &mut egui::Ui, font: &FontId, colors: &Colors) 
         ("<ctrl-f/u>", "Page"),
         ("<r>", "Read again"),
     ];
-    let keys_mid = [("<d>", "Describe"), ("<l>", "Logs"), ("<s>", "SSM session"), ("<c>", "Copy name"), ("<?>", "Help")];
+    let keys_mid = [("<d>", "Describe"), ("<l>", "Logs"), ("<s>", "Shell"), ("<c>", "Copy name"), ("<?>", "Help")];
     let keys_right = [
         ("<:>", "Service"),
         ("</>", "Filter"),
@@ -612,7 +612,7 @@ fn bottom_line(
         job.append(&format!("{mark}{}", a.line), 0.0, fmt(accent));
         // The first match, greyed out after what was typed: Tab takes it.
         let suggestion = a.matches.get(a.match_at).cloned().unwrap_or_default();
-        if let Some(rest) = suggestion.strip_prefix(a.line.as_str()) {
+        if let Some(rest) = suggestion.strip_prefix(a.line.as_str()).filter(|_| !a.line.is_empty()) {
             job.append(rest, 0.0, fmt(dim));
         }
         if a.matches.len() > 1 {
@@ -645,14 +645,14 @@ fn help_overlay(ctx: &egui::Context, font: &FontId, text: Color32, dim: Color32)
         ("j / k, ↓ / ↑", "move"),
         ("g / G", "first / last"),
         ("Ctrl+f / Ctrl+u", "a page down / up"),
-        ("Enter", "go in — a distribution, an application, a bucket, a folder"),
+        ("Enter", "go in — a pipeline, a cluster, a service, a bucket, an API…"),
         ("Esc", "back, or clear the filter"),
         ("d", "everything aws said about it; Esc comes back"),
-        ("l", "follow a function's logs, in a terminal tab"),
-        ("s", "an SSM session on an instance, in a terminal tab"),
+        ("l", "follow a function's or a build's logs, in a terminal tab"),
+        ("s", "a shell on an instance (SSM) or in an ECS task, in a terminal tab"),
         ("c", "copy its ARN, its s3:// address or its name"),
         ("/", "filter the rows"),
-        (":", "a service (:lambda :cf :cd :s3 :ec2) or :q to close"),
+        (":", "a service — : alone lists them all — or :q to close"),
         (":profile x", "use another profile; p lists them"),
         (":region x", "use another region; 1-9 are in the header"),
         ("Tab", "take the suggestion, again for the next"),
@@ -704,7 +704,7 @@ fn keys(app: &mut QellApp, ctx: &egui::Context) {
             (Key::Colon | Key::Semicolon, false) => {
                 a.typing = Typing::Command;
                 a.line.clear();
-                a.matches.clear();
+                suggest(a);
             }
             (Key::Questionmark, false) => a.help = true,
             // Esc goes back a step; at the top it stays put. The view
@@ -824,6 +824,8 @@ fn typing_keys(app: &mut QellApp, ctx: &egui::Context) {
                     }
                     // Enter on a half-typed word takes the suggestion
                     // with it, so `:la` then Enter lists the functions.
+                    // Enter on nothing is nothing, whatever is listed.
+                    Typing::Command if line.trim().is_empty() => {}
                     Typing::Command => run_command(app, &suggestion.unwrap_or(line), ctx),
                     Typing::No => {}
                 }
@@ -849,6 +851,10 @@ fn suggest(a: &mut AwsState) {
 
 fn completions(typing: Typing, line: &str, profiles: &[String], table: &Table) -> Vec<String> {
     let typed = line.trim_start().to_lowercase();
+    // `:` alone shows what there is to pick from.
+    if typed.is_empty() && typing == Typing::Command {
+        return qell_aws::KINDS.iter().map(|(name, _)| name.to_string()).collect();
+    }
     if typed.is_empty() {
         return Vec::new();
     }
@@ -903,7 +909,7 @@ fn run_command(app: &mut QellApp, line: &str, ctx: &egui::Context) {
             Some(listing) => app.aws.set(listing, ctx),
             None => {
                 let known: Vec<&str> = qell_aws::KINDS.iter().map(|(name, _)| *name).collect();
-                app.aws.error = Some(format!("{word} isn't a service this view reads yet. It reads: {}.", known.join(", ")));
+                app.aws.error = Some(format!("{word} isn't a service this view reads yet. It reads: {}.", known.join(" ")));
             }
         },
     }
@@ -947,43 +953,46 @@ fn describe(app: &mut QellApp) {
     app.aws.scroll_to = true;
 }
 
-/// `l`: follow a function's logs in a terminal tab.
+/// `l`: follow a function's or a build's logs in a terminal tab.
 fn logs(app: &mut QellApp) {
     let Some(row) = selected_row(app) else { return };
-    let Some(group) = app.aws.listing.log_group(&row) else {
-        app.aws.error = Some("Logs are for Lambda functions: :lambda, then l on one.".to_string());
+    let Some(tail) = app.aws.listing.logs(&row) else {
+        app.aws.error =
+            Some("Logs are for Lambda functions (:lambda) and CodeBuild builds (:cb, then into a project).".to_string());
         return;
     };
     let mut args = app.aws.client.base_args();
-    args.extend(log_args(&group));
+    args.extend(tail);
     let bin = app.aws.client.bin.clone();
-    app.run_in_terminal(format!("logs {}", row.name), &bin, args);
+    let what = row.cells.first().cloned().unwrap_or_else(|| row.name.clone());
+    app.run_in_terminal(format!("logs {what}"), &bin, args);
 }
 
-/// The last ten minutes, then whatever comes.
-fn log_args(group: &str) -> Vec<String> {
-    ["logs", "tail", group, "--follow", "--since", "10m", "--format", "short"].iter().map(|s| s.to_string()).collect()
-}
-
-/// `s`: a shell on an instance through Session Manager, in a terminal
-/// tab. No SSH key and no open port; the CLI says what is missing when
-/// its session plugin isn't installed.
+/// `s`: a shell in a terminal tab — Session Manager on an instance, ECS
+/// Exec in a task. No SSH key and no open port; the CLI says what is
+/// missing when its session plugin isn't installed.
 fn session(app: &mut QellApp) {
     let Some(row) = selected_row(app) else { return };
-    if app.aws.listing != Listing::Instances {
-        app.aws.error = Some("Sessions are for EC2 instances: :ec2, then s on one.".to_string());
-        return;
-    }
-    let state = row.object["State"]["Name"].as_str().unwrap_or("");
-    if state != "running" {
-        app.aws.error = Some(format!("{} is {state}; a session needs it running.", row.name));
-        return;
-    }
-    let mut args = app.aws.client.base_args();
-    args.extend(["ssm".to_string(), "start-session".to_string(), "--target".to_string(), row.name.clone()]);
-    let label = row.cells.get(1).filter(|n| n.as_str() != "-").cloned().unwrap_or_else(|| row.name.clone());
+    let args = match app.aws.listing.shell(&row) {
+        Some(Ok(args)) => args,
+        Some(Err(why)) => {
+            app.aws.error = Some(why);
+            return;
+        }
+        None => {
+            app.aws.error = Some("A shell is for EC2 instances (:ec2) and ECS tasks (:ecs, into a service).".to_string());
+            return;
+        }
+    };
+    let mut all = app.aws.client.base_args();
+    all.extend(args);
+    // An instance goes by its Name tag, a task by its id.
+    let label = match app.aws.listing {
+        Listing::Instances => row.cells.get(1).filter(|n| n.as_str() != "-").cloned().unwrap_or_else(|| row.name.clone()),
+        _ => row.name.clone(),
+    };
     let bin = app.aws.client.bin.clone();
-    app.run_in_terminal(format!("ssm {label}"), &bin, args);
+    app.run_in_terminal(format!("sh {label}"), &bin, all);
 }
 
 /// `c`: what you would paste into a command or a ticket.
@@ -1022,14 +1031,17 @@ mod tests {
         let none = Table::default();
         let complete = |line: &str| completions(Typing::Command, line, &profiles, &none);
         assert_eq!(complete("la"), ["lambda"]);
-        assert_eq!(complete("c"), ["cloudfront", "codedeploy"]);
+        assert_eq!(complete("code"), ["codedeploy", "codepipeline", "codebuild"]);
+        assert_eq!(complete("sq"), ["sqs"]);
         // A command that takes a name completes to itself and a space…
         assert_eq!(complete("pro"), ["profile "]);
         assert_eq!(complete("re"), ["region "]);
         // …and then to the names.
         assert_eq!(complete("profile pr"), ["profile prod", "profile preprod"]);
         assert_eq!(complete("region eu-west"), ["region eu-west-1", "region eu-west-3", "region eu-west-2"]);
-        assert!(complete("").is_empty());
+        // Nothing typed yet: every service, to pick from.
+        assert_eq!(complete("").len(), qell_aws::KINDS.len());
+        assert!(completions(Typing::Filter, "", &profiles, &none).is_empty());
     }
 
     #[test]
@@ -1050,13 +1062,5 @@ mod tests {
         let inside = Listing::Objects { bucket: "assets".into(), prefix: "img/".into() };
         assert_eq!(address(&inside, &row("img/logo.png", serde_json::Value::Null)), "s3://assets/img/logo.png");
         assert_eq!(address(&Listing::Instances, &row("i-0a", serde_json::json!({}))), "i-0a");
-    }
-
-    #[test]
-    fn logs_start_a_little_back_and_follow() {
-        assert_eq!(
-            log_args("/aws/lambda/api"),
-            ["logs", "tail", "/aws/lambda/api", "--follow", "--since", "10m", "--format", "short"]
-        );
     }
 }
