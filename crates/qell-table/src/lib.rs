@@ -64,8 +64,7 @@ impl Table {
 }
 
 /// `2026-11-21T07:04:05Z` (or with an offset, or with fractions) as
-/// seconds since the epoch. The date and time are read as written:
-/// AWS and Kubernetes both answer in UTC.
+/// seconds since the epoch.
 pub fn epoch_seconds(timestamp: &str) -> Option<i64> {
     let b = timestamp.as_bytes();
     if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || (b[10] != b'T' && b[10] != b' ') || b[13] != b':' || b[16] != b':' {
@@ -81,7 +80,26 @@ pub fn epoch_seconds(timestamp: &str) -> Option<i64> {
     let mp = (m + 9) % 12;
     let doy = (153 * mp + 2) / 5 + d - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    Some((era * 146_097 + doe - 719_468) * 86_400 + hh * 3_600 + mm * 60 + ss)
+    let local = (era * 146_097 + doe - 719_468) * 86_400 + hh * 3_600 + mm * 60 + ss;
+    Some(local - offset_seconds(&timestamp[19..]))
+}
+
+/// What follows the seconds: fractions, then `Z` or `+01:00` / `-0500`.
+/// The AWS CLI writes local offsets when it is told to, so they count.
+fn offset_seconds(rest: &str) -> i64 {
+    let rest = rest.trim_start_matches(|c: char| c == '.' || c.is_ascii_digit());
+    let sign = match rest.chars().next() {
+        Some('+') => 1,
+        Some('-') => -1,
+        _ => return 0,
+    };
+    let digits: String = rest[1..].chars().filter(char::is_ascii_digit).collect();
+    let (Some(h), Some(m)) =
+        (digits.get(0..2).and_then(|h| h.parse::<i64>().ok()), digits.get(2..4).and_then(|m| m.parse::<i64>().ok()))
+    else {
+        return 0;
+    };
+    sign * (h * 3_600 + m * 60)
 }
 
 /// An age the way kubectl prints it: `12s`, `5m`, `3h20m`, `6d4h`, `21d`.
@@ -205,6 +223,9 @@ mod tests {
         // AWS: an offset, or fractions and an offset.
         assert_eq!(epoch_seconds("2026-11-21T07:04:05+00:00"), Some(1_795_244_645));
         assert_eq!(epoch_seconds("2026-11-21T07:04:05.000+0000"), Some(1_795_244_645));
+        // A local offset is taken off: 08:04 in Paris is 07:04 UTC.
+        assert_eq!(epoch_seconds("2026-11-21T08:04:05.123000+01:00"), Some(1_795_244_645));
+        assert_eq!(epoch_seconds("2026-11-21T02:04:05-0500"), Some(1_795_244_645));
         assert_eq!(epoch_seconds("yesterday"), None);
     }
 

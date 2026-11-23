@@ -243,17 +243,33 @@ bottom, and language-server completion for the languages you actually use.
   the keyboard**, and stops the moment you click elsewhere; the header says
   which it is doing. Nothing talks to a cluster in the background.
 - **AWS view** (`Ctrl/⌘+Shift+A`, or the cloud under the helm) — the same
-  kind of table for an AWS account: Lambda functions, CloudFront
-  distributions, CodeDeploy applications, S3 buckets and EC2 instances.
-  `:` picks the service (`:lambda`, `:cf`, `:cd`, `:s3`, `:ec2`), `Enter`
-  goes in (a distribution's invalidations, an application's latest
-  deployments with why a failed one failed, a bucket's folders and
-  objects), `Esc` comes back, `/` filters and `d` shows everything aws
-  said about the row. `1`–`9` change region, `p` or `:profile prod`
-  changes profile, and the header says which account and identity you are
-  looking through. `l` follows a function's logs and `s` opens a Session
-  Manager shell on an instance, each in a terminal tab; `c` copies the
-  row's ARN, `s3://` address or name.
+  kind of table for an AWS account. `:` picks the service, and `:` alone
+  lists them:
+
+  | Type | Lists | `Enter` goes into |
+  | --- | --- | --- |
+  | `:lambda` `:fn` | functions | details |
+  | `:cloudfront` `:cf` | distributions | invalidations |
+  | `:codedeploy` `:cd` | applications | latest deployments, with why a failed one failed |
+  | `:codepipeline` `:cp` | pipelines | each stage and action, the stuck one in red |
+  | `:codebuild` `:cb` | projects | latest builds |
+  | `:s3` | buckets | folders and objects |
+  | `:ec2` | instances | details |
+  | `:ecs` | clusters | services, then tasks |
+  | `:rds` / `:aurora` | instances / clusters | details |
+  | `:iam` / `:users` | roles / users | a role's attached policies |
+  | `:ssm` `:params` | Parameter Store names and types — never values | details |
+  | `:stepfunctions` `:sfn` | state machines | latest executions |
+  | `:sqs` | queues with their depth and dead-letter queue | details |
+  | `:cognito` | user pools | app clients |
+  | `:apigateway` `:api` | REST, HTTP and WebSocket APIs | stages |
+
+  `Esc` comes back, `/` filters and `d` shows everything aws said about
+  the row. `1`–`9` change region, `p` or `:profile prod` changes profile,
+  and the header says which account and identity you are looking through.
+  `l` follows the logs of a function or a build, and `s` opens a shell on
+  an instance (Session Manager) or in an ECS task (ECS Exec), each in a
+  terminal tab; `c` copies the row's ARN, `s3://` address or name.
 
   It reads everything through your own `aws` CLI, so your profiles, SSO
   sessions and assumed roles are used as they are — Qell holds no
