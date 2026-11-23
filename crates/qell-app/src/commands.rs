@@ -360,7 +360,11 @@ mod tests {
         let order = Command::by_shortcut_specificity();
         let pos = |c| order.iter().position(|(x, _)| *x == c).unwrap();
         assert!(pos(Command::PrevTab) < pos(Command::NextTab));
-        assert!(pos(Command::NewTerminal) < pos(Command::ToggleTerminal));
+        // On macOS a new terminal is ⌘T, which shares no key with the
+        // toggle, so there is no order between them to keep.
+        if !cfg!(target_os = "macos") {
+            assert!(pos(Command::NewTerminal) < pos(Command::ToggleTerminal));
+        }
         assert!(pos(Command::SaveAs) < pos(Command::Save));
     }
 
