@@ -271,6 +271,11 @@ bottom, and language-server completion for the languages you actually use.
   an instance (Session Manager) or in an ECS task (ECS Exec), each in a
   terminal tab; `c` copies the row's ARN, `s3://` address or name.
 
+  When a session has expired the view says so, and `i` signs in again:
+  it runs `aws sso login` in a terminal tab (for the profile's whole
+  `sso-session` when it has one, so every account behind it is covered),
+  and reads the list again when that ends.
+
   It reads everything through your own `aws` CLI, so your profiles, SSO
   sessions and assumed roles are used as they are — Qell holds no
   credentials and installs nothing. Nothing is on a timer: a list is read

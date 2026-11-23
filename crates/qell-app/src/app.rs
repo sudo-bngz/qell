@@ -2821,7 +2821,7 @@ impl eframe::App for QellApp {
         // apply started from a manifest tab), so they are drained here
         // rather than while drawing the panel.
         views::k8s::update(self, ctx);
-        views::aws::update(self);
+        views::aws::update(self, ctx);
         self.handle_config(ctx);
         // The tabs changed: remember them (cursors are saved again on exit).
         if self.session_state().0 != self.session_key {
