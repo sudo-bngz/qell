@@ -25,8 +25,10 @@ const TIMEOUT: Duration = Duration::from_secs(45);
 pub enum Error {
     /// `aws` isn't on the PATH.
     NotInstalled,
-    /// It ran and said no (expired session, no permission, wrong region).
+    /// It ran and said no (no permission, wrong region).
     Failed(String),
+    /// The session has expired: signing in again is all it needs.
+    SignedOut(String),
     TimedOut,
 }
 
@@ -41,6 +43,7 @@ impl std::fmt::Display for Error {
             ),
             Error::TimedOut => write!(f, "aws didn't answer within {}s.", TIMEOUT.as_secs()),
             Error::Failed(message) => write!(f, "{message}"),
+            Error::SignedOut(message) => write!(f, "{message}  Press i to sign in."),
         }
     }
 }
@@ -429,7 +432,7 @@ impl Client {
         };
         match child.wait() {
             Ok(status) if status.success() => Ok(out),
-            Ok(_) => Err(Error::Failed(tidy_error(&err, self.profile.as_deref()))),
+            Ok(_) => Err(tidy_error(&err)),
             Err(e) => Err(Error::Failed(e.to_string())),
         }
     }
@@ -467,6 +470,25 @@ impl Client {
         }
         let out = cmd.args(["configure", "get", "region"]).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
         Some(String::from_utf8_lossy(&out.stdout).trim().to_string()).filter(|r| !r.is_empty())
+    }
+
+    /// What follows `aws` to sign in again. A profile that belongs to an
+    /// `sso-session` signs that whole session in, which covers every
+    /// account behind it in one go.
+    pub fn login_args(&self) -> Vec<String> {
+        let mut cmd = Command::new(&self.bin);
+        if let Some(p) = &self.profile {
+            cmd.args(["--profile", p]);
+        }
+        let session = cmd
+            .args(["configure", "get", "sso_session"])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+            .filter(|s| !s.is_empty());
+        login_args(self.profile.as_deref(), session.as_deref())
     }
 
     /// Who this is, which is also the cheapest way to learn that the
@@ -617,17 +639,25 @@ impl Client {
 
 /// The CLI's errors lead with a blank line and the operation; this keeps
 /// the sentence, and says what to do about the commonest one.
-fn tidy_error(stderr: &str, profile: Option<&str>) -> String {
-    let line = stderr.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("aws failed without saying why.");
-    let expired = ["ExpiredToken", "expired", "SSO session", "sso login", "Unable to locate credentials"];
+fn tidy_error(stderr: &str) -> Error {
+    let line = stderr.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("aws failed without saying why.").to_string();
+    let expired = ["ExpiredToken", "expired", "SSO session", "sso login", "Token for"];
     if expired.iter().any(|needle| stderr.contains(needle)) {
-        let login = match profile {
-            Some(p) => format!("aws sso login --profile {p}"),
-            None => "aws sso login".to_string(),
-        };
-        return format!("{line}  Sign in again in a terminal ({login}), then press r.");
+        return Error::SignedOut(line);
     }
-    line.to_string()
+    Error::Failed(line)
+}
+
+/// `sso login` for a whole session when the profile has one, else for
+/// the profile, else for whatever the environment points at.
+pub fn login_args(profile: Option<&str>, sso_session: Option<&str>) -> Vec<String> {
+    let mut args = vec!["sso".to_string(), "login".to_string()];
+    match (sso_session, profile) {
+        (Some(session), _) => args.extend(["--sso-session".to_string(), session.to_string()]),
+        (None, Some(profile)) => args.extend(["--profile".to_string(), profile.to_string()]),
+        (None, None) => {}
+    }
+    args
 }
 
 #[cfg(test)]
@@ -755,11 +785,22 @@ mod tests {
 
     #[test]
     fn an_expired_session_says_how_to_sign_in() {
-        let said =
-            tidy_error("\nAn error occurred (ExpiredToken) when calling the ListFunctions operation: expired\n", Some("prod"));
-        assert!(said.contains("aws sso login --profile prod"), "{said}");
-        assert_eq!(tidy_error("\nAn error occurred (AccessDenied): no\n", None), "An error occurred (AccessDenied): no");
-        assert_eq!(tidy_error("", None), "aws failed without saying why.");
+        let said = tidy_error("\nError when retrieving token from sso: Token has expired and refresh failed\n");
+        assert!(matches!(&said, Error::SignedOut(_)), "{said:?}");
+        assert!(said.to_string().ends_with("Press i to sign in."), "{said}");
+        assert!(matches!(tidy_error("\nAn error occurred (ExpiredToken) when calling ListFunctions: x\n"), Error::SignedOut(_)));
+        assert_eq!(
+            tidy_error("\nAn error occurred (AccessDenied): no\n"),
+            Error::Failed("An error occurred (AccessDenied): no".into())
+        );
+        assert_eq!(tidy_error(""), Error::Failed("aws failed without saying why.".into()));
+    }
+
+    #[test]
+    fn signing_in_covers_the_whole_session_when_there_is_one() {
+        assert_eq!(login_args(Some("prod"), Some("corp")), ["sso", "login", "--sso-session", "corp"]);
+        assert_eq!(login_args(Some("prod"), None), ["sso", "login", "--profile", "prod"]);
+        assert_eq!(login_args(None, None), ["sso", "login"]);
     }
 
     #[test]

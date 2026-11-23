@@ -32,6 +32,8 @@ enum Msg {
     Failed(u64, Listing, Error),
     Who(u64, Result<Identity, Error>, Option<String>),
     Profiles(Vec<String>),
+    /// What to run to sign in, worked out from the profile.
+    Login(Vec<String>),
 }
 
 /// What the bottom line is collecting, if anything.
@@ -79,6 +81,9 @@ pub struct AwsState {
     scroll_to: bool,
     offset: f32,
     offset_x: f32,
+    /// The terminal tab a sign-in is running in. When it closes, the
+    /// sign-in is over and what is on screen is read again.
+    signing_in: Option<usize>,
 }
 
 impl Default for AwsState {
@@ -111,6 +116,7 @@ impl Default for AwsState {
             scroll_to: false,
             offset: 0.0,
             offset_x: 0.0,
+            signing_in: None,
         }
     }
 }
@@ -164,6 +170,16 @@ impl AwsState {
         let (client, epoch) = (self.client.clone(), self.epoch);
         self.asked_who = true;
         self.spawn("aws-who", ctx, move || Msg::Who(epoch, client.identity(), client.configured_region()));
+    }
+
+    /// `i`: work out how this profile signs in. The answer comes back
+    /// as a command for a terminal tab, where the browser prompt shows.
+    fn sign_in(&mut self, ctx: &egui::Context) {
+        if self.signing_in.is_some() {
+            return;
+        }
+        let client = self.client.clone();
+        self.spawn("aws-login", ctx, move || Msg::Login(client.login_args()));
     }
 
     fn fetch_profiles(&mut self, ctx: &egui::Context) {
@@ -269,7 +285,22 @@ pub fn close(app: &mut QellApp) {
 }
 
 /// Take whatever the workers finished. Called once a frame.
-pub fn update(app: &mut QellApp) {
+pub fn update(app: &mut QellApp, ctx: &egui::Context) {
+    // The sign-in's tab closed: it is over. Whether it worked is what
+    // the next read says, so read.
+    if let Some(tab) = app.aws.signing_in {
+        if !app.terminals.iter().any(|t| t.number == tab) {
+            app.aws.signing_in = None;
+            app.aws.error = None;
+            app.aws.fetch_who(ctx);
+            app.aws.fetch(ctx);
+            // Back to where `i` was pressed.
+            if app.aws.open {
+                app.focus = Focus::Aws;
+            }
+        }
+    }
+    let mut login = None;
     let a = &mut app.aws;
     let mut received = Vec::new();
     a.jobs.retain(|rx| match rx.try_recv() {
@@ -301,7 +332,18 @@ pub fn update(app: &mut QellApp) {
                 a.identity = who.ok();
             }
             Msg::Profiles(list) => a.profiles = list,
+            Msg::Login(args) => login = Some(args),
             _ => {}
+        }
+    }
+    // `sso login` names its own profile or session, and a region means
+    // nothing to it, so it runs without the usual leading arguments.
+    if let Some(args) = login {
+        let bin = app.aws.client.bin.clone();
+        let before = app.terminals.len();
+        app.run_in_terminal(format!("sign in {}", app.aws.profile()), &bin, args);
+        if app.terminals.len() > before {
+            app.aws.signing_in = app.terminals.last().map(|t| t.number);
         }
     }
 }
@@ -464,7 +506,8 @@ fn header(app: &mut QellApp, ui: &mut egui::Ui, font: &FontId, colors: &Colors) 
         ("<ctrl-f/u>", "Page"),
         ("<r>", "Read again"),
     ];
-    let keys_mid = [("<d>", "Describe"), ("<l>", "Logs"), ("<s>", "Shell"), ("<c>", "Copy name"), ("<?>", "Help")];
+    let keys_mid =
+        [("<d>", "Describe"), ("<l>", "Logs"), ("<s>", "Shell"), ("<c>", "Copy name"), ("<i>", "Sign in"), ("<?>", "Help")];
     let keys_right = [
         ("<:>", "Service"),
         ("</>", "Filter"),
@@ -656,6 +699,7 @@ fn help_overlay(ctx: &egui::Context, font: &FontId, text: Color32, dim: Color32)
         (":profile x", "use another profile; p lists them"),
         (":region x", "use another region; 1-9 are in the header"),
         ("Tab", "take the suggestion, again for the next"),
+        ("i", "sign in again (aws sso login) in a terminal tab; the list is read when it ends"),
         ("r", "read the list again — nothing refreshes on its own"),
         ("?", "this list"),
     ];
@@ -734,6 +778,7 @@ fn keys(app: &mut QellApp, ctx: &egui::Context) {
                 }
             }
             (Key::P, false) if a.listing != Listing::Profiles => a.go(Listing::Profiles, ctx),
+            (Key::I, false) => a.sign_in(ctx),
             (Key::D | Key::Y, false) => describe(app),
             (Key::L, false) => logs(app),
             (Key::S, false) => session(app),
