@@ -254,6 +254,10 @@ impl Command {
             Command::ToggleCluster => s(cmd_shift, Key::K),
             Command::ToggleAws => s(cmd_shift, Key::A),
             Command::ToggleTerminal => s(Modifiers::CTRL, Key::Backtick),
+            // ⌘T on macOS, as in its terminals. Elsewhere Ctrl+T belongs
+            // to the shell (it swaps two characters), so the VS Code
+            // chord stays.
+            Command::NewTerminal if cfg!(target_os = "macos") => s(Modifiers::MAC_CMD, Key::T),
             Command::NewTerminal => s(Modifiers::CTRL | Modifiers::SHIFT, Key::Backtick),
             Command::KillTerminal => None,
             Command::NextTerminal => s(Modifiers::CTRL, Key::PageDown),
@@ -356,7 +360,11 @@ mod tests {
         let order = Command::by_shortcut_specificity();
         let pos = |c| order.iter().position(|(x, _)| *x == c).unwrap();
         assert!(pos(Command::PrevTab) < pos(Command::NextTab));
-        assert!(pos(Command::NewTerminal) < pos(Command::ToggleTerminal));
+        // On macOS a new terminal is ⌘T, which shares no key with the
+        // toggle, so there is no order between them to keep.
+        if !cfg!(target_os = "macos") {
+            assert!(pos(Command::NewTerminal) < pos(Command::ToggleTerminal));
+        }
         assert!(pos(Command::SaveAs) < pos(Command::Save));
     }
 

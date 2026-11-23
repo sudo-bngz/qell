@@ -2665,6 +2665,31 @@ impl QellApp {
         }
     }
 
+    /// A text box that is no longer on screen is no longer being typed
+    /// in. Each box says "typing" while it is drawn with the cursor in
+    /// it, and that is what keeps keys away from the editor, the terminal
+    /// and the shortcuts; but a box whose panel has been switched away
+    /// or hidden is not drawn and so can never take it back. Left alone,
+    /// the keyboard would stay captured by something invisible.
+    fn drop_stale_typing(&mut self) {
+        let sidebar = |view: SidebarView| self.show_sidebar && self.sidebar_view == view;
+        if !sidebar(SidebarView::SourceControl) {
+            self.scm.typing = false;
+        }
+        if !sidebar(SidebarView::Search) {
+            self.search.typing = false;
+        }
+        if !sidebar(SidebarView::Explorer) {
+            self.tree_edit = None;
+        }
+        // The find bar lives over a text tab: not over the cluster or
+        // AWS views, a picture, or nothing at all.
+        let text_tab = self.docs.get(self.active).is_some_and(|d| d.media.is_none());
+        if !self.find.open || self.in_a_place() || !text_tab {
+            self.find.typing = false;
+        }
+    }
+
     // ---- shortcuts -------------------------------------------------------
 
     fn handle_shortcuts(&mut self, ctx: &Context) {
@@ -2783,6 +2808,7 @@ impl eframe::App for QellApp {
         self.handle_git(ctx);
         self.handle_scm_jobs();
         views::search::update(self, ctx);
+        self.drop_stale_typing();
         views::find::handle_keys(self, ctx);
         self.poll_terminals();
         self.handle_shortcuts(ctx);
