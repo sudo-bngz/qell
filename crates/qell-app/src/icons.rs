@@ -82,18 +82,9 @@ thread_local! {
     static CACHE: RefCell<HashMap<String, (char, Color32)>> = RefCell::new(HashMap::new());
 }
 
-/// The one colour file icons are drawn in. The shape says what a file
-/// is; a tree of brand colours is the look this editor is leaving.
-pub const QUIET: Color32 = Color32::from_rgb(0x8a, 0x83, 0x7c);
-
-/// Icon for a file, in the quiet colour.
+/// Icon and colour for a file. Cached by file name: devicons only looks at
+/// the name and extension, and the tree asks every frame.
 pub fn for_file(path: &Path) -> (char, Color32) {
-    (branded(path).0, QUIET)
-}
-
-/// Icon and brand colour for a file. Cached by file name: devicons only
-/// looks at the name and extension, and the tree asks every frame.
-pub fn branded(path: &Path) -> (char, Color32) {
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     CACHE.with(|cache| {
         if let Some(hit) = cache.borrow().get(&name) {
@@ -144,17 +135,10 @@ mod tests {
 
     #[test]
     fn case_insensitive_names_and_overrides() {
-        let make = branded(Path::new("Makefile"));
+        let make = for_file(Path::new("Makefile"));
         assert_ne!(make, DEFAULT_FILE);
-        assert_ne!(branded(Path::new("LICENSE")), DEFAULT_FILE);
+        assert_ne!(for_file(Path::new("LICENSE")), DEFAULT_FILE);
         assert_eq!(for_file(Path::new("default.vcl")).0, '\u{e615}');
-        assert_eq!(branded(Path::new("x.qellunknown")), DEFAULT_FILE);
-    }
-
-    #[test]
-    fn every_icon_is_drawn_in_the_one_quiet_colour() {
-        for name in ["main.tf", "src/lib.rs", "Dockerfile", "x.qellunknown"] {
-            assert_eq!(for_file(Path::new(name)).1, QUIET, "{name}");
-        }
+        assert_eq!(for_file(Path::new("x.qellunknown")), DEFAULT_FILE);
     }
 }
