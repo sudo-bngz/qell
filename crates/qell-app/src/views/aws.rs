@@ -357,15 +357,8 @@ pub fn show(app: &mut QellApp, ui: &mut egui::Ui, ctx: &egui::Context) {
         (app.palette.text_dim, app.palette.text, app.palette.accent, app.palette.warning, app.palette.error, app.palette.hover);
     let font = FontId::monospace(app.config.font_size.max(11.0) - 1.0);
     let row_h = ui.fonts_mut(|f| f.row_height(&font)) + ROW_PAD;
-    let colors = Colors {
-        label: warn,
-        value: text,
-        key: accent,
-        key_ns: app.palette.token(qell_core::TokenKind::Keyword),
-        chart: accent,
-        dim,
-        logo: accent.gamma_multiply(0.8),
-    };
+    let colors =
+        Colors { label: warn, value: text, key: accent, key_ns: accent, chart: accent, dim, logo: accent.gamma_multiply(0.8) };
     let keys_in_header = header(app, ui, &font, &colors);
     ui.add_space(2.0);
 

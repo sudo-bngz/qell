@@ -597,39 +597,33 @@ pub struct Theme {
 }
 
 impl Theme {
-    /// Black, white and one warm tint, the way a terminal reads. Most
-    /// of the code is the plain foreground: only what you scan for is
-    /// set apart — keywords brighter, comments and punctuation quieter,
-    /// and literals (strings, numbers, constants) in sand.
+    /// The dark theme: the familiar "Dark Modern" token colours, on the
+    /// near-black surface the rest of the interface uses.
     pub fn dark() -> Self {
         use TokenKind::*;
         const WHITE: [u8; 3] = [0xff, 0xff, 0xff];
         const FG: [u8; 3] = [0xe2, 0xde, 0xd8];
-        const SOFT: [u8; 3] = [0xb4, 0xad, 0xa5];
-        const QUIET: [u8; 3] = [0x8a, 0x83, 0x7c];
-        const FAINT: [u8; 3] = [0x6b, 0x65, 0x5f];
-        const SAND: [u8; 3] = [0xd9, 0xb9, 0x8a];
         let colors = HashMap::from([
-            (Attribute, SOFT),
-            (Comment, FAINT),
-            (Constant, SAND),
-            (Function, FG),
-            (Keyword, WHITE),
-            (Label, FG),
-            (Number, SAND),
-            (Operator, SOFT),
-            (Property, FG),
-            (Punctuation, QUIET),
-            (String, SAND),
-            (Type, FG),
-            (Variable, FG),
-            (Parameter, FG),
-            (Tag, WHITE),
-            (Heading, WHITE),
-            (Emphasis, FG),
-            (Strong, WHITE),
-            (Link, SAND),
-            (Text, FG),
+            (Attribute, [0xdc, 0xdc, 0xaa]),
+            (Comment, [0x6a, 0x99, 0x55]),
+            (Constant, [0x4f, 0xc1, 0xff]),
+            (Function, [0xdc, 0xdc, 0xaa]),
+            (Keyword, [0xc5, 0x86, 0xc0]),
+            (Label, [0xc8, 0xc8, 0xc8]),
+            (Number, [0xb5, 0xce, 0xa8]),
+            (Operator, [0xd4, 0xd4, 0xd4]),
+            (Property, [0x9c, 0xdc, 0xfe]),
+            (Punctuation, [0xd4, 0xd4, 0xd4]),
+            (String, [0xce, 0x91, 0x78]),
+            (Type, [0x4e, 0xc9, 0xb0]),
+            (Variable, [0x9c, 0xdc, 0xfe]),
+            (Parameter, [0x9c, 0xdc, 0xfe]),
+            (Tag, [0x56, 0x9c, 0xd6]),
+            (Heading, [0x56, 0x9c, 0xd6]),
+            (Emphasis, [0xd4, 0xd4, 0xd4]),
+            (Strong, [0x56, 0x9c, 0xd6]),
+            (Link, [0x4f, 0xc1, 0xff]),
+            (Text, [0xd4, 0xd4, 0xd4]),
         ]);
         Self {
             name: "Qell Dark".into(),
