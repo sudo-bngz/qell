@@ -90,6 +90,12 @@ pub struct NavPoint {
     pub pos: Position,
 }
 
+/// The scale one zoom step away: tenths, so repeated steps land on round
+/// values whatever the setting was (125% goes to 130%, then 140%).
+pub fn zoom_step(scale: f32, steps: i32) -> f32 {
+    (((scale * 10.0).round() as i32 + steps).clamp(5, 30)) as f32 / 10.0
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Editor,
@@ -318,6 +324,9 @@ impl QellApp {
         palette.apply(&cc.egui_ctx);
         crate::icons::install(&cc.egui_ctx);
         cc.egui_ctx.set_zoom_factor(config.ui_scale);
+        // Zoom is Qell's own command; egui's built-in one would act on
+        // the same keys a second time.
+        cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
 
         // No plugins installed: don't start the WebAssembly runtime at all.
         let mut plugins = if !PluginHost::has_plugins(&config::plugins_dir()) {
@@ -2062,8 +2071,14 @@ impl QellApp {
             self.apply_config(ctx);
         }
         // Debounce: sliders and typing change the config many times a second.
-        if self.config_dirty_since.is_some_and(|t| t.elapsed() > Duration::from_millis(400)) {
-            self.save_config();
+        match self.config_dirty_since {
+            Some(t) if t.elapsed() > Duration::from_millis(400) => self.save_config(),
+            // Nothing else may wake the window before it is due (a zoom
+            // is one key press, then stillness), so ask to be woken.
+            Some(t) => {
+                ctx.request_repaint_after(Duration::from_millis(400).saturating_sub(t.elapsed()) + Duration::from_millis(20))
+            }
+            None => {}
         }
     }
 
@@ -2322,8 +2337,12 @@ impl QellApp {
             Command::CommandPalette => self.open_palette(PaletteMode::Commands),
             Command::QuickOpen => self.open_palette(PaletteMode::Files),
             Command::GoToLine => self.open_palette(PaletteMode::GoToLine),
-            Command::ZoomIn => self.font_size = (self.font_size + 1.0).min(40.0),
-            Command::ZoomOut => self.font_size = (self.font_size - 1.0).max(6.0),
+            // Zoom is the whole window's: the tree, the tabs, the terminal
+            // and the code grow and shrink together, as in a terminal. It
+            // is the UI Scale setting, so it is kept for next time.
+            Command::ZoomIn => self.zoom_by(1),
+            Command::ZoomOut => self.zoom_by(-1),
+            Command::ZoomReset => self.config.ui_scale = 1.0,
             Command::OpenSettings => self.settings.toggle(&self.config),
             Command::OpenSettingsFile => {
                 // Make sure the file exists (and holds the current values).
@@ -2665,6 +2684,11 @@ impl QellApp {
         }
     }
 
+    /// One step of zoom, in tenths, between half and three times.
+    fn zoom_by(&mut self, steps: i32) {
+        self.config.ui_scale = zoom_step(self.config.ui_scale, steps);
+    }
+
     /// A text box that is no longer on screen is no longer being typed
     /// in. Each box says "typing" while it is drawn with the cursor in
     /// it, and that is what keeps keys away from the editor, the terminal
@@ -2749,6 +2773,7 @@ impl QellApp {
                 Command::OpenSettings,
                 Command::ZoomIn,
                 Command::ZoomOut,
+                Command::ZoomReset,
                 Command::Quit,
             ] {
                 if let Some(sc) = cmd.shortcut() {
@@ -2779,6 +2804,9 @@ impl QellApp {
                         | Command::CommandPalette
                         | Command::QuickOpen
                         | Command::ToggleSidebar
+                        | Command::ZoomIn
+                        | Command::ZoomOut
+                        | Command::ZoomReset
                         | Command::Quit
                 )
             {
@@ -2928,4 +2956,29 @@ fn new_lsp(ctx: &Context, root: &Path, config: &Config) -> LspRegistry {
         lsp.set_override(lang.clone(), cmd.clone());
     }
     lsp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::zoom_step;
+
+    #[test]
+    fn zoom_moves_in_tenths_and_stops_at_its_limits() {
+        assert_eq!(zoom_step(1.0, 1), 1.1);
+        assert_eq!(zoom_step(1.0, -1), 0.9);
+        // From a setting between steps, onto the grid.
+        assert_eq!(zoom_step(0.75, -1), 0.7);
+        assert_eq!(zoom_step(1.5, 1), 1.6);
+        assert_eq!(zoom_step(0.5, -1), 0.5);
+        assert_eq!(zoom_step(3.0, 1), 3.0);
+        // Ten steps down and ten up come back exactly.
+        let mut scale = 2.0;
+        for _ in 0..10 {
+            scale = zoom_step(scale, -1);
+        }
+        for _ in 0..10 {
+            scale = zoom_step(scale, 1);
+        }
+        assert_eq!(scale, 2.0);
+    }
 }
