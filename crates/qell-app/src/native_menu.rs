@@ -193,6 +193,7 @@ pub fn layout() -> Vec<(&'static str, Vec<Entry>)> {
                 Separator,
                 Cmd(C::ZoomIn, Some("Zoom In")),
                 Cmd(C::ZoomOut, Some("Zoom Out")),
+                Cmd(C::ZoomReset, Some("Reset Zoom")),
                 Separator,
                 Fullscreen,
             ],

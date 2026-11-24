@@ -72,6 +72,7 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                 ui.separator();
                 item(ui, app, Command::ZoomIn);
                 item(ui, app, Command::ZoomOut);
+                item(ui, app, Command::ZoomReset);
             });
             ui.menu_button("Go", |ui| {
                 item(ui, app, Command::GoBack);

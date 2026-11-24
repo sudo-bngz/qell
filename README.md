@@ -338,7 +338,7 @@ npm i -g typescript typescript-language-server
 | Toggle terminal       | `` Ctrl+` ``       |
 | New terminal          | `` Ctrl+Shift+` ``, `⌘T` on macOS |
 | Next / prev terminal  | `Ctrl+PageDown/Up` |
-| Zoom                  | `Ctrl+=` / `Ctrl+-` |
+| Zoom the whole window | `Ctrl+=` / `Ctrl+-`, `Ctrl+0` resets |
 | Settings              | `Ctrl+,`           |
 
 On macOS, `Ctrl` is `⌘` for the editor shortcuts, and Qell uses the native
