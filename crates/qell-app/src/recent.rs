@@ -182,6 +182,12 @@ impl Recent {
         Shortcuts { folders, files }
     }
 
+    /// How much each path is used: a file its own score, a folder the sum
+    /// of the files opened inside it, at any depth.
+    pub fn usage(&self, root: &Path) -> HashMap<PathBuf, f64> {
+        usage_of(self.roots.get(root).map(Vec::as_slice).unwrap_or(&[]), root, now())
+    }
+
     pub fn is_pinned(&self, root: &Path, path: &Path) -> bool {
         self.roots.get(root).is_some_and(|v| v.iter().any(|e| e.path == path && e.pinned))
     }
@@ -206,6 +212,23 @@ impl Recent {
         self.dirty = true;
         self.cache = None;
     }
+}
+
+/// See [`Recent::usage`]. The folders directly below the workspace have
+/// entries of their own (credited on every open inside them); those are
+/// left out, as their files are summed up already.
+fn usage_of(entries: &[Entry], root: &Path, now: u64) -> HashMap<PathBuf, f64> {
+    // A folder some file was opened in, directly below the workspace.
+    let top: std::collections::HashSet<PathBuf> = entries.iter().filter_map(|e| top_folder(root, &e.path)).collect();
+    let mut out: HashMap<PathBuf, f64> = HashMap::new();
+    for e in entries.iter().filter(|e| !top.contains(&e.path)) {
+        let s = score(e, now);
+        *out.entry(e.path.clone()).or_default() += s;
+        for dir in e.path.ancestors().skip(1).take_while(|d| d.starts_with(root) && *d != root) {
+            *out.entry(dir.to_path_buf()).or_default() += s;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -304,5 +327,21 @@ mod tests {
         // Missing fields and unknown roots don't break loading.
         let old: Recent = serde_json::from_str(r#"{"roots":{"/ws":[{"path":"/ws/x.rs"}]}}"#).unwrap();
         assert_eq!(old.roots[root][0].opens, 0);
+    }
+
+    #[test]
+    fn a_folder_is_as_used_as_what_was_opened_in_it() {
+        let root = Path::new("/ws");
+        let now = 1_000_000;
+        let e = |p: &str, opens| Entry { path: PathBuf::from(p), opens, last: now, pinned: false, is_dir: false };
+        // As record() leaves it: the repository has its own entry too.
+        let entries = [e("/ws/api", 3), e("/ws/api/src/main.rs", 2), e("/ws/api/README.md", 1), e("/ws/top.rs", 4)];
+        let used = usage_of(&entries, root, now);
+        assert_eq!(used[Path::new("/ws/api/src/main.rs")], 2.0);
+        assert_eq!(used[Path::new("/ws/api/src")], 2.0);
+        // Summed from the files, not counted twice with its own entry.
+        assert_eq!(used[Path::new("/ws/api")], 3.0);
+        assert_eq!(used[Path::new("/ws/top.rs")], 4.0);
+        assert!(!used.contains_key(root));
     }
 }

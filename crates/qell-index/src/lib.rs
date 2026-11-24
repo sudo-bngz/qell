@@ -109,6 +109,9 @@ pub struct Index {
     files: Vec<Arc<IndexedFile>>,
     /// Symbol name → (file index, symbol index).
     by_name: HashMap<String, Vec<(usize, usize)>>,
+    /// The latest change to any indexed file below each folder,
+    /// workspace-relative (`""` is the workspace).
+    newest: HashMap<PathBuf, SystemTime>,
 }
 
 impl Index {
@@ -120,7 +123,23 @@ impl Index {
                 by_name.entry(s.name.clone()).or_default().push((fi, si));
             }
         }
-        Self { root, files, by_name }
+        let mut newest: HashMap<PathBuf, SystemTime> = HashMap::new();
+        for f in &files {
+            let Some(m) = f.modified else { continue };
+            for dir in f.rel.ancestors().skip(1) {
+                let at = newest.entry(dir.to_path_buf()).or_insert(m);
+                if *at < m {
+                    *at = m;
+                }
+            }
+        }
+        Self { root, files, by_name, newest }
+    }
+
+    /// When anything indexed below `dir` (workspace-relative) last changed.
+    /// Ignored and binary files aren't indexed, so they don't count.
+    pub fn newest_in(&self, dir: &Path) -> Option<SystemTime> {
+        self.newest.get(dir).copied()
     }
 
     pub fn file_count(&self) -> usize {
@@ -605,6 +624,29 @@ mod tests {
         let idx = index(dir.path());
         let rels: Vec<_> = idx.files.iter().map(|f| f.rel.to_string_lossy().into_owned()).collect();
         assert_eq!(rels, vec![".gitignore", "infra/main.tf", "src/lib.rs", "src/main.rs"]);
+    }
+
+    #[test]
+    fn each_folder_knows_its_latest_change() {
+        let dir = workspace();
+        let d = dir.path();
+        let set = |rel: &str, secs: u64| {
+            let f = std::fs::File::options().write(true).open(d.join(rel)).unwrap();
+            f.set_modified(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs)).unwrap();
+        };
+        set(".gitignore", 100);
+        set("infra/main.tf", 200);
+        set("src/lib.rs", 300);
+        set("src/main.rs", 400);
+        let idx = index(d);
+        let at = |rel: &str| {
+            idx.newest_in(Path::new(rel)).and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok()).map(|d| d.as_secs())
+        };
+        assert_eq!(at("src"), Some(400));
+        assert_eq!(at("infra"), Some(200));
+        assert_eq!(at(""), Some(400));
+        // Ignored folders aren't indexed, so they have nothing to say.
+        assert_eq!(at("target"), None);
     }
 
     #[test]

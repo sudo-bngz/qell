@@ -1,12 +1,15 @@
 //! The file tree.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Color32, Context, FontId, RichText};
 use qell_git::FileStatus;
 
 use crate::app::{Focus, QellApp, SidebarView, TreeEditKind};
+use crate::config::TreeSort;
 use crate::icons;
 use crate::recent::Order;
 
@@ -15,6 +18,9 @@ pub struct Entry {
     pub path: PathBuf,
     pub name: String,
     pub is_dir: bool,
+    /// When it last changed on disk, for a file; for a folder, when an
+    /// entry was added to or removed from it.
+    pub modified: Option<SystemTime>,
 }
 
 fn read_dir(path: &Path, hidden: &[String]) -> Vec<Entry> {
@@ -25,12 +31,46 @@ fn read_dir(path: &Path, hidden: &[String]) -> Vec<Entry> {
         .map(|e| {
             let path = e.path();
             let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            Entry { name: e.file_name().to_string_lossy().into_owned(), path, is_dir }
+            let modified = e.metadata().and_then(|m| m.modified()).ok();
+            Entry { name: e.file_name().to_string_lossy().into_owned(), path, is_dir, modified }
         })
         .collect();
     // Directories first, then case-insensitive by name — like every file explorer.
     entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
     entries
+}
+
+/// Put a folder's entries in the tree's order: folders first, then
+/// `sort` within each group, name breaking ties. `newest` is when anything
+/// inside a folder last changed (from the index) and `used` how much each
+/// path is used.
+fn order(entries: &mut [Entry], sort: TreeSort, newest: &dyn Fn(&Entry) -> Option<SystemTime>, used: &HashMap<PathBuf, f64>) {
+    let name = |a: &Entry, b: &Entry| a.name.to_lowercase().cmp(&b.name.to_lowercase());
+    match sort {
+        TreeSort::Name => entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| name(a, b))),
+        TreeSort::Modified => {
+            let when = |e: &Entry| newest(e).max(e.modified);
+            entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| when(b).cmp(&when(a))).then_with(|| name(a, b)));
+        }
+        TreeSort::Used => {
+            let score = |e: &Entry| used.get(&e.path).copied().unwrap_or(0.0);
+            entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| score(b).total_cmp(&score(a))).then_with(|| name(a, b)));
+        }
+    }
+}
+
+/// How long ago, as briefly as `ls` would put it: `now`, `5m`, `3h`,
+/// `2d`, `4mo`, `1y`.
+fn ago(when: SystemTime, now: SystemTime) -> String {
+    let s = now.duration_since(when).map(|d| d.as_secs()).unwrap_or(0);
+    match s {
+        0..60 => "now".into(),
+        60..3_600 => format!("{}m", s / 60),
+        3_600..86_400 => format!("{}h", s / 3_600),
+        86_400..2_592_000 => format!("{}d", s / 86_400),
+        2_592_000..31_536_000 => format!("{}mo", s / 2_592_000),
+        _ => format!("{}y", s / 31_536_000),
+    }
 }
 
 /// Icon glyph followed by the name, in one label.
@@ -51,7 +91,29 @@ fn show_dir(app: &mut QellApp, ui: &mut egui::Ui, dir: &Path) {
         let entries = read_dir(dir, &app.config.tree_hidden);
         app.tree_cache.insert(dir.to_path_buf(), entries);
     }
-    let entries = app.tree_cache.get(dir).cloned().unwrap_or_default();
+    let mut entries = app.tree_cache.get(dir).cloned().unwrap_or_default();
+    let sort = app.config.tree_sort;
+    // Only what git sees as changed, and the folders that hold it.
+    if app.config.tree_changed {
+        entries.retain(|e| app.git_status_of(&e.path).is_some_and(|s| s != FileStatus::Ignored));
+    }
+    let index = app.indexer.index();
+    let index = index.read().ok();
+    let root = app.root.clone();
+    let newest = |e: &Entry| -> Option<SystemTime> {
+        let index = index.as_ref()?;
+        e.is_dir.then(|| index.newest_in(e.path.strip_prefix(&root).ok()?)).flatten()
+    };
+    let used = if sort == TreeSort::Used { app.recent.usage(&root) } else { HashMap::new() };
+    order(&mut entries, sort, &newest, &used);
+    // The age of each row, when sorted by it.
+    let now = SystemTime::now();
+    let ages: HashMap<PathBuf, String> = if sort == TreeSort::Modified {
+        entries.iter().filter_map(|e| Some((e.path.clone(), ago(newest(e).max(e.modified)?, now)))).collect()
+    } else {
+        HashMap::new()
+    };
+    drop(index);
     // A new file or folder being named here: its field comes first.
     let new_here = app
         .tree_edit
@@ -98,11 +160,18 @@ fn show_dir(app: &mut QellApp, ui: &mut egui::Ui, dir: &Path) {
                         .add(egui::Label::new(label).sense(egui::Sense::click()).selectable(false))
                         .on_hover_cursor(egui::CursorIcon::PointingHand);
                     // Folders get a dot rather than a letter, like VS Code.
-                    if let (Some(c), Some(_)) = (color, tooltip) {
+                    let dot = color.zip(tooltip).map(|(c, _)| c);
+                    let age = ages.get(&e.path);
+                    if dot.is_some() || age.is_some() {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.add_space(6.0);
                             // Monospace: the dot only exists in the bundled Hack font.
-                            ui.label(RichText::new("●").monospace().size(10.0).color(c));
+                            if let Some(c) = dot {
+                                ui.label(RichText::new("●").monospace().size(10.0).color(c));
+                            }
+                            if let Some(age) = age {
+                                ui.label(RichText::new(age).size(11.0).color(folder_color));
+                            }
                         });
                     }
                     name
@@ -131,10 +200,27 @@ fn show_dir(app: &mut QellApp, ui: &mut egui::Ui, dir: &Path) {
             let selected = active_path.as_deref() == Some(e.path.as_path());
             let label = icon_label(show_icons.then(|| icons::for_file(&e.path)), &e.name, name_color);
             let mut button = egui::Button::selectable(selected, label).min_size(egui::vec2(ui.available_width(), 0.0));
+            // On the right: the age when sorted by it, then the git letter.
+            let mut right = LayoutJob::default();
+            if let Some(age) = ages.get(&e.path) {
+                right.append(
+                    age,
+                    0.0,
+                    TextFormat { font_id: FontId::proportional(11.0), color: folder_color, ..Default::default() },
+                );
+            }
             if let (Some(s), Some(c)) = (git, color) {
                 if !s.badge().is_empty() {
-                    button = button.right_text(RichText::new(s.badge()).size(12.0).color(c));
+                    let gap = if right.is_empty() { 0.0 } else { 6.0 };
+                    right.append(
+                        s.badge(),
+                        gap,
+                        TextFormat { font_id: FontId::proportional(12.0), color: c, ..Default::default() },
+                    );
                 }
+            }
+            if !right.is_empty() {
+                button = button.right_text(right);
             }
             let mut resp = ui.add(button).on_hover_cursor(egui::CursorIcon::PointingHand);
             if let Some(t) = tooltip {
@@ -236,6 +322,48 @@ fn show_shortcuts(app: &mut QellApp, ui: &mut egui::Ui) {
     ui.add_space(4.0);
     ui.separator();
     ui.add_space(2.0);
+}
+
+/// The line under the workspace's name: how the tree is ordered, and
+/// whether it shows only what changed. Plain words, the one in use bright,
+/// like flags you would give `ls`.
+fn tree_options(app: &mut QellApp, ui: &mut egui::Ui) {
+    let (dim, on) = (app.palette.text_dim, app.palette.text);
+    let word = |ui: &mut egui::Ui, text: &str, active: bool, hover: &str| {
+        let color = if active { on } else { dim.gamma_multiply(0.75) };
+        ui.add(egui::Label::new(RichText::new(text).size(11.0).color(color)).sense(egui::Sense::click()).selectable(false))
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(hover)
+            .clicked()
+    };
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 10.0;
+        for (sort, text, hover) in [
+            (TreeSort::Name, "name", "Folders, then files, by name"),
+            (TreeSort::Modified, "modified", "Last changed first, with how long ago"),
+            (TreeSort::Used, "used", "Opened most first; a folder counts what was opened in it"),
+        ] {
+            if word(ui, text, app.config.tree_sort == sort, hover) && app.config.tree_sort != sort {
+                app.config.tree_sort = sort;
+                changed = true;
+            }
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if word(ui, "changed", app.config.tree_changed, "Only what git sees as changed") {
+                app.config.tree_changed = !app.config.tree_changed;
+                changed = true;
+            }
+        });
+    });
+    if changed {
+        app.save_config();
+    }
+}
+
+/// Whether git has looked and sees nothing changed in the workspace.
+fn nothing_changed(app: &QellApp) -> bool {
+    app.git_status.as_ref().is_some_and(|s| s.changed_files() == 0)
 }
 
 /// Keep a folder path short enough for the narrow column ("…/deep/dir").
@@ -423,11 +551,24 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                     }
                 });
             });
+            tree_options(app, ui);
             ui.add_space(4.0);
             egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 1.0;
                 show_shortcuts(app, ui);
                 let root = app.root.clone();
+                if app.config.tree_changed {
+                    let why = if !app.config.git_status {
+                        Some("Git status is off in Settings.")
+                    } else if nothing_changed(app) {
+                        Some("Nothing changed.")
+                    } else {
+                        None
+                    };
+                    if let Some(why) = why {
+                        ui.label(RichText::new(why).size(11.0).italics().color(app.palette.text_dim));
+                    }
+                }
                 show_dir(app, ui, &root);
                 // The empty space below the tree: menu for the workspace root.
                 let h = ui.available_height();
@@ -562,5 +703,62 @@ fn cluster_button(app: &mut QellApp, ui: &mut egui::Ui) {
     painter.circle_stroke(centre, r * 0.42, stroke);
     if resp.clicked() {
         app.pending_commands.push(crate::commands::Command::ToggleCluster);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn entry(name: &str, is_dir: bool, secs: u64) -> Entry {
+        let modified = Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs));
+        Entry { path: PathBuf::from("/ws").join(name), name: name.into(), is_dir, modified }
+    }
+
+    fn names(entries: &[Entry]) -> Vec<&str> {
+        entries.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    #[test]
+    fn folders_come_first_in_every_order() {
+        let none = |_: &Entry| None;
+        let mut v = vec![entry("b.rs", false, 30), entry("api", true, 10), entry("A.md", false, 20), entry("web", true, 40)];
+        order(&mut v, TreeSort::Name, &none, &HashMap::new());
+        assert_eq!(names(&v), ["api", "web", "A.md", "b.rs"]);
+        order(&mut v, TreeSort::Modified, &none, &HashMap::new());
+        assert_eq!(names(&v), ["web", "api", "b.rs", "A.md"]);
+    }
+
+    #[test]
+    fn a_folder_is_as_recent_as_what_changed_inside_it() {
+        let mut v = vec![entry("api", true, 10), entry("web", true, 40)];
+        // Something deep in api changed after web's own entries did.
+        let newest = |e: &Entry| (e.name == "api").then(|| SystemTime::UNIX_EPOCH + Duration::from_secs(99));
+        order(&mut v, TreeSort::Modified, &newest, &HashMap::new());
+        assert_eq!(names(&v), ["api", "web"]);
+    }
+
+    #[test]
+    fn used_puts_what_you_open_first_and_the_rest_by_name() {
+        let none = |_: &Entry| None;
+        let mut v = vec![entry("c.rs", false, 0), entry("b.rs", false, 0), entry("a.rs", false, 0), entry("web", true, 0)];
+        let used = HashMap::from([(PathBuf::from("/ws/c.rs"), 5.0), (PathBuf::from("/ws/b.rs"), 1.0)]);
+        order(&mut v, TreeSort::Used, &none, &used);
+        assert_eq!(names(&v), ["web", "c.rs", "b.rs", "a.rs"]);
+    }
+
+    #[test]
+    fn ages_read_like_ls() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(100_000_000);
+        let ago_s = |s: u64| ago(now - Duration::from_secs(s), now);
+        assert_eq!(ago_s(5), "now");
+        assert_eq!(ago_s(300), "5m");
+        assert_eq!(ago_s(3 * 3_600), "3h");
+        assert_eq!(ago_s(2 * 86_400), "2d");
+        assert_eq!(ago_s(120 * 86_400), "4mo");
+        assert_eq!(ago_s(800 * 86_400), "2y");
+        // A clock that went backwards is "now", not a panic.
+        assert_eq!(ago(now + Duration::from_secs(60), now), "now");
     }
 }
