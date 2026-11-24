@@ -352,10 +352,9 @@ pub fn word_range(line: &str, col: usize, terraform: bool) -> Option<(usize, usi
     (e > s).then_some((s, e))
 }
 
-/// Bracket pairs by nesting depth: three steps of brightness, so a pair
-/// can still be told from its neighbours without a rainbow.
+/// Bracket pair colours by nesting depth, as they always were.
 const BRACKET_COLORS: [Color32; 3] =
-    [Color32::from_rgb(0xe2, 0xde, 0xd8), Color32::from_rgb(0xb4, 0xad, 0xa5), Color32::from_rgb(0x8a, 0x83, 0x7c)];
+    [Color32::from_rgb(0xff, 0xd7, 0x00), Color32::from_rgb(0xda, 0x70, 0xd6), Color32::from_rgb(0x17, 0x9f, 0xff)];
 const BRACKET_UNMATCHED: Color32 = Color32::from_rgb(0xe5, 0x6b, 0x5e);
 const BRACKET_MATCH_BG: Color32 = Color32::from_rgba_premultiplied(0x1a, 0x1a, 0x1a, 0x1a);
 const BRACKET_MATCH_BORDER: Color32 = Color32::from_rgb(0x8a, 0x83, 0x7c);

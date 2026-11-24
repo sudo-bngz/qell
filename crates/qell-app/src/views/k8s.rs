@@ -506,7 +506,7 @@ pub fn show(app: &mut QellApp, ui: &mut egui::Ui, ctx: &egui::Context) {
         label: warn,
         value: text,
         key: accent,
-        key_ns: app.palette.token(qell_core::TokenKind::Keyword),
+        key_ns: accent,
         chart: accent.gamma_multiply(0.85),
         dim,
         logo: accent.gamma_multiply(0.8),
