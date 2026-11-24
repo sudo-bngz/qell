@@ -480,24 +480,15 @@ pub fn show_activity_bar(app: &mut QellApp, ctx: &Context) {
                         .frame(false)
                         .min_size(egui::vec2(44.0, 44.0));
                     let resp = ui.add(button).on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand);
-                    if active {
-                        // Accent bar on the left edge of the active view.
-                        let r = resp.rect;
-                        ui.painter().vline(
-                            r.left() + 1.0,
-                            r.y_range().shrink(6.0),
-                            egui::Stroke::new(2.0_f32, app.palette.accent),
-                        );
-                    }
                     if view == SidebarView::SourceControl && changes > 0 {
                         // Badge with the number of changed files.
                         let text = if changes > 99 { "99+".to_string() } else { changes.to_string() };
                         let center = resp.rect.center() + egui::vec2(10.0, 9.0);
-                        let galley = ui.painter().layout_no_wrap(text, FontId::proportional(9.0), Color32::WHITE);
+                        let galley = ui.painter().layout_no_wrap(text, FontId::proportional(9.0), app.palette.editor_bg);
                         let w = (galley.size().x + 7.0).max(15.0);
                         let rect = egui::Rect::from_center_size(center, egui::vec2(w, 15.0));
                         ui.painter().rect_filled(rect, 7.5, app.palette.accent);
-                        ui.painter().galley(rect.center() - galley.size() / 2.0, galley, Color32::WHITE);
+                        ui.painter().galley(rect.center() - galley.size() / 2.0, galley, app.palette.editor_bg);
                     }
                     if resp.clicked() {
                         app.show_sidebar_view(view);
@@ -542,9 +533,6 @@ fn aws_button(app: &mut QellApp, ui: &mut egui::Ui) {
         .collect();
     let stroke = egui::Stroke::new(if open { 1.6_f32 } else { 1.3_f32 }, color);
     painter.add(egui::Shape::closed_line(points, stroke));
-    if open {
-        painter.vline(rect.left() + 1.0, rect.y_range().shrink(6.0), egui::Stroke::new(2.0_f32, app.palette.accent));
-    }
     if resp.clicked() {
         app.pending_commands.push(crate::commands::Command::ToggleAws);
     }
@@ -572,9 +560,6 @@ fn cluster_button(app: &mut QellApp, ui: &mut egui::Ui) {
         painter.line_segment([corner(i, r * 0.42), corner(i, r * 0.88)], stroke);
     }
     painter.circle_stroke(centre, r * 0.42, stroke);
-    if open {
-        painter.vline(rect.left() + 1.0, rect.y_range().shrink(6.0), egui::Stroke::new(2.0_f32, app.palette.accent));
-    }
     if resp.clicked() {
         app.pending_commands.push(crate::commands::Command::ToggleCluster);
     }

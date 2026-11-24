@@ -262,7 +262,7 @@ fn show_tabs(app: &mut QellApp, ui: &mut egui::Ui) {
                     });
                     if active {
                         let r = resp.rect;
-                        ui.painter().hline(r.x_range(), r.top() + 1.0, Stroke::new(2.0_f32, accent));
+                        ui.painter().hline(r.x_range(), r.bottom() - 0.5, Stroke::new(1.0_f32, accent));
                     }
                 }
                 if let Some(i) = switch_to {
@@ -352,18 +352,19 @@ pub fn word_range(line: &str, col: usize, terraform: bool) -> Option<(usize, usi
     (e > s).then_some((s, e))
 }
 
-/// VS Code's bracket pair colours (dark themes), by nesting depth.
+/// Bracket pairs by nesting depth: three steps of brightness, so a pair
+/// can still be told from its neighbours without a rainbow.
 const BRACKET_COLORS: [Color32; 3] =
-    [Color32::from_rgb(0xff, 0xd7, 0x00), Color32::from_rgb(0xda, 0x70, 0xd6), Color32::from_rgb(0x17, 0x9f, 0xff)];
-const BRACKET_UNMATCHED: Color32 = Color32::from_rgb(0xff, 0x12, 0x12);
-const BRACKET_MATCH_BG: Color32 = Color32::from_rgba_premultiplied(0, 0x64, 0, 0x1a);
-const BRACKET_MATCH_BORDER: Color32 = Color32::from_rgb(0x88, 0x88, 0x88);
-/// VS Code's gutter colours for lines changed since the last commit.
-const GUTTER_ADDED: Color32 = Color32::from_rgb(0x2e, 0xa0, 0x43);
-const GUTTER_MODIFIED: Color32 = Color32::from_rgb(0x00, 0x78, 0xd4);
-const GUTTER_DELETED: Color32 = Color32::from_rgb(0xf8, 0x51, 0x49);
-const GUIDE: Color32 = Color32::from_rgb(0x40, 0x40, 0x40);
-const GUIDE_ACTIVE: Color32 = Color32::from_rgb(0x70, 0x70, 0x70);
+    [Color32::from_rgb(0xe2, 0xde, 0xd8), Color32::from_rgb(0xb4, 0xad, 0xa5), Color32::from_rgb(0x8a, 0x83, 0x7c)];
+const BRACKET_UNMATCHED: Color32 = Color32::from_rgb(0xe5, 0x6b, 0x5e);
+const BRACKET_MATCH_BG: Color32 = Color32::from_rgba_premultiplied(0x1a, 0x1a, 0x1a, 0x1a);
+const BRACKET_MATCH_BORDER: Color32 = Color32::from_rgb(0x8a, 0x83, 0x7c);
+/// Gutter marks for lines changed since the last commit.
+const GUTTER_ADDED: Color32 = Color32::from_rgb(0x9d, 0xb8, 0x82);
+const GUTTER_MODIFIED: Color32 = Color32::from_rgb(0xd9, 0xb9, 0x8a);
+const GUTTER_DELETED: Color32 = Color32::from_rgb(0xc9, 0x6a, 0x5d);
+const GUIDE: Color32 = Color32::from_rgb(0x24, 0x21, 0x1f);
+const GUIDE_ACTIVE: Color32 = Color32::from_rgb(0x45, 0x40, 0x3b);
 
 /// Append `text[s..e]` with `fmt`, except the bytes listed in `recolor`
 /// (sorted), which keep the format but take their own colour.
@@ -1370,11 +1371,12 @@ pub fn completion_edit(b: &Buffer, item: &CompletionItem, word_start: Position) 
     (word_start, head, text)
 }
 
-/// VS Code's icon and colour for a completion kind.
+/// The icon for a completion kind. The shape tells the kinds apart;
+/// the three tones only group them (callables, data, types).
 fn kind_icon(kind: Option<CompletionItemKind>, text: Color32) -> (char, Color32) {
-    let purple = Color32::from_rgb(0xb1, 0x80, 0xd7);
-    let blue = Color32::from_rgb(0x75, 0xbe, 0xff);
-    let orange = Color32::from_rgb(0xee, 0x9d, 0x28);
+    let purple = Color32::WHITE;
+    let blue = Color32::from_rgb(0xb4, 0xad, 0xa5);
+    let orange = Color32::from_rgb(0xd9, 0xb9, 0x8a);
     use CompletionItemKind as K;
     match kind.unwrap_or(K::TEXT) {
         K::METHOD | K::FUNCTION | K::CONSTRUCTOR => ('\u{ea8c}', purple),
@@ -1494,7 +1496,7 @@ fn show_completion_popup(app: &mut QellApp, ctx: &Context) {
 
     let text = app.palette.text;
     let dim = app.palette.text_dim;
-    let accent = Color32::from_rgb(0x2a, 0xaa, 0xff);
+    let accent = app.palette.accent;
     let sel_bg = app.palette.selection;
     let font = egui::FontId::monospace(app.font_size.max(12.0) - 1.0);
     let small = egui::FontId::proportional(12.0);

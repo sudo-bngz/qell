@@ -423,7 +423,7 @@ pub fn show(app: &mut QellApp, ui: &mut egui::Ui, ctx: &egui::Context) {
             let (rect, resp) = ui.allocate_exact_size(Vec2::new(line_w.max(ui.available_width()), row_h), Sense::click());
             let painter = ui.painter_at(rect);
             if i == selected {
-                painter.rect_filled(rect, 0.0, accent.gamma_multiply(0.35));
+                painter.rect_filled(rect, 0.0, app.palette.selection);
             } else if resp.hovered() {
                 painter.rect_filled(rect, 0.0, hover);
             }
