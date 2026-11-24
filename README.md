@@ -1,7 +1,7 @@
 # Qell
 
-A minimalist code editor in Rust. Think VSCodium's look, without the
-Electron: one native window, a file tree, highlighted code, a terminal at the
+A minimalist code editor in Rust that looks like a terminal: near-black,
+off-white, one monospace font, no decoration. One native window, a file tree, highlighted code, a terminal at the
 bottom, and language-server completion for the languages you actually use.
 
 > Status: early. It opens, edits and saves files, highlights about twenty

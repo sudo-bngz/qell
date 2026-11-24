@@ -138,7 +138,7 @@ enum Row<'a> {
 fn toggle(ui: &mut egui::Ui, on: &mut bool, icon: char, tip: &str, accent: Color32, dim: Color32) -> bool {
     let color = if *on { Color32::WHITE } else { dim };
     let b = egui::Button::new(RichText::new(icon.to_string()).font(icons::font(14.0)).color(color))
-        .fill(if *on { accent.gamma_multiply(0.6) } else { Color32::TRANSPARENT })
+        .fill(if *on { accent.gamma_multiply(0.2) } else { Color32::TRANSPARENT })
         .min_size(egui::vec2(22.0, 22.0));
     let clicked = ui.add(b).on_hover_text(tip).on_hover_cursor(CursorIcon::PointingHand).clicked();
     if clicked {
@@ -314,7 +314,7 @@ fn replace_row(app: &mut QellApp, ui: &mut egui::Ui, dim: Color32, accent: Color
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let can = total > 0 && !app.search.query.is_empty();
             let b = egui::Button::new(RichText::new("Replace All").size(11.5))
-                .fill(if can { accent.gamma_multiply(0.6) } else { Color32::TRANSPARENT })
+                .fill(if can { accent.gamma_multiply(0.2) } else { Color32::TRANSPARENT })
                 .min_size(egui::vec2(22.0, 22.0));
             let b = ui.add_enabled(can, b).on_hover_text("Replace every match in every file");
             ask = b.on_hover_cursor(CursorIcon::PointingHand).clicked();
@@ -349,7 +349,7 @@ fn replace_row(app: &mut QellApp, ui: &mut egui::Ui, dim: Color32, accent: Color
         RichText::new(format!("{what} {} in {}?", plural(matches, "match"), plural(in_files, "file"))).size(11.5).color(dim),
     );
     ui.horizontal(|ui| {
-        if ui.add(egui::Button::new(RichText::new(what).size(11.5)).fill(accent.gamma_multiply(0.6))).clicked() {
+        if ui.add(egui::Button::new(RichText::new(what).size(11.5)).fill(accent.gamma_multiply(0.2))).clicked() {
             app.search.confirm = None;
             app.replace_in_files();
         }

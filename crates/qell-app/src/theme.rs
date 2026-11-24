@@ -1,5 +1,6 @@
-//! The look. One dark theme in the spirit of VSCodium's "Dark Modern":
-//! flat surfaces, one accent colour, no gradients, no rounded chrome.
+//! The look: a terminal's. One near-black surface, off-white text, white
+//! for emphasis and a single warm tint; hairlines instead of panels, no
+//! gradients, no rounded chrome, one monospace font throughout.
 
 use egui::{Color32, CornerRadius, FontFamily, FontId, Stroke, Visuals};
 use qell_core::{Theme, TokenKind};
@@ -27,7 +28,7 @@ pub struct Palette {
     pub git: GitColors,
 }
 
-/// File-tree / tab colours for git states, taken from VS Code's Dark Modern.
+/// File-tree / tab colours for git states.
 pub struct GitColors {
     pub modified: Color32,
     pub added: Color32,
@@ -44,28 +45,34 @@ fn c(rgb: [u8; 3]) -> Color32 {
 impl Palette {
     pub fn dark() -> Self {
         let syntax = Theme::dark();
+        // One surface: the editor, the panels and the bars are the same
+        // near-black, told apart by a hairline and nothing else. The
+        // accent is white — emphasis is brightness, not a colour.
+        let bg = c(syntax.background);
         Self {
-            editor_bg: c(syntax.background),
-            panel_bg: Color32::from_rgb(0x18, 0x18, 0x18),
-            chrome_bg: Color32::from_rgb(0x18, 0x18, 0x18),
-            border: Color32::from_rgb(0x2b, 0x2b, 0x2b),
-            accent: Color32::from_rgb(0x00, 0x78, 0xd4),
+            editor_bg: bg,
+            panel_bg: bg,
+            chrome_bg: bg,
+            border: Color32::from_rgb(0x2a, 0x26, 0x23),
+            accent: Color32::WHITE,
             text: c(syntax.foreground),
-            text_dim: Color32::from_rgb(0x9d, 0x9d, 0x9d),
+            text_dim: Color32::from_rgb(0x8a, 0x83, 0x7c),
             selection: c(syntax.selection),
             current_line: c(syntax.current_line),
             gutter: c(syntax.gutter),
             cursor: c(syntax.cursor),
-            error: Color32::from_rgb(0xf1, 0x4c, 0x4c),
-            warning: Color32::from_rgb(0xcc, 0xa7, 0x00),
-            hover: Color32::from_rgb(0x2a, 0x2d, 0x2e),
+            error: Color32::from_rgb(0xe5, 0x6b, 0x5e),
+            warning: Color32::from_rgb(0xd9, 0xb9, 0x8a),
+            hover: Color32::from_rgb(0x1e, 0x1b, 0x19),
+            // Git states keep a hue, since they are read at a glance, but
+            // a quiet one.
             git: GitColors {
-                modified: Color32::from_rgb(0xe2, 0xc0, 0x8d),
-                added: Color32::from_rgb(0x81, 0xb8, 0x8b),
-                untracked: Color32::from_rgb(0x73, 0xc9, 0x91),
-                deleted: Color32::from_rgb(0xc7, 0x4e, 0x39),
-                conflict: Color32::from_rgb(0xe4, 0x67, 0x6b),
-                ignored: Color32::from_rgb(0x8c, 0x8c, 0x8c),
+                modified: Color32::from_rgb(0xd9, 0xb9, 0x8a),
+                added: Color32::from_rgb(0x9d, 0xb8, 0x82),
+                untracked: Color32::from_rgb(0x9d, 0xb8, 0x82),
+                deleted: Color32::from_rgb(0xc9, 0x6a, 0x5d),
+                conflict: Color32::from_rgb(0xe5, 0x6b, 0x5e),
+                ignored: Color32::from_rgb(0x6b, 0x65, 0x5f),
             },
             syntax,
         }
@@ -98,8 +105,10 @@ impl Palette {
         v.window_fill = self.panel_bg;
         v.extreme_bg_color = self.editor_bg;
         v.faint_bg_color = self.hover;
-        v.selection.bg_fill = self.accent;
-        v.selection.stroke = Stroke::new(1.0_f32, self.text);
+        // What is selected is a lighter band with the text left as it is;
+        // the accent is white and would swallow it.
+        v.selection.bg_fill = self.selection;
+        v.selection.stroke = Stroke::new(1.0_f32, self.accent);
         v.hyperlink_color = self.accent;
         v.override_text_color = Some(self.text);
         v.window_stroke = Stroke::new(1.0_f32, self.border);
@@ -108,14 +117,16 @@ impl Palette {
         v.widgets.noninteractive.bg_fill = self.panel_bg;
         v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, self.border);
         v.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, self.text_dim);
-        v.widgets.inactive.bg_fill = self.panel_bg;
-        v.widgets.inactive.weak_bg_fill = self.panel_bg;
+        // Everything sits on one surface, so a control at rest needs a
+        // shade of its own to be seen at all (a slider's rail, a box).
+        v.widgets.inactive.bg_fill = self.border;
+        v.widgets.inactive.weak_bg_fill = self.hover;
         v.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, self.text);
         v.widgets.hovered.bg_fill = self.hover;
         v.widgets.hovered.weak_bg_fill = self.hover;
         v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, self.border);
-        v.widgets.active.bg_fill = self.accent;
-        v.widgets.active.weak_bg_fill = self.accent;
+        v.widgets.active.bg_fill = self.selection;
+        v.widgets.active.weak_bg_fill = self.selection;
         v.widgets.open.bg_fill = self.hover;
         v.widgets.open.weak_bg_fill = self.hover;
         for w in [

@@ -275,7 +275,8 @@ fn show_repo(app: &mut QellApp, ui: &mut egui::Ui, rel: &Path, st: &RepoStatus) 
     let has_message = !app.scm.messages.get(rel).is_none_or(|m| m.trim().is_empty());
     let can_commit = !busy && !staged.is_empty() && has_message;
     let mut label = egui::text::LayoutJob::default();
-    let white = if can_commit { Color32::WHITE } else { dim };
+    // The one filled button: white, with the text cut out of it.
+    let white = if can_commit { app.palette.editor_bg } else { dim };
     label.append(
         &icons::CHECK.to_string(),
         0.0,
@@ -365,13 +366,14 @@ pub struct GraphState {
     loading: bool,
 }
 
-/// VS Code's graph lane colours (scmGraph.foreground1-5).
+/// Graph lanes. Branches have to be told apart, so these keep a hue,
+/// taken from the terminal's own quiet sixteen.
 const LANE_COLORS: [Color32; 5] = [
-    Color32::from_rgb(0xff, 0xb0, 0x00),
-    Color32::from_rgb(0xdc, 0x26, 0x7f),
-    Color32::from_rgb(0x99, 0x4f, 0x00),
-    Color32::from_rgb(0x40, 0xb0, 0xa6),
-    Color32::from_rgb(0xb6, 0x6d, 0xff),
+    Color32::from_rgb(0xd9, 0xb9, 0x8a),
+    Color32::from_rgb(0xe5, 0x6b, 0x5e),
+    Color32::from_rgb(0x9d, 0xb8, 0x82),
+    Color32::from_rgb(0x86, 0xb9, 0xb1),
+    Color32::from_rgb(0xb9, 0x9d, 0xc8),
 ];
 const GRAPH_ROW: f32 = 22.0;
 const LANE_W: f32 = 11.0;

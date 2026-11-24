@@ -147,7 +147,6 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
         PaletteMode::Rename => "New name",
         PaletteMode::CodeActions => "Quick fix…",
     };
-    let accent = app.palette.accent;
     let text_dim = app.palette.text_dim;
     let screen = ctx.content_rect();
     let width = (screen.width() * 0.5).clamp(360.0, 720.0);
@@ -193,7 +192,7 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                         let is_sel = i == app.command_palette.selected;
                         let (rect, r) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 24.0), Sense::click());
                         if is_sel {
-                            ui.painter().rect_filled(rect, 0.0, accent.gamma_multiply(0.35));
+                            ui.painter().rect_filled(rect, 0.0, app.palette.selection);
                         } else if r.hovered() {
                             ui.painter().rect_filled(rect, 0.0, ui.visuals().faint_bg_color);
                         }
