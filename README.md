@@ -88,6 +88,12 @@ bottom, and language-server completion for the languages you actually use.
   open most, each with the folder it's in. Clicking a folder expands it in
   the tree; clicking a file opens it and reveals it. Pin the ones you always
   want there. "MOST USED" can be switched to "RECENT".
+- **Tree order and filter** — a line of plain words under the workspace's
+  name: `name` (the usual), `modified` (last changed first, with how long
+  ago — a folder counts the newest change inside it, so the repository you
+  touched last comes first) and `used` (opened most first; a folder counts
+  what you opened in it). `changed` shows only what git sees as changed.
+  Folders always come before files; the choice is kept.
 - **Minimap** — the whole file in miniature on the right of the editor, in
   its syntax colours, with the visible part shaded: click to jump, drag to
   scroll. *View → Minimap* or Settings to hide it.

@@ -11,6 +11,20 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// The order of the file tree, folders always before files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TreeSort {
+    /// Alphabetical, the usual.
+    #[default]
+    Name,
+    /// Last changed first; a folder counts as changed when anything in it
+    /// did, as far as the index knows.
+    Modified,
+    /// Opened most first; a folder counts what was opened inside it.
+    Used,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -50,6 +64,10 @@ pub struct Config {
     pub shortcuts: usize,
     /// Order them by last opened rather than by how often they are used.
     pub shortcuts_recent: bool,
+    /// How each folder of the file tree is ordered.
+    pub tree_sort: TreeSort,
+    /// Show only what git sees as changed in the file tree.
+    pub tree_changed: bool,
     /// Show the file tree on startup.
     pub show_sidebar: bool,
     /// Show the terminal panel on startup.
@@ -96,6 +114,8 @@ impl Default for Config {
             restore_session: true,
             shortcuts: 6,
             shortcuts_recent: false,
+            tree_sort: TreeSort::Name,
+            tree_changed: false,
             show_sidebar: true,
             show_terminal: true,
             shell: String::new(),
