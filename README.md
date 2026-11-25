@@ -94,6 +94,9 @@ bottom, and language-server completion for the languages you actually use.
   touched last comes first) and `used` (opened most first; a folder counts
   what you opened in it). `changed` shows only what git sees as changed.
   Folders always come before files; the choice is kept.
+- **Branches in the tree** — each repository's folder shows the branch it
+  is on, dimmed after its name (Settings → *Branches in File Tree* turns
+  it off). Names in the tree and tabs are set at the editor's font size.
 - **Minimap** — the whole file in miniature on the right of the editor, in
   its syntax colours, with the visible part shaded: click to jump, drag to
   scroll. *View → Minimap* or Settings to hide it.

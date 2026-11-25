@@ -68,6 +68,8 @@ pub struct Config {
     pub tree_sort: TreeSort,
     /// Show only what git sees as changed in the file tree.
     pub tree_changed: bool,
+    /// Show each repository's current branch beside its folder.
+    pub tree_branches: bool,
     /// Show the file tree on startup.
     pub show_sidebar: bool,
     /// Show the terminal panel on startup.
@@ -116,6 +118,7 @@ impl Default for Config {
             shortcuts_recent: false,
             tree_sort: TreeSort::Name,
             tree_changed: false,
+            tree_branches: true,
             show_sidebar: true,
             show_terminal: true,
             shell: String::new(),

@@ -163,8 +163,8 @@ fn file_row(
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         let icon = app.config.file_icons.then(|| icons::for_file(path));
-        let mut job =
-            super::sidebar::icon_label(icon, &name, if status == FileStatus::Deleted { app.palette.text_dim } else { color });
+        let name_color = if status == FileStatus::Deleted { app.palette.text_dim } else { color };
+        let mut job = super::sidebar::icon_label(icon, &name, name_color, app.font_size);
         if status == FileStatus::Deleted {
             // Struck through, like VS Code.
             if let Some(s) = job.sections.last_mut() {
@@ -675,7 +675,7 @@ fn show_graph(app: &mut QellApp, ui: &mut egui::Ui, repos: &[(PathBuf, RepoStatu
                     let dir = f.path.parent().map(|d| d.display().to_string()).unwrap_or_default();
                     let icon = app.config.file_icons.then(|| icons::for_file(&f.path));
                     let name_color = if f.status == FileStatus::Deleted { dim } else { text };
-                    let mut job = super::sidebar::icon_label(icon, &name, name_color);
+                    let mut job = super::sidebar::icon_label(icon, &name, name_color, app.font_size);
                     if f.status == FileStatus::Deleted {
                         if let Some(s) = job.sections.last_mut() {
                             s.format.strikethrough = egui::Stroke::new(1.0_f32, dim);

@@ -59,6 +59,17 @@ fn order(entries: &mut [Entry], sort: TreeSort, newest: &dyn Fn(&Entry) -> Optio
     }
 }
 
+/// A branch name short enough to sit beside a folder's: long ticket
+/// branches keep their start, which is the part people recognise.
+fn elide_branch(branch: &str) -> String {
+    const MAX: usize = 28;
+    if branch.chars().count() <= MAX {
+        branch.to_string()
+    } else {
+        format!("{}…", branch.chars().take(MAX - 1).collect::<String>())
+    }
+}
+
 /// How long ago, as briefly as `ls` would put it: `now`, `5m`, `3h`,
 /// `2d`, `4mo`, `1y`.
 fn ago(when: SystemTime, now: SystemTime) -> String {
@@ -75,14 +86,20 @@ fn ago(when: SystemTime, now: SystemTime) -> String {
 
 /// Icon glyph followed by the name, in one label.
 /// `None` for the icon (icons turned off in Settings) gives the bare name.
-pub fn icon_label(icon: Option<(char, Color32)>, name: &str, name_color: Color32) -> LayoutJob {
+/// Names are set at the editor's font size, so the tree, the tabs and
+/// the code read as one text.
+pub fn icon_label(icon: Option<(char, Color32)>, name: &str, name_color: Color32, size: f32) -> LayoutJob {
     let mut job = LayoutJob::default();
     let mut gap = 0.0;
     if let Some((icon, icon_color)) = icon {
-        job.append(&icon.to_string(), 0.0, TextFormat { font_id: icons::font(14.0), color: icon_color, ..Default::default() });
+        job.append(
+            &icon.to_string(),
+            0.0,
+            TextFormat { font_id: icons::font(size + 1.0), color: icon_color, ..Default::default() },
+        );
         gap = 6.0;
     }
-    job.append(name, gap, TextFormat { font_id: FontId::proportional(13.0), color: name_color, ..Default::default() });
+    job.append(name, gap, TextFormat { font_id: FontId::proportional(size), color: name_color, ..Default::default() });
     job
 }
 
@@ -93,6 +110,19 @@ fn show_dir(app: &mut QellApp, ui: &mut egui::Ui, dir: &Path) {
     }
     let mut entries = app.tree_cache.get(dir).cloned().unwrap_or_default();
     let sort = app.config.tree_sort;
+    let font_size = app.font_size;
+    // The branch of each repository in this folder, by absolute path.
+    let branches: HashMap<PathBuf, String> =
+        match app.git_status.as_ref().filter(|_| app.config.tree_branches && app.config.git_status) {
+            Some(ws) => ws
+                .repos
+                .iter()
+                .filter(|(rel, _)| !rel.as_os_str().is_empty())
+                .map(|(rel, st)| (app.root.join(rel), st.branch.clone().unwrap_or_else(|| "detached".into())))
+                .filter(|(path, _)| path.parent() == Some(dir))
+                .collect(),
+            None => HashMap::new(),
+        };
     // Only what git sees as changed, and the folders that hold it.
     if app.config.tree_changed {
         entries.retain(|e| app.git_status_of(&e.path).is_some_and(|s| s != FileStatus::Ignored));
@@ -151,7 +181,13 @@ fn show_dir(app: &mut QellApp, ui: &mut egui::Ui, dir: &Path) {
             }
             let is_open = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false).is_open();
             let icon = if is_open { icons::FOLDER_OPEN } else { icons::FOLDER };
-            let label = icon_label(show_icons.then_some((icon, folder_color)), &e.name, name_color);
+            let mut label = icon_label(show_icons.then_some((icon, folder_color)), &e.name, name_color, font_size);
+            // A repository says which branch it is on, after its name.
+            if let Some(branch) = branches.get(&e.path) {
+                let fmt = |font_id: FontId| TextFormat { font_id, color: folder_color, ..Default::default() };
+                label.append("\u{e0a0}", 10.0, fmt(FontId::monospace(font_size - 2.0)));
+                label.append(&elide_branch(branch), 3.0, fmt(FontId::proportional(font_size - 2.0)));
+            }
             let (_, header, _) = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
                 .show_header(ui, |ui| {
                     // Not selectable text: a folder name is a button, so the
@@ -198,7 +234,7 @@ fn show_dir(app: &mut QellApp, ui: &mut egui::Ui, dir: &Path) {
             }
         } else {
             let selected = active_path.as_deref() == Some(e.path.as_path());
-            let label = icon_label(show_icons.then(|| icons::for_file(&e.path)), &e.name, name_color);
+            let label = icon_label(show_icons.then(|| icons::for_file(&e.path)), &e.name, name_color, font_size);
             let mut button = egui::Button::selectable(selected, label).min_size(egui::vec2(ui.available_width(), 0.0));
             // On the right: the age when sorted by it, then the git letter.
             let mut right = LayoutJob::default();
@@ -272,7 +308,7 @@ fn show_shortcuts(app: &mut QellApp, ui: &mut egui::Ui) {
         let name = e.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let parent = e.path.parent().and_then(|p| p.strip_prefix(&root).ok()).map(|p| p.to_string_lossy().into_owned());
         let icon = show_icons.then(|| if e.is_dir { (icons::FOLDER, dim) } else { icons::for_file(&e.path) });
-        let label = icon_label(icon, &name, text);
+        let label = icon_label(icon, &name, text, app.font_size);
         let mut button = egui::Button::selectable(!e.is_dir && active.as_deref() == Some(e.path.as_path()), label)
             .min_size(egui::vec2(ui.available_width(), 0.0));
         // Where it is, and a star when it's pinned. A folder below the
@@ -746,6 +782,14 @@ mod tests {
         let used = HashMap::from([(PathBuf::from("/ws/c.rs"), 5.0), (PathBuf::from("/ws/b.rs"), 1.0)]);
         order(&mut v, TreeSort::Used, &none, &used);
         assert_eq!(names(&v), ["web", "c.rs", "b.rs", "a.rs"]);
+    }
+
+    #[test]
+    fn long_branch_names_keep_their_start() {
+        assert_eq!(elide_branch("main"), "main");
+        let long = elide_branch("OPS-5335-a-rather-long-ticket-branch-name");
+        assert_eq!(long.chars().count(), 28);
+        assert!(long.starts_with("OPS-5335") && long.ends_with('…'));
     }
 
     #[test]

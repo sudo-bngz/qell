@@ -218,7 +218,7 @@ fn show_tabs(app: &mut QellApp, ui: &mut egui::Ui) {
                             match doc.buffer.path() {
                                 Some(p) => {
                                     let icon = app.config.file_icons.then(|| crate::icons::for_file(p));
-                                    ui.label(crate::views::sidebar::icon_label(icon, &title, color));
+                                    ui.label(crate::views::sidebar::icon_label(icon, &title, color, app.font_size));
                                 }
                                 None => {
                                     ui.label(egui::RichText::new(title).size(13.0).color(color));
