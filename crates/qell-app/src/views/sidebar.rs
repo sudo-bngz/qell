@@ -7,6 +7,7 @@ use std::time::SystemTime;
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Color32, Context, FontId, RichText};
 use qell_git::FileStatus;
+use qell_lsp::lsp_types::{Diagnostic, NumberOrString};
 
 use crate::app::{Focus, QellApp, SidebarView, TreeEditKind};
 use crate::config::TreeSort;
@@ -60,8 +61,82 @@ fn order(entries: &mut [Entry], sort: TreeSort, newest: &dyn Fn(&Entry) -> Optio
 }
 
 /// The most errors in any one file below `dir`, if a file there has any.
-fn errors_under(errors: &HashMap<PathBuf, usize>, dir: &Path) -> Option<usize> {
-    errors.iter().filter(|(p, _)| p.starts_with(dir)).map(|(_, n)| *n).max()
+fn errors_under<T>(errors: &HashMap<PathBuf, Vec<T>>, dir: &Path) -> Option<usize> {
+    errors.iter().filter(|(p, _)| p.starts_with(dir)).map(|(_, v)| v.len()).max()
+}
+
+/// A problem as one line: where, what, and which tool says so.
+pub fn problem_line(d: &Diagnostic) -> String {
+    let code = match &d.code {
+        Some(NumberOrString::Number(n)) => Some(n.to_string()),
+        Some(NumberOrString::String(s)) => Some(s.clone()),
+        None => None,
+    };
+    let from = match (d.source.as_deref(), code) {
+        (Some(src), Some(code)) => format!("  {src}({code})"),
+        (Some(src), None) => format!("  {src}"),
+        (None, Some(code)) => format!("  {code}"),
+        (None, None) => String::new(),
+    };
+    let what = d.message.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    format!("Ln {}  {what}{from}", d.range.start.line + 1)
+}
+
+/// The errors of a file, at the top of its menu: each one goes there,
+/// and Quick Fix asks its server how to fix the first.
+fn problems_menu(app: &mut QellApp, ui: &mut egui::Ui, path: &Path) {
+    let Some(errors) = app.errors.get(path).cloned() else { return };
+    let dim = app.palette.text_dim;
+    ui.label(RichText::new(errors_text(errors.len(), "in this file")).size(11.0).color(app.palette.error));
+    for d in errors.iter().take(8) {
+        let line = problem_line(d);
+        let short = if line.chars().count() > 70 { format!("{}…", line.chars().take(69).collect::<String>()) } else { line };
+        if ui.button(short).on_hover_text(d.message.as_str()).clicked() {
+            app.go_to_problem(path, d, false);
+            ui.close();
+        }
+    }
+    if errors.len() > 8 {
+        ui.label(RichText::new(format!("and {} more", errors.len() - 8)).size(11.0).color(dim));
+    }
+    let shortcut = crate::commands::Command::QuickFix.shortcut_text(ui.ctx());
+    if ui
+        .add(egui::Button::new("Quick Fix…").shortcut_text(shortcut))
+        .on_hover_text("Ask the language server how to fix the first error")
+        .clicked()
+    {
+        app.go_to_problem(path, &errors[0], true);
+        ui.close();
+    }
+    if ui.button("Copy Errors").clicked() {
+        let text: Vec<String> = errors.iter().map(problem_line).collect();
+        ui.ctx().copy_text(text.join("\n"));
+        ui.close();
+    }
+    ui.separator();
+}
+
+/// For a folder: the files inside it with errors, each going to its first.
+fn folder_problems_menu(app: &mut QellApp, ui: &mut egui::Ui, dir: &Path) {
+    let mut files: Vec<(PathBuf, Diagnostic)> =
+        app.errors.iter().filter(|(p, _)| p.starts_with(dir)).map(|(p, v)| (p.clone(), v[0].clone())).collect();
+    if files.is_empty() {
+        return;
+    }
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    let n = files.len();
+    ui.label(RichText::new(format!("{n} file{} with errors", if n == 1 { "" } else { "s" })).size(11.0).color(app.palette.error));
+    for (path, first) in files.iter().take(8) {
+        let rel = path.strip_prefix(dir).unwrap_or(path).display().to_string();
+        if ui.button(rel).on_hover_text(problem_line(first)).clicked() {
+            app.go_to_problem(path, first, false);
+            ui.close();
+        }
+    }
+    if n > 8 {
+        ui.label(RichText::new(format!("and {} more", n - 8)).size(11.0).color(app.palette.text_dim));
+    }
+    ui.separator();
 }
 
 fn errors_text(n: usize, where_: &str) -> String {
@@ -220,7 +295,9 @@ fn show_dir(app: &mut QellApp, ui: &mut egui::Ui, dir: &Path) {
                         .add(egui::Label::new(label).sense(egui::Sense::click()).selectable(false))
                         .on_hover_cursor(egui::CursorIcon::PointingHand);
                     // Something inside has errors, however deep.
-                    if let Some(n) = errors_under(&app.errors, &e.path) {
+                    if errors_under(&app.errors, &e.path).is_some() {
+                        // All of them, across the files inside.
+                        let n: usize = app.errors.iter().filter(|(p, _)| p.starts_with(&e.path)).map(|(_, v)| v.len()).sum();
                         underline_name(ui, name.rect.left(), name.rect.bottom(), &e.name, font_size, show_icons, error_color);
                         if tooltip.is_none() {
                             name.clone().on_hover_text(errors_text(n, "inside"));
@@ -290,7 +367,7 @@ fn show_dir(app: &mut QellApp, ui: &mut egui::Ui, dir: &Path) {
                 button = button.right_text(right);
             }
             let mut resp = ui.add(button).on_hover_cursor(egui::CursorIcon::PointingHand);
-            let errors = app.errors.get(&e.path).copied();
+            let errors = app.errors.get(&e.path).map(Vec::len);
             if let Some(n) = errors {
                 let left = resp.rect.left() + ui.spacing().button_padding.x;
                 underline_name(ui, left, resp.rect.bottom() - 2.0, &e.name, font_size, show_icons, error_color);
@@ -362,7 +439,7 @@ fn show_shortcuts(app: &mut QellApp, ui: &mut egui::Ui) {
         }
         let hover = if e.is_dir { format!("{} — open it in the tree", e.path.display()) } else { e.path.display().to_string() };
         let resp = ui.add(button).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(hover);
-        let errors = if e.is_dir { errors_under(&app.errors, &e.path) } else { app.errors.get(&e.path).copied() };
+        let errors = if e.is_dir { errors_under(&app.errors, &e.path) } else { app.errors.get(&e.path).map(Vec::len) };
         if errors.is_some() {
             let left = resp.rect.left() + ui.spacing().button_padding.x;
             underline_name(ui, left, resp.rect.bottom() - 2.0, &name, app.font_size, show_icons, app.palette.error);
@@ -516,6 +593,11 @@ pub fn reveal_label() -> &'static str {
 
 /// Right-click menu of a file (`folder_id: None`) or a folder in the tree.
 fn entry_menu(app: &mut QellApp, ui: &mut egui::Ui, path: &Path, folder_id: Option<egui::Id>) {
+    if folder_id.is_some() {
+        folder_problems_menu(app, ui, path);
+    } else {
+        problems_menu(app, ui, path);
+    }
     let dir = if folder_id.is_some() { path.to_path_buf() } else { path.parent().unwrap_or(path).to_path_buf() };
     if let Some(id) = folder_id {
         let new = |kind: TreeEditKind, app: &mut QellApp, ui: &mut egui::Ui| {
@@ -828,7 +910,8 @@ mod tests {
 
     #[test]
     fn a_folder_shows_the_worst_file_inside_it() {
-        let errors = HashMap::from([(PathBuf::from("/ws/api/src/main.go"), 2), (PathBuf::from("/ws/api/x.go"), 5)]);
+        let errors =
+            HashMap::from([(PathBuf::from("/ws/api/src/main.go"), vec![(); 2]), (PathBuf::from("/ws/api/x.go"), vec![(); 5])]);
         assert_eq!(errors_under(&errors, Path::new("/ws/api")), Some(5));
         assert_eq!(errors_under(&errors, Path::new("/ws/api/src")), Some(2));
         assert_eq!(errors_under(&errors, Path::new("/ws/web")), None);
@@ -836,6 +919,20 @@ mod tests {
         assert_eq!(errors_under(&errors, Path::new("/ws/ap")), None);
         assert_eq!(errors_text(1, "in this file"), "1 error in this file");
         assert_eq!(errors_text(3, "inside"), "3 errors inside");
+    }
+
+    #[test]
+    fn a_problem_reads_as_one_line_with_its_source() {
+        use qell_lsp::lsp_types::{Position, Range};
+        let mut d = Diagnostic {
+            range: Range::new(Position::new(48, 2), Position::new(48, 3)),
+            message: "Argument or block definition required\n\nmore detail".into(),
+            ..Default::default()
+        };
+        assert_eq!(problem_line(&d), "Ln 49  Argument or block definition required");
+        d.source = Some("ts".into());
+        d.code = Some(NumberOrString::Number(2304));
+        assert_eq!(problem_line(&d), "Ln 49  Argument or block definition required  ts(2304)");
     }
 
     #[test]

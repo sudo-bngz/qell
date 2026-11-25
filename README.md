@@ -100,6 +100,10 @@ bottom, and language-server completion for the languages you actually use.
   Files you haven't opened are marked when their server reports on them:
   some servers (rust-analyzer, gopls) check the whole project, others only
   the files you have open.
+  Right-click a file with errors to see them (each one opens the file at
+  that spot), run **Quick Fix…** on the first, or copy them; a folder lists
+  its files with errors. In the editor, right-clicking a line with an
+  error or warning shows the message in full, with Quick Fix and Copy.
 - **Branches in the tree** — each repository's folder shows the branch it
   is on, dimmed after its name (Settings → *Branches in File Tree* turns
   it off). Names in the tree and tabs are set at the editor's font size.
