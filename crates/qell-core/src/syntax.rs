@@ -231,6 +231,28 @@ static MAKE_HIGHLIGHTS: LazyLock<String> = LazyLock::new(|| {
     format!("{}\n{}", tree_sitter_make::HIGHLIGHTS_QUERY, include_str!("../queries/makefile-highlights-extra.scm"))
 });
 
+/// JavaScript's highlights with its JSX ones: `.js` files may hold JSX.
+static JS_HIGHLIGHTS: LazyLock<String> =
+    LazyLock::new(|| format!("{}\n{}", tree_sitter_javascript::HIGHLIGHT_QUERY, tree_sitter_javascript::JSX_HIGHLIGHT_QUERY));
+
+/// TypeScript's own highlights only cover what it adds to JavaScript
+/// (types, modifiers); the grammar is meant to be used with JavaScript's
+/// queries underneath, as tree-sitter itself configures it. Without them
+/// keywords, strings, calls and properties are left uncoloured.
+static TS_HIGHLIGHTS: LazyLock<String> =
+    LazyLock::new(|| format!("{}\n{}", tree_sitter_javascript::HIGHLIGHT_QUERY, tree_sitter_typescript::HIGHLIGHTS_QUERY));
+/// The same, with JSX, for `.tsx`.
+static TSX_HIGHLIGHTS: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{}\n{}\n{}",
+        tree_sitter_javascript::HIGHLIGHT_QUERY,
+        tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
+        tree_sitter_typescript::HIGHLIGHTS_QUERY
+    )
+});
+static TS_LOCALS: LazyLock<String> =
+    LazyLock::new(|| format!("{}\n{}", tree_sitter_javascript::LOCALS_QUERY, tree_sitter_typescript::LOCALS_QUERY));
+
 /// Every language Qell ships with. Adding a language is adding one entry
 /// here (plus a grammar crate in `Cargo.toml`).
 pub fn builtin_languages() -> Vec<Language> {
@@ -271,7 +293,7 @@ pub fn builtin_languages() -> Vec<Language> {
             aliases: &["js", "jsx", "node"],
             lsp: Some(&["typescript-language-server", "--stdio"]),
             grammar: Some(
-                Grammar::new(tree_sitter_javascript::LANGUAGE.into(), tree_sitter_javascript::HIGHLIGHT_QUERY)
+                Grammar::new(tree_sitter_javascript::LANGUAGE.into(), &JS_HIGHLIGHTS)
                     .injections(tree_sitter_javascript::INJECTIONS_QUERY)
                     .locals(tree_sitter_javascript::LOCALS_QUERY),
             ),
@@ -284,8 +306,9 @@ pub fn builtin_languages() -> Vec<Language> {
             aliases: &["ts"],
             lsp: Some(&["typescript-language-server", "--stdio"]),
             grammar: Some(
-                Grammar::new(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(), tree_sitter_typescript::HIGHLIGHTS_QUERY)
-                    .locals(tree_sitter_typescript::LOCALS_QUERY),
+                Grammar::new(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(), &TS_HIGHLIGHTS)
+                    .injections(tree_sitter_javascript::INJECTIONS_QUERY)
+                    .locals(&TS_LOCALS),
             ),
             ..Default::default()
         },
@@ -296,8 +319,9 @@ pub fn builtin_languages() -> Vec<Language> {
             aliases: &["tsx"],
             lsp: Some(&["typescript-language-server", "--stdio"]),
             grammar: Some(
-                Grammar::new(tree_sitter_typescript::LANGUAGE_TSX.into(), tree_sitter_typescript::HIGHLIGHTS_QUERY)
-                    .locals(tree_sitter_typescript::LOCALS_QUERY),
+                Grammar::new(tree_sitter_typescript::LANGUAGE_TSX.into(), &TSX_HIGHLIGHTS)
+                    .injections(tree_sitter_javascript::INJECTIONS_QUERY)
+                    .locals(&TS_LOCALS),
             ),
             ..Default::default()
         },
@@ -712,6 +736,18 @@ mod tests {
             ("dockerfile", "FROM rust:1.95 AS build\nRUN if true; then cargo build; fi\n", "if", &[Keyword]),
             ("conf", "[mysqld]\nport = 3306\n", "port", &[Property]),
             ("markdown", "# Title\n\nSome *em* text.\n", "em", &[Emphasis]),
+            // TypeScript keeps JavaScript's colours under its own.
+            ("typescript", "import { A } from './a'\n", "import", &[Keyword]),
+            ("typescript", "import { A } from './a'\n", "'./a'", &[String]),
+            ("typescript", "const x = vi.fn()\n", "fn", &[Function]),
+            ("typescript", "const o = { info: 1 }\n", "info", &[Property]),
+            ("typescript", "const n: number = 42\n", "42", &[Number]),
+            ("typescript", "const n: number = 42\n", "number", &[Type]),
+            ("typescript", "class A { private y = 2 }\n", "private", &[Keyword]),
+            ("typescript", "// note\nlet a = 1\n", "// note", &[Comment]),
+            ("typescriptreact", "const e = <div className=\"a\">{x}</div>\n", "div", &[Tag]),
+            ("typescriptreact", "const e = <div className=\"a\">{x}</div>\n", "const", &[Keyword]),
+            ("javascript", "const e = <App title=\"t\" />\n", "App", &[Tag, Type, Function]),
         ];
         let mut failures = Vec::new();
         for (lang, src, token, expected) in cases {
