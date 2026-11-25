@@ -17,6 +17,27 @@ pub mod sidebar;
 pub mod status;
 pub mod terminal;
 
+/// A curly underline from `x0` to `x1` along `y`, the way errors are
+/// marked: in the editor under the faulty code, in the file tree under
+/// the file (and the folders holding it).
+pub fn wavy_line(painter: &egui::Painter, x0: f32, x1: f32, y: f32, color: egui::Color32) {
+    const STEP: f32 = 2.0;
+    const HEIGHT: f32 = 1.5;
+    if x1 <= x0 {
+        return;
+    }
+    let mut points = Vec::with_capacity(((x1 - x0) / STEP) as usize + 2);
+    let mut x = x0;
+    let mut up = true;
+    while x < x1 {
+        points.push(egui::pos2(x, if up { y - HEIGHT } else { y + HEIGHT }));
+        x += STEP;
+        up = !up;
+    }
+    points.push(egui::pos2(x1, if up { y - HEIGHT } else { y + HEIGHT }));
+    painter.add(egui::Shape::line(points, egui::Stroke::new(1.0_f32, color)));
+}
+
 /// Hold egui's keyboard focus for a pane that reads keys itself (the
 /// editor, the terminal) while it is the active one.
 ///
