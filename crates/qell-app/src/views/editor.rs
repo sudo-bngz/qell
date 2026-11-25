@@ -950,6 +950,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
         let unit = doc.indent_unit.max(1);
         let active = if indent_guides { active_guide(&line_indent, line_count, head.line, unit) } else { None };
 
+        let inline_problems = app.config.inline_problems;
         for vrow in range.clone() {
             // A row on screen: all of a line, or a piece of a wrapped one.
             let vr = wl.row(vrow);
@@ -1136,6 +1137,37 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                 };
                 let (x0, x1) = (xcol(c0), xcol(c1));
                 super::wavy_line(&painter, x0, x1, y + row_height - 2.0, color);
+            }
+
+            // What the worst problem of the line says, after its end, so
+            // the squiggle doesn't need a hover to be understood.
+            if inline_problems && last_seg {
+                let worst = doc
+                    .diagnostics
+                    .iter()
+                    .filter(|d| d.range.start.line as usize == row)
+                    .filter(|d| matches!(d.severity, Some(DiagnosticSeverity::ERROR) | Some(DiagnosticSeverity::WARNING)))
+                    .min_by_key(|d| d.severity.map(|s| s == DiagnosticSeverity::WARNING));
+                if let Some(d) = worst {
+                    let color = if d.severity == Some(DiagnosticSeverity::ERROR) { palette_err } else { palette_warn };
+                    let what = d.message.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+                    let x = xcol(line_chars) + char_width * 3.0;
+                    let room = ((rect.right() - x) / char_width) as usize;
+                    if room > 8 {
+                        let text = if what.chars().count() > room {
+                            format!("{}…", what.chars().take(room - 1).collect::<String>())
+                        } else {
+                            what.to_string()
+                        };
+                        painter.text(
+                            Pos2::new(x, y + row_height / 2.0),
+                            Align2::LEFT_CENTER,
+                            text,
+                            font.clone(),
+                            color.gamma_multiply(0.75),
+                        );
+                    }
+                }
             }
 
             // Cursor.

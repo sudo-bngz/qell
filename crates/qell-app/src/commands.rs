@@ -51,6 +51,7 @@ pub enum Command {
     ToggleCluster,
     ToggleAws,
     ToggleTerminal,
+    ShowProblems,
     NewTerminal,
     KillTerminal,
     NextTerminal,
@@ -112,6 +113,7 @@ impl Command {
         Command::ToggleCluster,
         Command::ToggleAws,
         Command::ToggleTerminal,
+        Command::ShowProblems,
         Command::NewTerminal,
         Command::KillTerminal,
         Command::NextTerminal,
@@ -173,6 +175,7 @@ impl Command {
             Command::ToggleCluster => "View: Toggle Kubernetes Cluster",
             Command::ToggleAws => "View: Toggle AWS",
             Command::ToggleTerminal => "View: Toggle Terminal",
+            Command::ShowProblems => "View: Show Problems",
             Command::NewTerminal => "Terminal: New Terminal",
             Command::KillTerminal => "Terminal: Kill Active Terminal",
             Command::NextTerminal => "Terminal: Focus Next Terminal",
@@ -257,6 +260,7 @@ impl Command {
             Command::ToggleCluster => s(cmd_shift, Key::K),
             Command::ToggleAws => s(cmd_shift, Key::A),
             Command::ToggleTerminal => s(Modifiers::CTRL, Key::Backtick),
+            Command::ShowProblems => s(cmd_shift, Key::M),
             // ⌘T on macOS, as in its terminals. Elsewhere Ctrl+T belongs
             // to the shell (it swaps two characters), so the VS Code
             // chord stays.
