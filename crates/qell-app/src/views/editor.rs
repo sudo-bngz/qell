@@ -1123,8 +1123,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                     _ => palette_gutter,
                 };
                 let (x0, x1) = (xcol(c0), xcol(c1));
-                let yy = y + row_height - 2.0;
-                painter.line_segment([Pos2::new(x0, yy), Pos2::new(x1, yy)], Stroke::new(1.0_f32, color));
+                super::wavy_line(&painter, x0, x1, y + row_height - 2.0, color);
             }
 
             // Cursor.

@@ -315,6 +315,8 @@ pub struct QellApp {
     /// A formatting request waiting on a language server, and whether the
     /// file is to be saved once its edits arrive.
     pending_format: Option<PendingFormat>,
+    /// Files language servers report errors in, and how many.
+    pub errors: HashMap<PathBuf, usize>,
     /// Which pane had the keyboard last frame, to notice coming back to
     /// the editor from the terminal.
     last_focus: Focus,
@@ -423,6 +425,7 @@ impl QellApp {
             vim: crate::vim::Vim::new(),
             pending_vim: Vec::new(),
             pending_format: None,
+            errors: HashMap::new(),
             last_focus: Focus::Editor,
             k8s: views::k8s::K8sState::default(),
             aws: views::aws::AwsState::default(),
@@ -638,6 +641,7 @@ impl QellApp {
         self.lsp = new_lsp(&self.egui_ctx, &path, &self.config);
         self.git.set_root(path.clone());
         self.indexer.set_root(path.clone());
+        self.errors.clear();
         self.search = Default::default();
         self.nav_back.clear();
         self.nav_forward.clear();
@@ -2687,6 +2691,14 @@ impl QellApp {
     }
 
     fn set_diagnostics(&mut self, path: &Path, diagnostics: Vec<Diagnostic>) {
+        // Kept for every file a server reports on, open or not, for the
+        // file tree.
+        let errors = diagnostics.iter().filter(|d| d.severity == Some(qell_lsp::lsp_types::DiagnosticSeverity::ERROR)).count();
+        if errors > 0 {
+            self.errors.insert(path.to_path_buf(), errors);
+        } else {
+            self.errors.remove(path);
+        }
         if let Some(d) = self.docs.iter_mut().find(|d| d.buffer.path() == Some(path)) {
             d.diagnostics = diagnostics;
         }

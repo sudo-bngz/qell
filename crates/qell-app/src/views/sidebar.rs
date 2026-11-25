@@ -59,6 +59,29 @@ fn order(entries: &mut [Entry], sort: TreeSort, newest: &dyn Fn(&Entry) -> Optio
     }
 }
 
+/// The most errors in any one file below `dir`, if a file there has any.
+fn errors_under(errors: &HashMap<PathBuf, usize>, dir: &Path) -> Option<usize> {
+    errors.iter().filter(|(p, _)| p.starts_with(dir)).map(|(_, n)| *n).max()
+}
+
+fn errors_text(n: usize, where_: &str) -> String {
+    if n == 1 {
+        format!("1 error {where_}")
+    } else {
+        format!("{n} errors {where_}")
+    }
+}
+
+/// A curly red line under a tree row's name (not its icon), starting from
+/// where the label starts.
+fn underline_name(ui: &egui::Ui, left: f32, bottom: f32, name: &str, size: f32, icon: bool, color: Color32) {
+    let measure = |text: &str, font: FontId| ui.fonts_mut(|f| f.layout_no_wrap(text.to_string(), font, color).size().x);
+    // Where the name starts: after the icon and the gap icon_label leaves.
+    let start = if icon { left + measure("\u{f15b}", icons::font(size + 1.0)) + 6.0 } else { left };
+    let width = measure(name, FontId::proportional(size));
+    super::wavy_line(ui.painter(), start, start + width, bottom - 1.0, color);
+}
+
 /// A branch name short enough to sit beside a folder's: long ticket
 /// branches keep their start, which is the part people recognise.
 fn elide_branch(branch: &str) -> String {
@@ -111,6 +134,7 @@ fn show_dir(app: &mut QellApp, ui: &mut egui::Ui, dir: &Path) {
     let mut entries = app.tree_cache.get(dir).cloned().unwrap_or_default();
     let sort = app.config.tree_sort;
     let font_size = app.font_size;
+    let error_color = app.palette.error;
     // The branch of each repository in this folder, by absolute path.
     let branches: HashMap<PathBuf, String> =
         match app.git_status.as_ref().filter(|_| app.config.tree_branches && app.config.git_status) {
@@ -195,6 +219,13 @@ fn show_dir(app: &mut QellApp, ui: &mut egui::Ui, dir: &Path) {
                     let name = ui
                         .add(egui::Label::new(label).sense(egui::Sense::click()).selectable(false))
                         .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    // Something inside has errors, however deep.
+                    if let Some(n) = errors_under(&app.errors, &e.path) {
+                        underline_name(ui, name.rect.left(), name.rect.bottom(), &e.name, font_size, show_icons, error_color);
+                        if tooltip.is_none() {
+                            name.clone().on_hover_text(errors_text(n, "inside"));
+                        }
+                    }
                     // Folders get a dot rather than a letter, like VS Code.
                     let dot = color.zip(tooltip).map(|(c, _)| c);
                     let age = ages.get(&e.path);
@@ -259,6 +290,12 @@ fn show_dir(app: &mut QellApp, ui: &mut egui::Ui, dir: &Path) {
                 button = button.right_text(right);
             }
             let mut resp = ui.add(button).on_hover_cursor(egui::CursorIcon::PointingHand);
+            let errors = app.errors.get(&e.path).copied();
+            if let Some(n) = errors {
+                let left = resp.rect.left() + ui.spacing().button_padding.x;
+                underline_name(ui, left, resp.rect.bottom() - 2.0, &e.name, font_size, show_icons, error_color);
+                resp = resp.on_hover_text(errors_text(n, "in this file"));
+            }
             if let Some(t) = tooltip {
                 resp = resp.on_hover_text(t);
             }
@@ -325,6 +362,11 @@ fn show_shortcuts(app: &mut QellApp, ui: &mut egui::Ui) {
         }
         let hover = if e.is_dir { format!("{} — open it in the tree", e.path.display()) } else { e.path.display().to_string() };
         let resp = ui.add(button).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(hover);
+        let errors = if e.is_dir { errors_under(&app.errors, &e.path) } else { app.errors.get(&e.path).copied() };
+        if errors.is_some() {
+            let left = resp.rect.left() + ui.spacing().button_padding.x;
+            underline_name(ui, left, resp.rect.bottom() - 2.0, &name, app.font_size, show_icons, app.palette.error);
+        }
         if resp.clicked() {
             // A folder opens in the tree; a file opens in the editor.
             if !e.is_dir {
@@ -782,6 +824,18 @@ mod tests {
         let used = HashMap::from([(PathBuf::from("/ws/c.rs"), 5.0), (PathBuf::from("/ws/b.rs"), 1.0)]);
         order(&mut v, TreeSort::Used, &none, &used);
         assert_eq!(names(&v), ["web", "c.rs", "b.rs", "a.rs"]);
+    }
+
+    #[test]
+    fn a_folder_shows_the_worst_file_inside_it() {
+        let errors = HashMap::from([(PathBuf::from("/ws/api/src/main.go"), 2), (PathBuf::from("/ws/api/x.go"), 5)]);
+        assert_eq!(errors_under(&errors, Path::new("/ws/api")), Some(5));
+        assert_eq!(errors_under(&errors, Path::new("/ws/api/src")), Some(2));
+        assert_eq!(errors_under(&errors, Path::new("/ws/web")), None);
+        // A sibling whose name merely starts the same isn't inside.
+        assert_eq!(errors_under(&errors, Path::new("/ws/ap")), None);
+        assert_eq!(errors_text(1, "in this file"), "1 error in this file");
+        assert_eq!(errors_text(3, "inside"), "3 errors inside");
     }
 
     #[test]

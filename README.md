@@ -94,6 +94,12 @@ bottom, and language-server completion for the languages you actually use.
   touched last comes first) and `used` (opened most first; a folder counts
   what you opened in it). `changed` shows only what git sees as changed.
   Folders always come before files; the choice is kept.
+- **Errors in the tree** — a file a language server reports errors in has
+  a curly red line under its name, and so do the folders holding it (the
+  same line marks the faulty code in the editor). Hover for the count.
+  Files you haven't opened are marked when their server reports on them:
+  some servers (rust-analyzer, gopls) check the whole project, others only
+  the files you have open.
 - **Branches in the tree** — each repository's folder shows the branch it
   is on, dimmed after its name (Settings → *Branches in File Tree* turns
   it off). Names in the tree and tabs are set at the editor's font size.
