@@ -2741,6 +2741,7 @@ dependencies = [
  "ignore",
  "log",
  "qell-core",
+ "qell-git",
  "regex",
  "tempfile",
  "tree-sitter",

@@ -668,8 +668,18 @@ impl QellApp {
             }
         }
         self.lsp.did_save(&doc.buffer);
-        self.git.refresh();
-        self.indexer.refresh();
+        // Only this file changed: its repository and its index entry.
+        match doc.buffer.path().map(Path::to_path_buf) {
+            Some(path) => {
+                if let Ok(rel) = path.strip_prefix(&self.root) {
+                    self.git.refresh_path(rel.to_path_buf());
+                } else {
+                    self.git.refresh();
+                }
+                self.indexer.update(vec![path]);
+            }
+            None => self.git.refresh(),
+        }
         let name = doc.buffer.file_name();
         let saved_config = doc.buffer.path().is_some_and(|p| same_file(p, &config::config_path()));
         self.notify(format!("Saved {name}"));
@@ -2101,12 +2111,21 @@ impl QellApp {
         doc_rel.and_then(|rel| ws.repo_for(rel)).or_else(|| ws.repo_for(Path::new(""))).map(|(root, st)| (root.as_path(), st))
     }
 
+    /// What git lists as changed, as absolute paths.
+    fn changed_paths(&self, st: Option<&qell_git::WorkspaceStatus>) -> Vec<PathBuf> {
+        st.map(|st| st.changed_paths().map(|p| self.root.join(p)).collect()).unwrap_or_default()
+    }
+
     fn handle_git(&mut self, ctx: &Context) {
         // Regaining window focus usually means files changed elsewhere.
         let focused = ctx.input(|i| i.focused);
         if focused && !self.was_focused {
             self.git.refresh();
             self.check_disk();
+            // Files being worked on may have been edited elsewhere; git
+            // can't tell when they were changed already.
+            let changed = self.changed_paths(self.git_status.as_ref());
+            self.indexer.update(changed);
         }
         self.was_focused = focused;
         // Coming back to the editor after running something in the terminal.
@@ -2115,8 +2134,12 @@ impl QellApp {
         }
         self.last_focus = self.focus;
         if let Some(st) = self.git.poll() {
-            // Files changed on disk (git noticed): bring the index up to date.
-            self.indexer.refresh();
+            // Files changed on disk (git noticed): bring those up to date in
+            // the index. What changed is what git lists now or listed
+            // before (a file reverted or committed drops off the list).
+            let mut changed = self.changed_paths(self.git_status.as_ref());
+            changed.extend(self.changed_paths(st.as_ref()));
+            self.indexer.update(changed);
             // A checkout or a rebase rewrites the files you have open.
             self.check_disk();
             // Something changed on disk; new or removed files must show up
