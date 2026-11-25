@@ -139,7 +139,12 @@ fn defs() -> Vec<Def> {
             "What the AWS view runs to read your account, e.g. aws or /opt/homebrew/bin/aws.",
         ),
         def("tree_hidden", "Files", "Hidden in File Tree", "Comma-separated names the file tree doesn't show."),
-        def("ignore", "Files", "Quick Open Ignore", "Comma-separated directory and file names Go to File skips."),
+        def(
+            "ignore",
+            "Files",
+            "Quick Open Ignore",
+            "Comma-separated directory and file names Go to File and the search index skip.",
+        ),
     ];
     for lang in qell_core::syntax::builtin_languages() {
         let Some(cmd) = lang.lsp else { continue };

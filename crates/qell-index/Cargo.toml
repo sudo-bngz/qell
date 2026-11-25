@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 log.workspace = true
 qell-core.workspace = true
+qell-git.workspace = true
 ignore = "0.4"
 regex = "1"
 tree-sitter.workspace = true

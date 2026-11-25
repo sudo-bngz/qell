@@ -225,6 +225,8 @@ pub struct WorkspaceStatus {
     inherited: HashMap<PathBuf, FileStatus>,
     /// Roots of repositories nested in the workspace (not the empty path).
     nested_roots: HashSet<PathBuf>,
+    /// More repositories were found than are followed.
+    pub truncated: bool,
 }
 
 impl WorkspaceStatus {
@@ -270,7 +272,7 @@ impl WorkspaceStatus {
                 }
             }
         }
-        Self { repos, entries, inherited, nested_roots }
+        Self { repos, entries, inherited, nested_roots, truncated: false }
     }
 
     /// Status of a workspace-relative path, including states inherited from
@@ -301,6 +303,14 @@ impl WorkspaceStatus {
     /// Changed files across all repositories (excluding ignored ones).
     pub fn changed_files(&self) -> usize {
         self.repos.iter().map(|(_, s)| s.changed_files()).sum()
+    }
+
+    /// What git reports as changed, workspace-relative: files, and the
+    /// untracked folders it names as a whole. Ignored paths are left out.
+    pub fn changed_paths(&self) -> impl Iterator<Item = PathBuf> + '_ {
+        self.repos
+            .iter()
+            .flat_map(|(root, st)| st.files.iter().filter(|(_, s)| *s != FileStatus::Ignored).map(move |(p, _)| root.join(p)))
     }
 }
 
@@ -464,15 +474,72 @@ impl Default for ScanOptions {
     }
 }
 
-/// Most repositories followed at once; past this a folder is more likely
-/// a dump of clones than a workspace, and statuses would get slow.
-const MAX_REPOS: usize = 64;
+/// Most repositories followed at once. Past a handful they are refreshed
+/// a few at a time in turn (see [`Watcher`]), so this only bounds memory
+/// and the length of a sweep.
+const MAX_REPOS: usize = 512;
+
+/// Folders of a home directory that hold caches, downloaded dependencies
+/// and app data rather than anybody's code. When a workspace contains
+/// the home directory, they are not searched for repositories nor
+/// indexed; they still show in the file tree.
+const HOME_NOISE: &[&str] = &[
+    "Library",
+    "Applications",
+    "Movies",
+    "Music",
+    "Pictures",
+    ".Trash",
+    ".cache",
+    ".local",
+    ".npm",
+    ".nvm",
+    ".pnpm-store",
+    ".yarn",
+    ".bun",
+    ".cargo",
+    ".rustup",
+    ".gradle",
+    ".m2",
+    ".docker",
+    ".orbstack",
+    ".colima",
+    ".vscode",
+    ".vscode-oss",
+    ".cursor",
+    ".oh-my-zsh",
+    ".terraform.d",
+    ".kube/cache",
+    ".minikube",
+    ".pyenv",
+    ".rbenv",
+    ".sdkman",
+    ".tfenv",
+    ".asdf",
+    "go/pkg",
+    "snap",
+];
+
+/// Whether `path` is one of the home directory's [`HOME_NOISE`] folders.
+pub fn is_home_noise(path: &Path) -> bool {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else { return false };
+    is_noise_of(&home, path)
+}
+
+fn is_noise_of(home: &Path, path: &Path) -> bool {
+    path.strip_prefix(home).is_ok_and(|rel| HOME_NOISE.iter().any(|n| rel == Path::new(n)))
+}
 
 /// Find the repositories of a workspace: the one containing `root` (as an
 /// empty relative path), then repositories in folders below it, as paths
 /// relative to `root`. A folder with a `.git` entry (directory, or file for
 /// worktrees and submodules) is a repository.
 pub fn discover(root: &Path, opts: &ScanOptions) -> Vec<PathBuf> {
+    discover_capped(root, opts).0
+}
+
+/// [`discover`], and whether it stopped at [`MAX_REPOS`].
+fn discover_capped(root: &Path, opts: &ScanOptions) -> (Vec<PathBuf>, bool) {
     let mut found = Vec::new();
     let enclosing = git(root).args(["rev-parse", "--is-inside-work-tree"]).output();
     if enclosing.is_ok_and(|o| o.status.success()) {
@@ -487,14 +554,13 @@ pub fn discover(root: &Path, opts: &ScanOptions) -> Vec<PathBuf> {
             dirs.sort_by_key(|e| e.file_name());
             for e in dirs {
                 let name = e.file_name().to_string_lossy().into_owned();
-                if name == ".git" || opts.skip.contains(&name) {
+                if name == ".git" || opts.skip.contains(&name) || is_home_noise(&e.path()) {
                     continue;
                 }
                 let child = rel.join(&name);
                 if e.path().join(".git").exists() {
                     if found.len() >= MAX_REPOS {
-                        log::warn!("more than {MAX_REPOS} git repositories under {}; showing the first ones", root.display());
-                        return found;
+                        return (found, true);
                     }
                     found.push(child.clone());
                 }
@@ -504,7 +570,7 @@ pub fn discover(root: &Path, opts: &ScanOptions) -> Vec<PathBuf> {
         }
         frontier = next;
     }
-    found
+    (found, false)
 }
 
 /// Most `git status` processes run at once.
@@ -513,11 +579,19 @@ const PARALLEL: usize = 4;
 /// `git status` for every repository, a few at a time. `None` when there
 /// is no repository at all.
 pub fn workspace_status(root: &Path, repos: &[PathBuf]) -> Option<WorkspaceStatus> {
+    let results: Vec<(PathBuf, RepoStatus)> =
+        statuses(root, repos).into_iter().filter_map(|(rel, st)| Some((rel, st?))).collect();
+    (!results.is_empty()).then(|| WorkspaceStatus::merge(results))
+}
+
+/// `git status` of each repository, a few at a time; `None` where git
+/// failed (a broken or half-cloned repository).
+fn statuses(root: &Path, repos: &[PathBuf]) -> Vec<(PathBuf, Option<RepoStatus>)> {
     if repos.is_empty() {
-        return None;
+        return Vec::new();
     }
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let results: Vec<(PathBuf, RepoStatus)> = thread::scope(|s| {
+    thread::scope(|s| {
         let workers: Vec<_> = (0..PARALLEL.min(repos.len()))
             .map(|_| {
                 s.spawn(|| {
@@ -525,17 +599,51 @@ pub fn workspace_status(root: &Path, repos: &[PathBuf]) -> Option<WorkspaceStatu
                     loop {
                         let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let Some(rel) = repos.get(i) else { break };
-                        if let Some(st) = status(&root.join(rel)) {
-                            out.push((rel.clone(), st));
-                        }
+                        out.push((rel.clone(), status(&root.join(rel))));
                     }
                     out
                 })
             })
             .collect();
         workers.into_iter().flat_map(|w| w.join().unwrap_or_default()).collect()
-    });
-    (!results.is_empty()).then(|| WorkspaceStatus::merge(results))
+    })
+}
+
+/// Up to this many repositories, every one is refreshed each time.
+const ALL_AT_ONCE: usize = 32;
+/// Past that, this many in turn each time, plus the ones with changes
+/// and the ones asked about.
+const PER_ROUND: usize = 16;
+
+/// Which repositories to ask `git status` this time: all of a small
+/// workspace; in a large one, those asked about (`hot`), those with
+/// changes (`dirty`, where work is going on), those never looked at yet
+/// (not in `seen`: the first look covers everything) and the next few in
+/// turn from `cursor`, which moves on.
+fn round(
+    repos: &[PathBuf],
+    hot: &HashSet<PathBuf>,
+    dirty: &HashSet<PathBuf>,
+    seen: &dyn Fn(&PathBuf) -> bool,
+    cursor: &mut usize,
+) -> Vec<PathBuf> {
+    if repos.len() <= ALL_AT_ONCE {
+        return repos.to_vec();
+    }
+    let mut pick: Vec<PathBuf> = repos.iter().filter(|r| hot.contains(*r) || dirty.contains(*r) || !seen(r)).cloned().collect();
+    let start = *cursor % repos.len();
+    for r in repos.iter().cycle().skip(start).take(PER_ROUND) {
+        if !pick.contains(r) {
+            pick.push(r.clone());
+        }
+    }
+    *cursor = (start + PER_ROUND) % repos.len();
+    pick
+}
+
+/// The repository of a workspace-relative path: the deepest root holding it.
+fn repo_of_rel<'a>(repos: &'a [PathBuf], rel: &Path) -> Option<&'a PathBuf> {
+    repos.iter().filter(|r| rel.starts_with(r)).max_by_key(|r| r.components().count())
 }
 
 /// Time between refreshes: 3 s for a handful of repositories, longer for
@@ -546,13 +654,20 @@ fn interval_for(repos: usize) -> Duration {
 }
 
 enum Request {
-    Refresh,
+    /// Look again; with a workspace-relative path, that file's
+    /// repository is refreshed for sure.
+    Refresh(Option<PathBuf>),
     SetRoot(PathBuf),
     SetOptions(ScanOptions),
 }
 
 /// Keeps a [`WorkspaceStatus`] up to date on a background thread: refreshes
 /// on demand and every few seconds, and hands results back through [`poll`].
+///
+/// A workspace of many repositories isn't asked about all of them every
+/// time: the ones with changes, the ones a save or a refresh pointed at,
+/// and a few others in turn, so each is looked at within a minute or so
+/// while git never runs more than a handful of statuses at once.
 ///
 /// [`poll`]: Watcher::poll
 pub struct Watcher {
@@ -577,13 +692,54 @@ impl Watcher {
                 let (mut root, mut opts) = (root, opts);
                 let mut last: Option<Option<WorkspaceStatus>> = None;
                 let mut repos: Option<Vec<PathBuf>> = None;
+                let mut truncated = false;
+                // Said once per workspace, not on every look.
+                let mut warned = false;
+                let mut known: HashMap<PathBuf, RepoStatus> = HashMap::new();
+                let mut failed: HashSet<PathBuf> = HashSet::new();
+                let mut hot: HashSet<PathBuf> = HashSet::new();
+                let mut hot_paths: Vec<PathBuf> = Vec::new();
+                let mut cursor = 0usize;
                 let mut cycles = 0u32;
                 loop {
                     if repos.is_none() || cycles.is_multiple_of(REDISCOVER_EVERY) {
-                        repos = Some(discover(&root, &opts));
+                        let (found, more) = discover_capped(&root, &opts);
+                        if more && !warned {
+                            log::warn!(
+                                "more than {MAX_REPOS} git repositories under {}; following the first ones",
+                                root.display()
+                            );
+                            warned = true;
+                        }
+                        known.retain(|r, _| found.contains(r));
+                        failed.retain(|r| found.contains(r));
+                        repos = Some(found);
+                        truncated = more;
                     }
                     cycles = cycles.wrapping_add(1);
-                    let st = workspace_status(&root, repos.as_deref().unwrap_or_default());
+                    let all = repos.as_deref().unwrap_or_default();
+                    hot.extend(hot_paths.drain(..).filter_map(|p| repo_of_rel(all, &p).cloned()));
+                    let dirty: HashSet<PathBuf> =
+                        known.iter().filter(|(_, s)| s.changed_files() > 0).map(|(r, _)| r.clone()).collect();
+                    let batch = round(all, &hot, &dirty, &|r| known.contains_key(r) || failed.contains(r), &mut cursor);
+                    hot.clear();
+                    for (rel, st) in statuses(&root, &batch) {
+                        match st {
+                            Some(st) => {
+                                failed.remove(&rel);
+                                known.insert(rel, st);
+                            }
+                            // Looked at, but git failed: not asked again
+                            // until its turn comes.
+                            None => {
+                                known.remove(&rel);
+                                failed.insert(rel);
+                            }
+                        }
+                    }
+                    let merged: Vec<(PathBuf, RepoStatus)> =
+                        all.iter().filter_map(|r| Some((r.clone(), known.get(r)?.clone()))).collect();
+                    let st = (!merged.is_empty()).then(|| WorkspaceStatus { truncated, ..WorkspaceStatus::merge(merged) });
                     // Only wake the UI when something changed.
                     if last.as_ref() != Some(&st) {
                         if res_tx.send(st.clone()).is_err() {
@@ -591,7 +747,7 @@ impl Watcher {
                         }
                         last = Some(st);
                     }
-                    let wait = interval_for(repos.as_ref().map_or(0, Vec::len));
+                    let wait = interval_for(batch.len());
                     let first = match req_rx.recv_timeout(wait) {
                         Ok(r) => Some(r),
                         Err(RecvTimeoutError::Timeout) => None,
@@ -600,11 +756,18 @@ impl Watcher {
                     // Coalesce a burst of requests into one status run.
                     for req in first.into_iter().chain(req_rx.try_iter()) {
                         match req {
-                            Request::Refresh => repos = None,
+                            Request::Refresh(path) => {
+                                repos = None;
+                                hot_paths.extend(path);
+                            }
                             Request::SetRoot(r) => {
                                 root = r;
                                 repos = None;
                                 last = None;
+                                known.clear();
+                                failed.clear();
+                                warned = false;
+                                cursor = 0;
                             }
                             Request::SetOptions(o) => {
                                 opts = o;
@@ -618,9 +781,15 @@ impl Watcher {
         Self { tx: req_tx, rx: res_rx }
     }
 
-    /// Ask for a status run now (after a save, a refresh, regaining focus).
+    /// Ask for a status run now (after a refresh, regaining focus).
     pub fn refresh(&self) {
-        let _ = self.tx.send(Request::Refresh);
+        let _ = self.tx.send(Request::Refresh(None));
+    }
+
+    /// Ask for a status run now that surely covers the repository of
+    /// `rel` (workspace-relative), as after saving that file.
+    pub fn refresh_path(&self, rel: PathBuf) {
+        let _ = self.tx.send(Request::Refresh(Some(rel)));
     }
 
     /// Switch to another workspace.
@@ -910,6 +1079,51 @@ mod tests {
         let not_repo = tempfile::tempdir().unwrap();
         assert!(discover(not_repo.path(), &ScanOptions::default()).is_empty());
         assert!(workspace_status(not_repo.path(), &[]).is_none());
+    }
+
+    #[test]
+    fn a_home_directory_s_caches_are_noise_but_not_what_is_in_them_by_name() {
+        let home = Path::new("/Users/nico");
+        assert!(is_noise_of(home, &home.join("Library")));
+        assert!(is_noise_of(home, &home.join("go/pkg")));
+        assert!(is_noise_of(home, &home.join(".cargo")));
+        // Only those very folders: a project's own Library or pkg is code.
+        assert!(!is_noise_of(home, &home.join("REPOS/app/Library")));
+        assert!(!is_noise_of(home, &home.join("go/src")));
+        assert!(!is_noise_of(home, &home.join("go")));
+        assert!(!is_noise_of(home, Path::new("/Library")));
+    }
+
+    #[test]
+    fn many_repositories_are_looked_at_in_turn() {
+        let repos: Vec<PathBuf> = (0..100).map(|i| p(&format!("r{i:03}"))).collect();
+        let none = HashSet::new();
+        let all_seen = |_: &PathBuf| true;
+        // A small workspace: everything, every time.
+        let mut cursor = 0;
+        assert_eq!(round(&repos[..20], &none, &none, &all_seen, &mut cursor).len(), 20);
+        // The first look at a large one covers every repository too.
+        assert_eq!(round(&repos, &none, &none, &|_| false, &mut cursor).len(), repos.len());
+        // A large one: a slice at a time, moving on, wrapping around.
+        let mut seen = HashSet::new();
+        let mut cursor = 0;
+        for _ in 0..repos.len().div_ceil(PER_ROUND) {
+            let batch = round(&repos, &none, &none, &all_seen, &mut cursor);
+            assert_eq!(batch.len(), PER_ROUND);
+            seen.extend(batch);
+        }
+        assert_eq!(seen.len(), repos.len(), "every repository is reached within one sweep");
+        // The ones with changes and the one just saved in come every time.
+        let dirty = HashSet::from([p("r050")]);
+        let hot = HashSet::from([p("r099")]);
+        let batch = round(&repos, &hot, &dirty, &all_seen, &mut cursor);
+        assert!(batch.contains(&p("r050")) && batch.contains(&p("r099")));
+        assert_eq!(batch.len(), PER_ROUND + 2);
+        // A file is credited to the deepest repository holding it.
+        let nested = [p("api"), p("api/vendor/lib")];
+        assert_eq!(repo_of_rel(&nested, Path::new("api/vendor/lib/x.go")), Some(&p("api/vendor/lib")));
+        assert_eq!(repo_of_rel(&nested, Path::new("api/main.go")), Some(&p("api")));
+        assert_eq!(repo_of_rel(&nested, Path::new("web/x")), None);
     }
 
     #[test]

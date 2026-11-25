@@ -2,10 +2,12 @@
 //! search across files, plus the definitions found in them.
 //!
 //! The [`Indexer`] builds the index on a background thread and keeps it
-//! current: a refresh walks the workspace again (respecting `.gitignore`)
-//! and re-reads only the files whose size or modification time changed.
-//! Nothing runs on a timer; the editor asks for a refresh when it has a
-//! reason (a save, focus coming back, git noticing changes).
+//! current. A full refresh walks the workspace again (respecting
+//! `.gitignore`) and re-reads only the files whose size or modification
+//! time changed; it happens when the workspace opens and when files are
+//! created, renamed or deleted from the editor. Everything else (a save,
+//! git noticing changes) names the paths that changed, and only those
+//! are looked at. Nothing runs on a timer.
 //!
 //! Search uses a trigram filter: each file keeps the sorted set of the
 //! three-byte sequences it contains, and a plain-text query only scans the
@@ -309,8 +311,16 @@ fn read_text(path: &Path, len: u64) -> Option<String> {
     Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// Files of the workspace, honouring .gitignore and the ignore list.
-fn walk(root: &Path, ignore: &[String]) -> Vec<(PathBuf, u64, Option<SystemTime>)> {
+type Found = (PathBuf, u64, Option<SystemTime>);
+
+/// Files of the workspace, honouring .gitignore and the ignore list, and
+/// whether there were more than [`MAX_FILES`]. A home directory's caches
+/// and app data are skipped (see [`qell_git::is_home_noise`]).
+fn walk(root: &Path, ignore: &[String]) -> (Vec<Found>, bool) {
+    walk_up_to(root, ignore, MAX_FILES)
+}
+
+fn walk_up_to(root: &Path, ignore: &[String], max: usize) -> (Vec<Found>, bool) {
     let ignore: Vec<String> = ignore.to_vec();
     let walker = ignore::WalkBuilder::new(root)
         .hidden(false)
@@ -320,7 +330,7 @@ fn walk(root: &Path, ignore: &[String]) -> Vec<(PathBuf, u64, Option<SystemTime>
         .require_git(false)
         .filter_entry(move |e| {
             let name = e.file_name().to_string_lossy();
-            name != ".git" && !ignore.iter().any(|i| *i == name)
+            name != ".git" && !ignore.iter().any(|i| *i == name) && !(e.depth() > 0 && qell_git::is_home_noise(e.path()))
         })
         .build();
     let mut out = Vec::new();
@@ -329,13 +339,12 @@ fn walk(root: &Path, ignore: &[String]) -> Vec<(PathBuf, u64, Option<SystemTime>
             continue;
         }
         let Ok(meta) = entry.metadata() else { continue };
-        out.push((entry.into_path(), meta.len(), meta.modified().ok()));
-        if out.len() >= MAX_FILES {
-            log::warn!("more than {MAX_FILES} files under {}; indexing the first ones", root.display());
-            break;
+        if out.len() >= max {
+            return (out, true);
         }
+        out.push((entry.into_path(), meta.len(), meta.modified().ok()));
     }
-    out
+    (out, false)
 }
 
 fn workers() -> usize {
@@ -374,11 +383,12 @@ fn parallel<T: Sync, R: Send>(
 /// Bring `old` up to date with the disk, text only: unchanged files are
 /// kept as they are (with their definitions), changed and new ones are
 /// (re)read. Run [`with_symbols`] after to find definitions in them.
-fn reindex_text(root: &Path, ignore: &[String], old: &Index) -> Index {
+fn reindex_text(root: &Path, ignore: &[String], old: &Index) -> (Index, bool) {
     let previous: HashMap<&Path, &Arc<IndexedFile>> = old.files.iter().map(|f| (f.path.as_path(), f)).collect();
     let mut keep = Vec::new();
     let mut todo = Vec::new();
-    for (path, len, modified) in walk(root, ignore) {
+    let (found, truncated) = walk(root, ignore);
+    for (path, len, modified) in found {
         match previous.get(path.as_path()) {
             Some(f) if f.len == len && f.modified == modified && modified.is_some() => keep.push(Arc::clone(f)),
             _ => todo.push((path, len, modified)),
@@ -394,7 +404,61 @@ fn reindex_text(root: &Path, ignore: &[String], old: &Index) -> Index {
         false,
     );
     keep.extend(fresh);
-    Index::build(root.to_path_buf(), keep)
+    (Index::build(root.to_path_buf(), keep), truncated)
+}
+
+/// Bring `old` up to date for these paths only, without walking the
+/// workspace: a file is re-read if it changed, dropped if it is gone or
+/// no longer readable as text, added if new; a folder (git names an
+/// untracked one as a whole) is walked on its own. Paths outside the
+/// workspace or under an ignored name are left alone.
+fn update_text(root: &Path, ignore: &[String], old: &Index, paths: &[PathBuf]) -> Index {
+    let mut files: HashMap<PathBuf, Arc<IndexedFile>> = old.files.iter().map(|f| (f.path.clone(), Arc::clone(f))).collect();
+    let mut todo: Vec<Found> = Vec::new();
+    let mut consider = |files: &mut HashMap<PathBuf, Arc<IndexedFile>>, (path, len, modified): Found| match files.get(&path) {
+        Some(f) if f.len == len && f.modified == modified && modified.is_some() => {}
+        _ => todo.push((path, len, modified)),
+    };
+    for path in paths {
+        let Ok(rel) = path.strip_prefix(root) else { continue };
+        if rel.components().any(|c| {
+            let c = c.as_os_str().to_string_lossy();
+            c == ".git" || ignore.iter().any(|i| *i == c)
+        }) {
+            continue;
+        }
+        match std::fs::metadata(path) {
+            Ok(meta) if meta.is_dir() => {
+                // As many as the whole index may hold, at most.
+                let (found, _) = walk_up_to(path, ignore, MAX_FILES);
+                let present: std::collections::HashSet<&PathBuf> = found.iter().map(|(p, _, _)| p).collect();
+                files.retain(|p, _| !p.starts_with(path) || present.contains(p));
+                for f in found {
+                    consider(&mut files, f);
+                }
+            }
+            Ok(meta) if meta.is_file() => consider(&mut files, (path.clone(), meta.len(), meta.modified().ok())),
+            _ => files.retain(|p, _| !p.starts_with(path)),
+        }
+    }
+    let fresh = parallel(
+        &todo,
+        |(path, len, modified), _| Some((path.clone(), read_text(path, *len).map(|text| (text, *len, *modified)))),
+        false,
+    );
+    for (path, read) in fresh {
+        match read {
+            Some((text, len, modified)) => {
+                let rel = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+                files.insert(path.clone(), Arc::new(IndexedFile::new(path, rel, text, modified, len)));
+            }
+            // Binary or too big now: it no longer belongs.
+            None => {
+                files.remove(&path);
+            }
+        }
+    }
+    Index::build(root.to_path_buf(), files.into_values().collect())
 }
 
 /// Find definitions in the files that don't have them yet.
@@ -409,7 +473,7 @@ fn with_symbols(index: &Index) -> Index {
 /// Text and definitions in one go (tests, small changes).
 #[cfg(test)]
 fn reindex(root: &Path, ignore: &[String], old: &Index) -> Index {
-    with_symbols(&reindex_text(root, ignore, old))
+    with_symbols(&reindex_text(root, ignore, old).0)
 }
 
 /// Where the index is at, for the UI.
@@ -418,10 +482,17 @@ pub struct Status {
     pub indexing: bool,
     pub files: usize,
     pub symbols: usize,
+    /// The workspace has more files than are indexed.
+    pub truncated: bool,
 }
+
+/// The most files indexed, for saying so.
+pub const FILE_LIMIT: usize = MAX_FILES;
 
 enum Request {
     Refresh,
+    /// Only these paths changed.
+    Update(Vec<PathBuf>),
     SetRoot(PathBuf),
     SetIgnore(Vec<String>),
 }
@@ -448,6 +519,9 @@ impl Indexer {
                 .spawn(move || {
                     let (mut root, mut ignore) = (root, ignore);
                     let mut pending = Some(Request::Refresh);
+                    let mut truncated = false;
+                    // Said once per workspace, not on every refresh.
+                    let mut warned = false;
                     loop {
                         let req = match pending.take() {
                             Some(r) => r,
@@ -456,16 +530,24 @@ impl Indexer {
                                 Err(_) => return,
                             },
                         };
-                        // Coalesce a burst of requests into one refresh.
-                        let mut fresh_root = false;
+                        // Coalesce a burst of requests into one pass: a
+                        // whole walk if any asks for it, else the paths.
+                        let (mut fresh_root, mut full) = (false, false);
+                        let mut paths: Vec<PathBuf> = Vec::new();
                         for r in std::iter::once(req).chain(rx.try_iter()) {
                             match r {
-                                Request::Refresh => {}
+                                Request::Refresh => full = true,
+                                Request::Update(p) => paths.extend(p),
                                 Request::SetRoot(r) => {
                                     root = r;
                                     fresh_root = true;
+                                    full = true;
+                                    warned = false;
                                 }
-                                Request::SetIgnore(i) => ignore = i,
+                                Request::SetIgnore(i) => {
+                                    ignore = i;
+                                    full = true;
+                                }
                             }
                         }
                         status.lock().unwrap().indexing = true;
@@ -477,11 +559,23 @@ impl Indexer {
                         let text = {
                             let empty = Index::default();
                             let old = index.read().unwrap();
-                            reindex_text(&root, &ignore, if fresh_root { &empty } else { &old })
+                            if full {
+                                let (text, more) = reindex_text(&root, &ignore, if fresh_root { &empty } else { &old });
+                                truncated = more;
+                                if more && !warned {
+                                    log::warn!("more than {MAX_FILES} files under {}; indexing the first ones", root.display());
+                                    warned = true;
+                                }
+                                text
+                            } else {
+                                paths.sort();
+                                paths.dedup();
+                                update_text(&root, &ignore, &old, &paths)
+                            }
                         };
                         let pending = text.files.iter().any(|f| !f.symbols_done);
                         *status.lock().unwrap() =
-                            Status { indexing: pending, files: text.file_count(), symbols: text.symbol_count() };
+                            Status { indexing: pending, files: text.file_count(), symbols: text.symbol_count(), truncated };
                         if pending {
                             *index.write().unwrap() = text;
                             if let Some(w) = &waker {
@@ -490,7 +584,7 @@ impl Indexer {
                             // Then definitions.
                             let full = with_symbols(&index.read().unwrap());
                             *status.lock().unwrap() =
-                                Status { indexing: false, files: full.file_count(), symbols: full.symbol_count() };
+                                Status { indexing: false, files: full.file_count(), symbols: full.symbol_count(), truncated };
                             *index.write().unwrap() = full;
                         } else {
                             *index.write().unwrap() = text;
@@ -509,6 +603,15 @@ impl Indexer {
     /// Re-read what changed on disk.
     pub fn refresh(&self) {
         let _ = self.tx.send(Request::Refresh);
+    }
+
+    /// Re-read only these paths (absolute): files, or folders to look
+    /// through. Cheaper than [`refresh`](Self::refresh), which walks the
+    /// whole workspace.
+    pub fn update(&self, paths: Vec<PathBuf>) {
+        if !paths.is_empty() {
+            let _ = self.tx.send(Request::Update(paths));
+        }
     }
 
     pub fn set_root(&self, root: PathBuf) {
@@ -647,6 +750,46 @@ mod tests {
         assert_eq!(at(""), Some(400));
         // Ignored folders aren't indexed, so they have nothing to say.
         assert_eq!(at("target"), None);
+    }
+
+    #[test]
+    fn updating_named_paths_touches_only_those() {
+        let dir = workspace();
+        let d = dir.path();
+        let old = index(d);
+        let ignore = ["target".to_string()];
+        // An edit, a deletion, a new file, a new folder, an ignored path.
+        std::fs::write(d.join("src/main.rs"), "fn main() { renamed_call(); }\n").unwrap();
+        std::fs::remove_file(d.join("infra/main.tf")).unwrap();
+        std::fs::write(d.join("src/new.rs"), "pub fn fresh() {}\n").unwrap();
+        std::fs::create_dir_all(d.join("docs/guide")).unwrap();
+        std::fs::write(d.join("docs/guide/intro.md"), "# Intro\n").unwrap();
+        std::fs::write(d.join("target/later.rs"), "fn x() {}\n").unwrap();
+        // A file nobody names isn't looked at, even though it changed.
+        std::fs::write(d.join("src/lib.rs"), "changed but not named\n").unwrap();
+        let paths: Vec<PathBuf> =
+            ["src/main.rs", "infra/main.tf", "src/new.rs", "docs", "target/later.rs"].iter().map(|r| d.join(r)).collect();
+        let idx = with_symbols(&update_text(d, &ignore, &old, &paths));
+        let rels: Vec<_> = idx.files.iter().map(|f| f.rel.to_string_lossy().into_owned()).collect();
+        assert_eq!(rels, vec![".gitignore", "docs/guide/intro.md", "src/lib.rs", "src/main.rs", "src/new.rs"]);
+        assert!(idx.text(&d.join("src/main.rs")).unwrap().contains("renamed_call"));
+        assert!(idx.text(&d.join("src/lib.rs")).unwrap().contains("compute_total"), "not named, not re-read");
+        assert_eq!(idx.definitions("fresh").len(), 1);
+        // Unchanged files are kept as they were, not read again.
+        let before = old.files.iter().find(|f| f.rel == Path::new(".gitignore")).unwrap();
+        let after = idx.files.iter().find(|f| f.rel == Path::new(".gitignore")).unwrap();
+        assert!(Arc::ptr_eq(before, after));
+    }
+
+    #[test]
+    fn a_walk_says_when_it_stopped_early() {
+        let dir = workspace();
+        let (all, more) = walk_up_to(dir.path(), &["target".to_string()], 100);
+        assert!(!more);
+        let (some, more) = walk_up_to(dir.path(), &["target".to_string()], 2);
+        assert!(more);
+        assert_eq!(some.len(), 2);
+        assert!(all.len() > 2);
     }
 
     #[test]

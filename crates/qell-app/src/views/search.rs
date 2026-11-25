@@ -167,13 +167,24 @@ pub fn show_contents(app: &mut QellApp, ui: &mut egui::Ui) {
                 "indexing…".to_string()
             } else if status.indexing {
                 format!("{} files · finding definitions…", status.files)
+            } else if status.truncated {
+                format!("first {} files", status.files)
             } else {
                 format!("{} files", status.files)
             };
-            ui.label(RichText::new(label).size(11.0).color(dim)).on_hover_text(format!(
+            let mut tip = format!(
                 "Indexed in memory: {} files, {} definitions.\nUpdated on save and when files change.",
                 status.files, status.symbols
-            ));
+            );
+            if status.truncated {
+                tip.push_str(&format!(
+                    "\n\nThis folder holds more than {} files, so search only covers the first ones. Open the folder \
+                     you work in (your repositories' folder rather than your home), or add the names of big \
+                     folders to Settings → Quick Open Ignore.",
+                    qell_index::FILE_LIMIT
+                ));
+            }
+            ui.label(RichText::new(label).size(11.0).color(dim)).on_hover_text(tip);
             if status.indexing {
                 ui.add(egui::Spinner::new().size(10.0));
             }

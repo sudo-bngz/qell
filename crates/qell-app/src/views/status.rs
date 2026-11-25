@@ -38,6 +38,7 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                         }
                         text
                     }
+                    None if ws.truncated => format!("{repos}+ repositories"),
                     None => format!("{repos} repositories"),
                 };
                 // The Powerline branch glyph lives in the bundled monospace font.
@@ -49,6 +50,11 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                 let mut tip = format!("{changed} changed file{}", if changed == 1 { "" } else { "s" });
                 if repos > 1 {
                     tip.push_str(&format!(" in {repos} repositories"));
+                }
+                if ws.truncated {
+                    tip.push_str(&format!(
+                        "\nThere are more below this folder; only the first {repos} are followed. Open a narrower folder to see the others."
+                    ));
                 }
                 resp.on_hover_text(tip);
             }
