@@ -90,6 +90,41 @@ pub struct NavPoint {
     pub pos: Position,
 }
 
+/// A formatting request still out, from the language server.
+struct PendingFormat {
+    id: RequestId,
+    /// Save the file once it is formatted (format on save).
+    then_save: bool,
+    /// The file it is for; `None` for an unsaved one.
+    path: Option<PathBuf>,
+    asked: Instant,
+}
+
+/// How long a save waits for the language server to format the file.
+const FORMAT_PATIENCE: Duration = Duration::from_secs(3);
+
+/// The sentence worth showing from a formatter's error. Terraform, for
+/// one, answers with an exit status, a blank line, then `Error: …` and
+/// where: that becomes "Argument or block definition required (line 49)".
+fn format_error(message: &str) -> String {
+    let lines: Vec<&str> = message.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let what = lines
+        .iter()
+        .find_map(|l| l.strip_prefix("Error:").map(str::trim))
+        .or_else(|| lines.iter().copied().find(|l| !l.starts_with("exit status")))
+        .or_else(|| lines.first().copied())
+        .unwrap_or("it reported an error");
+    let line = lines.iter().find_map(|l| {
+        let rest = &l[l.find(" line ")? + 6..];
+        let n: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        (!n.is_empty()).then_some(n)
+    });
+    match line {
+        Some(n) => format!("{what} (line {n})"),
+        None => what.to_string(),
+    }
+}
+
 /// The scale one zoom step away: tenths, so repeated steps land on round
 /// values whatever the setting was (125% goes to 130%, then 140%).
 pub fn zoom_step(scale: f32, steps: i32) -> f32 {
@@ -279,7 +314,7 @@ pub struct QellApp {
     pub pending_vim: Vec<crate::vim::Action>,
     /// A formatting request waiting on a language server, and whether the
     /// file is to be saved once its edits arrive.
-    pending_format: Option<(RequestId, bool)>,
+    pending_format: Option<PendingFormat>,
     /// Which pane had the keyboard last frame, to notice coming back to
     /// the editor from the terminal.
     last_focus: Focus,
@@ -1757,7 +1792,8 @@ impl QellApp {
         }
         let doc = &mut self.docs[self.active];
         if let Some(id) = self.lsp.request_formatting(&self.languages, &mut doc.buffer, self.config.tab_size) {
-            self.pending_format = Some((id, then_save));
+            let path = doc.buffer.path().map(Path::to_path_buf);
+            self.pending_format = Some(PendingFormat { id, then_save, path, asked: Instant::now() });
             return;
         }
         match configured {
@@ -1793,20 +1829,47 @@ impl QellApp {
 
     /// Edits from the language server's formatter.
     fn handle_format_edits(&mut self, id: RequestId, edits: Vec<qell_lsp::lsp_types::TextEdit>) {
-        let Some((pending, then_save)) = self.pending_format else { return };
-        if pending != id {
-            return;
+        let Some(pending) = self.pending_format.take_if(|p| p.id == id) else { return };
+        // The file that was asked about, even if another tab is in front now.
+        let Some(at) = self.doc_of(pending.path.as_deref()) else { return };
+        let doc = &mut self.docs[at];
+        let before = doc.buffer.text();
+        apply_lsp_edits(doc, edits);
+        if !pending.then_save && doc.buffer.text() == before {
+            self.notify("Already formatted.");
         }
-        self.pending_format = None;
-        if let Some(doc) = self.docs.get_mut(self.active) {
-            let before = doc.buffer.text();
-            apply_lsp_edits(doc, edits);
-            if !then_save && doc.buffer.text() == before {
-                self.notify("Already formatted.");
+        if pending.then_save {
+            self.write_doc(at);
+        }
+    }
+
+    /// The formatter couldn't do it (a syntax error, usually) or didn't
+    /// answer: a save goes ahead unformatted, and says why.
+    fn format_failed(&mut self, pending: PendingFormat, why: &str) {
+        if pending.then_save {
+            if let Some(at) = self.doc_of(pending.path.as_deref()) {
+                self.write_doc(at);
+                self.notify(format!("Saved without formatting: {why}"));
             }
+        } else {
+            self.notify_error(format!("Couldn't format: {why}"));
         }
-        if then_save {
-            self.write_active();
+    }
+
+    /// The open document at `path`, or the active one for an unsaved file.
+    fn doc_of(&self, path: Option<&Path>) -> Option<usize> {
+        match path {
+            Some(p) => self.docs.iter().position(|d| d.buffer.path() == Some(p)),
+            None => self.docs.get(self.active).map(|_| self.active),
+        }
+    }
+
+    /// Save the document at `at`, whichever tab is in front.
+    fn write_doc(&mut self, at: usize) {
+        let front = std::mem::replace(&mut self.active, at);
+        self.write_active();
+        if front < self.docs.len() {
+            self.active = front;
         }
     }
 
@@ -2551,6 +2614,12 @@ impl QellApp {
     }
 
     fn handle_lsp_events(&mut self) {
+        // A server that never answers mustn't hold a save back.
+        if self.pending_format.as_ref().is_some_and(|p| p.asked.elapsed() > FORMAT_PATIENCE) {
+            if let Some(pending) = self.pending_format.take() {
+                self.format_failed(pending, "the language server took too long");
+            }
+        }
         for ev in self.lsp.poll() {
             match ev {
                 LspEvent::Ready { language } => self.notify(format!("{language} language server ready")),
@@ -2591,6 +2660,12 @@ impl QellApp {
                 LspEvent::Diagnostics { uri, diagnostics } => {
                     if let Some(path) = convert::uri_to_path(&uri) {
                         self.set_diagnostics(&path, diagnostics);
+                    }
+                }
+                LspEvent::Error { id: Some(id), message } if self.pending_format.as_ref().is_some_and(|p| p.id == id) => {
+                    log::debug!("lsp formatting: {message}");
+                    if let Some(pending) = self.pending_format.take() {
+                        self.format_failed(pending, &format_error(&message));
                     }
                 }
                 LspEvent::Error { message, .. } => log::warn!("lsp: {message}"),
@@ -2856,6 +2931,10 @@ impl eframe::App for QellApp {
         self.notifications.retain(|n| n.at.elapsed() < Duration::from_secs(if n.is_error { 8 } else { 4 }));
         self.handle_native_menu(ctx);
         self.handle_lsp_events();
+        // Be woken to give up on a formatter that doesn't answer.
+        if let Some(p) = &self.pending_format {
+            ctx.request_repaint_after(FORMAT_PATIENCE.saturating_sub(p.asked.elapsed()) + Duration::from_millis(50));
+        }
         self.handle_git(ctx);
         self.handle_scm_jobs();
         views::search::update(self, ctx);
@@ -2984,6 +3063,15 @@ fn new_lsp(ctx: &Context, root: &Path, config: &Config) -> LspRegistry {
 #[cfg(test)]
 mod tests {
     use super::zoom_step;
+
+    #[test]
+    fn a_formatter_error_reads_as_one_sentence() {
+        let terraform = "exit status 2\n\nError: Argument or block definition required\n\n  on <stdin> line 49, in locals:\n  49:   {\n\nAn argument or block definition is required here.\n";
+        assert_eq!(super::format_error(terraform), "Argument or block definition required (line 49)");
+        assert_eq!(super::format_error("exit status 1\nunexpected token"), "unexpected token");
+        assert_eq!(super::format_error("bad input"), "bad input");
+        assert_eq!(super::format_error(""), "it reported an error");
+    }
 
     #[test]
     fn zoom_moves_in_tenths_and_stops_at_its_limits() {
