@@ -51,10 +51,41 @@ pub fn font(size: f32) -> FontId {
     FontId::new(size, family())
 }
 
+/// Fonts already on the machine, tried in order for characters the
+/// bundled ones lack: shell prompts print `✗`, `✔`, `⚡`, box drawing
+/// and arrows that Hack doesn't have, which showed as empty squares.
+/// Read from disk once at startup if present; nothing is downloaded.
+const SYSTEM_FALLBACKS: &[&str] = &[
+    // macOS
+    "/System/Library/Fonts/Menlo.ttc",
+    "/System/Library/Fonts/Apple Symbols.ttf",
+    // Linux
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+    "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+    "/usr/share/fonts/dejavu-sans-mono-fonts/DejaVuSansMono.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
+    "/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf",
+    // Windows
+    "C:\\Windows\\Fonts\\seguisym.ttf",
+    "C:\\Windows\\Fonts\\consola.ttf",
+];
+
+/// Add the system fallbacks that exist after the fonts of `family`.
+fn add_system_fallbacks(fonts: &mut FontDefinitions, family: FontFamily) {
+    for path in SYSTEM_FALLBACKS {
+        let Ok(bytes) = std::fs::read(path) else { continue };
+        let name = format!("system:{path}");
+        // The first face of a collection (.ttc) is the regular one.
+        fonts.font_data.insert(name.clone(), Arc::new(FontData::from_owned(bytes)));
+        fonts.families.entry(family.clone()).or_default().push(name);
+    }
+}
+
 /// Register the icon font with egui. Call once at startup.
 pub fn install(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
     fonts.font_data.insert(FONT_NAME.into(), Arc::new(FontData::from_static(FONT_BYTES)));
+    add_system_fallbacks(&mut fonts, FontFamily::Monospace);
     let mut chain = vec![FONT_NAME.to_string()];
     for fam in [FontFamily::Monospace, FontFamily::Proportional] {
         for f in fonts.families.get(&fam).cloned().unwrap_or_default() {
@@ -131,6 +162,17 @@ mod tests {
         assert_ne!(rs.0, json.0);
         assert_ne!(docker.0, unknown.0);
         assert_ne!(tf.0, unknown.0);
+    }
+
+    #[test]
+    fn system_fallbacks_come_after_the_bundled_fonts() {
+        let mut fonts = FontDefinitions::default();
+        let before = fonts.families[&FontFamily::Monospace].clone();
+        add_system_fallbacks(&mut fonts, FontFamily::Monospace);
+        let after = &fonts.families[&FontFamily::Monospace];
+        // The bundled ones keep the lead; anything found is only behind them.
+        assert_eq!(after[..before.len()], before[..]);
+        assert!(after[before.len()..].iter().all(|n| n.starts_with("system:") && fonts.font_data.contains_key(n)));
     }
 
     #[test]
