@@ -902,7 +902,19 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
             clicked_editor = true;
         }
         let read_only = doc.read_only;
-        resp.context_menu(|ui| editor_menu(ui, &mut menu_choice, read_only));
+        // What a server says about the line the menu opens on.
+        let menu_line = doc.buffer.cursor.head().line as u32;
+        let here: Vec<(bool, String)> = doc
+            .diagnostics
+            .iter()
+            .filter(|d| d.range.start.line <= menu_line && d.range.end.line >= menu_line)
+            .map(|d| (d.severity == Some(DiagnosticSeverity::ERROR), super::sidebar::problem_line(d)))
+            .collect();
+        let (err_color, warn_color) = (app.palette.error, app.palette.warning);
+        resp.context_menu(|ui| {
+            problems_on_line(ui, &here, err_color, warn_color, &mut menu_choice, read_only);
+            editor_menu(ui, &mut menu_choice, read_only);
+        });
         // Holding ⌘ / Ctrl: underline the symbol under the mouse, like a
         // link, since clicking it goes to its definition.
         let link = resp.hover_pos().filter(|_| ui.input(|i| i.modifiers.command)).and_then(|p| {
@@ -1197,6 +1209,8 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
         app.go_to_definition();
     }
     match menu_choice {
+        Some(EditorMenu::QuickFix) => app.quick_fix(),
+        Some(EditorMenu::CopyProblems(text)) => ui.ctx().copy_text(text),
         Some(EditorMenu::Definition) => app.go_to_definition(),
         Some(EditorMenu::References) => app.find_references(),
         Some(EditorMenu::FindInFiles) => app.pending_commands.push(Command::ShowSearch),
@@ -1278,8 +1292,10 @@ fn cut(b: &mut Buffer) -> String {
 }
 
 /// What the editor's right-click menu asked for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum EditorMenu {
+    QuickFix,
+    CopyProblems(String),
     Definition,
     References,
     FindInFiles,
@@ -1288,6 +1304,37 @@ enum EditorMenu {
     Paste,
     SelectAll,
     Palette,
+}
+
+/// The errors and warnings on the line the menu was opened on, in full,
+/// then what can be done about them.
+fn problems_on_line(
+    ui: &mut egui::Ui,
+    here: &[(bool, String)],
+    error: Color32,
+    warning: Color32,
+    choice: &mut Option<EditorMenu>,
+    read_only: bool,
+) {
+    if here.is_empty() {
+        return;
+    }
+    for (is_error, text) in here {
+        let color = if *is_error { error } else { warning };
+        ui.add(egui::Label::new(egui::RichText::new(text).size(12.0).color(color)).wrap())
+            .on_hover_text("From the language server");
+    }
+    let fix = Command::QuickFix.shortcut_text(ui.ctx());
+    if ui.add_enabled(!read_only, egui::Button::new("Quick Fix…").shortcut_text(fix)).clicked() {
+        *choice = Some(EditorMenu::QuickFix);
+        ui.close();
+    }
+    let label = if here.len() == 1 { "Copy Message" } else { "Copy Messages" };
+    if ui.button(label).clicked() {
+        *choice = Some(EditorMenu::CopyProblems(here.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join("\n")));
+        ui.close();
+    }
+    ui.separator();
 }
 
 fn editor_menu(ui: &mut egui::Ui, choice: &mut Option<EditorMenu>, read_only: bool) {

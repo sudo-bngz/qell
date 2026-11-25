@@ -315,8 +315,8 @@ pub struct QellApp {
     /// A formatting request waiting on a language server, and whether the
     /// file is to be saved once its edits arrive.
     pending_format: Option<PendingFormat>,
-    /// Files language servers report errors in, and how many.
-    pub errors: HashMap<PathBuf, usize>,
+    /// Files language servers report errors in, and the errors.
+    pub errors: HashMap<PathBuf, Vec<Diagnostic>>,
     /// Which pane had the keyboard last frame, to notice coming back to
     /// the editor from the terminal.
     last_focus: Focus,
@@ -2044,6 +2044,23 @@ impl QellApp {
         Some(NavPoint { path: doc.buffer.path()?.to_path_buf(), pos: doc.buffer.cursor.head() })
     }
 
+    /// Open `path` at a problem a server reported in it, selected; with
+    /// `fix`, ask the server how to fix it there.
+    pub fn go_to_problem(&mut self, path: &Path, problem: &Diagnostic, fix: bool) {
+        let (s, e) = (problem.range.start, problem.range.end);
+        let end = if e.line == s.line { e.character } else { s.character + 1 };
+        self.open_location(path, s.line as usize, s.character as usize, end as usize);
+        let Some(doc) = self.docs.get_mut(self.active).filter(|d| d.buffer.path() == Some(path)) else { return };
+        // A file just opened has no diagnostics until its server sends them
+        // again; what it said before is what the fix is for.
+        if doc.diagnostics.is_empty() {
+            doc.diagnostics = self.errors.get(path).cloned().unwrap_or_default();
+        }
+        if fix {
+            self.quick_fix();
+        }
+    }
+
     /// Open `path` with `line:col..end_col` selected (0-based, chars),
     /// remembering where we were for Go Back.
     pub fn open_location(&mut self, path: &Path, line: usize, col: usize, end_col: usize) {
@@ -2693,11 +2710,12 @@ impl QellApp {
     fn set_diagnostics(&mut self, path: &Path, diagnostics: Vec<Diagnostic>) {
         // Kept for every file a server reports on, open or not, for the
         // file tree.
-        let errors = diagnostics.iter().filter(|d| d.severity == Some(qell_lsp::lsp_types::DiagnosticSeverity::ERROR)).count();
-        if errors > 0 {
-            self.errors.insert(path.to_path_buf(), errors);
-        } else {
+        let errors: Vec<Diagnostic> =
+            diagnostics.iter().filter(|d| d.severity == Some(qell_lsp::lsp_types::DiagnosticSeverity::ERROR)).cloned().collect();
+        if errors.is_empty() {
             self.errors.remove(path);
+        } else {
+            self.errors.insert(path.to_path_buf(), errors);
         }
         if let Some(d) = self.docs.iter_mut().find(|d| d.buffer.path() == Some(path)) {
             d.diagnostics = diagnostics;
