@@ -421,7 +421,7 @@ fn show_rows(
                     let name = rel.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                     let dir = rel.parent().map(|d| d.display().to_string()).unwrap_or_default();
                     let icon = app.config.file_icons.then(|| icons::for_file(rel));
-                    let mut job = super::sidebar::icon_label(icon, &name, text);
+                    let mut job = super::sidebar::icon_label(icon, &name, text, app.font_size);
                     if !dir.is_empty() {
                         job.append(
                             &dir,
