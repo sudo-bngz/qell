@@ -82,6 +82,9 @@ wasmtime = { version = "48", default-features = false, features = ["cranelift", 
 
 # ui
 egui = "0.33"
+# Markdown preview. 0.22 is the release for egui 0.33; no image loading
+# (it would pull egui_extras and its loaders in).
+egui_commonmark = { version = "0.22", default-features = false, features = ["pulldown_cmark"] }
 eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 rfd = "0.18"
 devicons = "0.6"

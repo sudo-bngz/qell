@@ -25,6 +25,8 @@ pub struct Document {
     /// Opened from the cluster view (describe, YAML, a manifest), so Esc
     /// and closing the tab go back to the list.
     pub from_cluster: bool,
+    /// A Markdown file shown rendered beside its source.
+    pub preview: bool,
     /// A picture, a video or a sound file: looked at, not edited.
     pub media: Option<MediaTab>,
     /// Bracket pairs, for colours and matching.
@@ -232,6 +234,7 @@ impl Document {
             line_marks: Vec::new(),
             label: None,
             from_cluster: false,
+            preview: false,
             media: None,
             brackets: Brackets::default(),
             indent_unit: 4,

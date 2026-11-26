@@ -52,6 +52,7 @@ pub enum Command {
     ToggleAws,
     ToggleTerminal,
     ShowProblems,
+    MarkdownPreview,
     NewTerminal,
     KillTerminal,
     NextTerminal,
@@ -114,6 +115,7 @@ impl Command {
         Command::ToggleAws,
         Command::ToggleTerminal,
         Command::ShowProblems,
+        Command::MarkdownPreview,
         Command::NewTerminal,
         Command::KillTerminal,
         Command::NextTerminal,
@@ -176,6 +178,7 @@ impl Command {
             Command::ToggleAws => "View: Toggle AWS",
             Command::ToggleTerminal => "View: Toggle Terminal",
             Command::ShowProblems => "View: Show Problems",
+            Command::MarkdownPreview => "Markdown: Toggle Preview",
             Command::NewTerminal => "Terminal: New Terminal",
             Command::KillTerminal => "Terminal: Kill Active Terminal",
             Command::NextTerminal => "Terminal: Focus Next Terminal",
@@ -261,6 +264,8 @@ impl Command {
             Command::ToggleAws => s(cmd_shift, Key::A),
             Command::ToggleTerminal => s(Modifiers::CTRL, Key::Backtick),
             Command::ShowProblems => s(cmd_shift, Key::M),
+            // Not ⇧V: that is Paste (as plain text) on every system.
+            Command::MarkdownPreview => s(cmd | Modifiers::ALT, Key::V),
             // ⌘T on macOS, as in its terminals. Elsewhere Ctrl+T belongs
             // to the shell (it swaps two characters), so the VS Code
             // chord stays.

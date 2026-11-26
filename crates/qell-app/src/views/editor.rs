@@ -42,9 +42,37 @@ pub fn show_central(app: &mut QellApp, ctx: &Context) {
         if app.config.vim_mode {
             show_vim_bar(app, ui);
         }
+        show_preview(app, ui);
         show_editor(app, ui);
     });
     show_completion_popup(app, ctx);
+}
+
+/// A Markdown file rendered on the right half, live, while it is edited
+/// on the left (Markdown: Toggle Preview).
+fn show_preview(app: &mut QellApp, ui: &mut egui::Ui) {
+    let Some(doc) = app.docs.get(app.active).filter(|d| d.preview && d.buffer.language() == Some("markdown")) else { return };
+    let text = doc.buffer.text();
+    let base = doc.buffer.path().and_then(|p| p.parent()).map(|p| p.to_path_buf());
+    let bg = app.palette.editor_bg;
+    let border = app.palette.border;
+    let id = egui::Id::new(("md_preview", doc.buffer.path().map(|p| p.to_path_buf())));
+    let half = ui.available_width() / 2.0;
+    egui::SidePanel::right("md_preview")
+        .resizable(true)
+        .default_width(half)
+        .width_range(200.0..=ui.available_width() - 200.0)
+        .frame(egui::Frame::new().fill(bg).stroke(Stroke::new(1.0_f32, border)).inner_margin(egui::Margin::symmetric(16, 10)))
+        .show_inside(ui, |ui| {
+            egui::ScrollArea::vertical().id_salt(id).auto_shrink([false, false]).show(ui, |ui| {
+                let mut viewer = egui_commonmark::CommonMarkViewer::new().max_image_width(Some(ui.available_width() as usize));
+                if let Some(base) = &base {
+                    // Relative links open beside the file, as on GitHub.
+                    viewer = viewer.default_implicit_uri_scheme(format!("file://{}/", base.display()));
+                }
+                viewer.show(ui, &mut app.markdown, &text);
+            });
+        });
 }
 
 /// This tab is a cluster object's manifest: a strip saying which one,

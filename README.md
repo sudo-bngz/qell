@@ -107,6 +107,10 @@ bottom, and language-server completion for the languages you actually use.
 - **Unsaved changes** — closing a tab (`Ctrl/⌘+W`, its ×, or *Close
   Others / to the Right / All*) or the window with unsaved changes asks
   first: *Save*, *Don't Save* or *Cancel* (Enter saves, Esc cancels).
+- **Markdown preview** — `Ctrl/⌘+Alt+V`, *View → Markdown Preview*, or
+  *◧ Preview* in the status bar renders a Markdown file beside its source,
+  updating as you type: headings, lists, tables, task lists, quotes, code
+  blocks (with a copy button) and links. Images are not loaded.
 - **Problems** — the bottom panel has a *PROBLEMS* tab beside the
   terminals (`Ctrl/⌘+Shift+M`, or click the error count in the status
   bar): every error and warning the language servers report, by file,
