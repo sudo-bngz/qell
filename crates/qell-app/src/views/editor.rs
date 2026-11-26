@@ -15,6 +15,7 @@ use qell_lsp::lsp_types::{CompletionItem, CompletionItemKind, CompletionTextEdit
 use crate::app::{Focus, QellApp};
 use crate::commands::Command;
 use crate::document::{DiskChange, LineMark};
+use qell_core::columns;
 
 const GUTTER_PAD: f32 = 12.0;
 const TEXT_PAD: f32 = 8.0;
@@ -606,8 +607,11 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                 if !vertical && !matches!(ev, Event::PointerMoved(_) | Event::MouseMoved(_)) {
                     doc.goal_col = None;
                 }
-                // Up/Down follow wrapped rows (when the layout is up to date).
-                let by_rows = doc.wrap.by_rows() && doc.wrap_is_current() && !app.completion.open;
+                // Up/Down follow wrapped rows (when the layout is up to date),
+                // and keep the screen column in tab-indented files (one
+                // cursor; several move line by line).
+                let tabbed = doc.indent_unit <= 1 && !doc.buffer.has_extra_cursors();
+                let by_rows = (doc.wrap.by_rows() || tabbed) && doc.wrap_is_current() && !app.completion.open;
                 if by_rows && vertical {
                     if let Event::Key { key, modifiers, .. } = ev {
                         let rows = match key {
@@ -616,7 +620,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                             Key::PageUp => -(visible_rows as isize),
                             _ => visible_rows as isize,
                         };
-                        doc.move_rows(rows, modifiers.shift);
+                        doc.move_rows(rows, modifiers.shift, tab_size);
                         doc.scroll_to_cursor = true;
                         close_completion = true;
                         consumed_events.push(idx);
@@ -887,7 +891,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
     // Word wrap: as many columns as fit beside the gutter (minus the
     // vertical scroll bar).
     let wrap_cols = if word_wrap { ((ui.available_width() - text_x0 - 14.0) / char_width).floor().max(1.0) as usize } else { 0 };
-    app.docs[doc_idx].update_wrap(wrap_cols);
+    app.docs[doc_idx].update_wrap(wrap_cols, tab_size);
     let row_total = app.docs[doc_idx].wrap.row_count();
 
     ui.spacing_mut().item_spacing.y = 0.0;
@@ -916,7 +920,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
         let content_w = if wl.is_wrapped() {
             ui.available_width()
         } else {
-            let max_cols = doc.buffer.rope().lines().map(|l| l.len_chars()).max().unwrap_or(0) as f32;
+            let max_cols = doc.max_display_cols(tab_size) as f32;
             (text_x0 + (max_cols + 4.0) * char_width).max(ui.available_width())
         };
         let origin = ui.cursor().min;
@@ -929,11 +933,18 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
         let content_top = origin.y - range.start as f32 * row_height;
 
         // Mouse → cursor.
-        let pos_at = |b: &Buffer, p: Pos2| -> Position {
+        // Text position under a point: the nearest gap between chars
+        // (`round`, for the cursor) or the char under it.
+        let point_to = |b: &Buffer, p: Pos2, round: bool| -> Position {
             let row = ((p.y - content_top) / row_height).floor().max(0.0) as usize;
-            let x = ((p.x - (origin.x + text_x0)) / char_width + 0.5).floor().max(0.0) as usize;
-            wl.position_at(row.min(row_total.saturating_sub(1)), x, |l| b.line_len(l))
+            let row = row.min(row_total.saturating_sub(1));
+            let vr = wl.row(row);
+            let cols = columns::display_cols(&b.line(vr.line), tab_size);
+            let x = (p.x - (origin.x + text_x0)) / char_width - vr.indent as f32;
+            let col = columns::col_at(&cols, vr.start, x.max(0.0), round);
+            wl.position_at(row, vr.indent + col.saturating_sub(vr.start), |l| b.line_len(l))
         };
+        let pos_at = |b: &Buffer, p: Pos2| point_to(b, p, true);
         // The blame column: its commit on hover, its hash copied on click.
         let in_blame = |p: Pos2| blame_w > 0.0 && p.x < origin.x + blame_w;
         let on_blame = resp.clicked() && resp.interact_pointer_pos().is_some_and(in_blame);
@@ -981,7 +992,8 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                 } else if doc.folds.contains(&line) {
                     let len = doc.buffer.line_len(line);
                     let last = wl.rows_of_line(line).end.saturating_sub(1);
-                    let pill = origin.x + text_x0 + wl.screen_col(last, len) as f32 * char_width + char_width;
+                    let cols = columns::display_cols(&doc.buffer.line(line), tab_size);
+                    let pill = origin.x + text_x0 + row_x(&cols, wl.row(last), len) as f32 * char_width + char_width;
                     if wl.row_of(Position::new(line, len)) == row && p.x >= pill && p.x <= pill + 3.0 * char_width {
                         doc.set_fold(line, false);
                         on_fold = true;
@@ -1068,11 +1080,10 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
         // link, since clicking it goes to its definition.
         let link = resp.hover_pos().filter(|_| ui.input(|i| i.modifiers.command)).and_then(|p| {
             let vrow = ((p.y - content_top) / row_height).floor().max(0.0) as usize;
-            let x = ((p.x - (origin.x + text_x0)) / char_width).floor().max(0.0) as usize;
             if vrow >= row_total {
                 return None;
             }
-            let Position { line: row, col } = wl.position_at(vrow, x, |l| doc.buffer.line_len(l));
+            let Position { line: row, col } = point_to(&doc.buffer, p, false);
             let line = doc.buffer.line(row);
             let terraform = doc.buffer.language() == Some("terraform");
             // Only when the mouse is on the word itself, not after it.
@@ -1095,8 +1106,13 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
         // Bracket pair at the cursor, highlighted with a box.
         let cursor_pair = if cursor.selection.is_empty() { doc.brackets.pair_at(head.line, head.col) } else { None };
         // Indent guides: the block around the cursor gets the bright one.
-        let line_indent = |r: usize| indent_of(&doc.buffer.line(r));
-        let unit = doc.indent_unit.max(1);
+        // Indentation in screen columns, so guides sit under tabs too.
+        let line_indent = |r: usize| {
+            let line = doc.buffer.line(r);
+            indent_of(&line).map(|n| columns::disp(&columns::display_cols(&line, tab_size), n))
+        };
+        // Tab-indented files: a guide per tab stop.
+        let unit = if doc.indent_unit <= 1 { tab_size.max(1) } else { doc.indent_unit };
         let active = if indent_guides { active_guide(&line_indent, line_count, head.line, unit) } else { None };
 
         let inline_problems = app.config.inline_problems;
@@ -1110,7 +1126,8 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
             let seg_end = vr.end.min(line_chars);
             let last_seg = vr.end >= line_chars;
             let in_seg = |c: usize| c >= vr.start && (c < seg_end || last_seg);
-            let xcol = |c: usize| origin.x + text_x0 + (vr.indent + c.saturating_sub(vr.start)) as f32 * char_width;
+            let cols = columns::display_cols(&doc.buffer.line(row), tab_size);
+            let xcol = |c: usize| origin.x + text_x0 + row_x(&cols, vr, c) as f32 * char_width;
             // Clip a column range of the line to this row ([s, e), the
             // last row keeping anything past the end).
             let clip = |c0: usize, c1: usize| {
@@ -1309,6 +1326,8 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
             if at < be {
                 append_recolored(&mut job, &line_text, at, be, &plain, &recolor);
             }
+            // Tabs drawn as the spaces up to their tab stop.
+            let job = expand_job_tabs(job, columns::disp(&cols, vr.start), tab_size);
             let galley = ui.fonts_mut(|f| f.layout_job(job));
             painter.galley(Pos2::new(xcol(vr.start), y + 1.0), galley, palette_text);
 
@@ -1415,7 +1434,8 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
         if doc.scroll_to_cursor && !inactive {
             doc.scroll_to_cursor = false;
             let hrow = wl.row_of(head);
-            let x = origin.x + text_x0 + wl.screen_col(hrow, head.col) as f32 * char_width;
+            let cols = columns::display_cols(&doc.buffer.line(head.line), tab_size);
+            let x = origin.x + text_x0 + row_x(&cols, wl.row(hrow), head.col) as f32 * char_width;
             let y = content_top + hrow as f32 * row_height;
             let target = Rect::from_min_size(
                 Pos2::new(x - char_width * 2.0, y - row_height),
@@ -1693,6 +1713,32 @@ fn date(secs: i64) -> String {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
     format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// Screen column, from the left of the text area, of char `col` drawn on
+/// row `vr` (`cols`: its line's `display_cols`).
+fn row_x(cols: &[usize], vr: qell_core::wrap::VisualRow, col: usize) -> usize {
+    vr.indent + columns::disp(cols, col).saturating_sub(columns::disp(cols, vr.start))
+}
+
+/// A row's text with each tab turned into the spaces up to its tab stop,
+/// keeping each section's format (egui draws a tab as four spaces wherever
+/// it is).
+fn expand_job_tabs(job: LayoutJob, start: usize, tab: usize) -> LayoutJob {
+    if !job.text.contains('\t') {
+        return job;
+    }
+    let mut out = LayoutJob { sections: Vec::with_capacity(job.sections.len()), text: String::new(), ..job.clone() };
+    let mut x = start;
+    for s in &job.sections {
+        let part = &job.text[s.byte_range.clone()];
+        let expanded = columns::expand_tabs(part, x, tab);
+        x += expanded.chars().count();
+        let begin = out.text.len();
+        out.text.push_str(&expanded);
+        out.sections.push(egui::text::LayoutSection { byte_range: begin..out.text.len(), ..s.clone() });
+    }
+    out
 }
 
 fn copy_text(b: &Buffer) -> String {
