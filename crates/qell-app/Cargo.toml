@@ -20,6 +20,7 @@ toml.workspace = true
 toml_edit.workspace = true
 dirs.workspace = true
 egui.workspace = true
+egui_commonmark.workspace = true
 eframe.workspace = true
 rfd.workspace = true
 devicons.workspace = true

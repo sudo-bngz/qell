@@ -138,6 +138,13 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                         }
                     }
                     ui.label(small(lang_name.to_string()));
+                    if lang_id == "markdown" {
+                        let label = if doc.preview { "◧ Hide Preview" } else { "◧ Preview" };
+                        let tip = format!("Markdown: Toggle Preview ({})", crate::commands::Command::MarkdownPreview.shortcut_text(ui.ctx()));
+                        if ui.add(egui::Label::new(small(label.to_string())).sense(egui::Sense::click())).on_hover_text(tip).clicked() {
+                            app.pending_commands.push(crate::commands::Command::MarkdownPreview);
+                        }
+                    }
                     let extra = doc.buffer.extra_cursors().len();
                     if extra > 0 {
                         ui.label(small(format!("{} cursors", extra + 1)));

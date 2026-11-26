@@ -338,6 +338,8 @@ pub struct QellApp {
     pub problems: HashMap<PathBuf, Vec<Diagnostic>>,
     /// The bottom panel shows Problems rather than a terminal.
     pub problems_open: bool,
+    /// What the Markdown preview keeps between frames (scroll, layout).
+    pub markdown: egui_commonmark::CommonMarkCache,
     /// Which pane had the keyboard last frame, to notice coming back to
     /// the editor from the terminal.
     last_focus: Focus,
@@ -453,6 +455,7 @@ impl QellApp {
             errors: HashMap::new(),
             problems: HashMap::new(),
             problems_open: false,
+            markdown: egui_commonmark::CommonMarkCache::default(),
             last_focus: Focus::Editor,
             k8s: views::k8s::K8sState::default(),
             aws: views::aws::AwsState::default(),
@@ -2536,6 +2539,10 @@ impl QellApp {
             },
             // The panel's Problems tab; again hides the panel, like the
             // terminal's own toggle.
+            Command::MarkdownPreview => match self.docs.get_mut(self.active) {
+                Some(doc) if doc.buffer.language() == Some("markdown") => doc.preview = !doc.preview,
+                _ => self.notify("The preview is for Markdown files."),
+            },
             Command::ShowProblems => {
                 if self.show_terminal && self.problems_open {
                     self.show_terminal = false;
