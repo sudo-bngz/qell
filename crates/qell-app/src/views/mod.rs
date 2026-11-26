@@ -18,6 +18,7 @@ pub mod settings;
 pub mod sidebar;
 pub mod status;
 pub mod terminal;
+pub mod tests;
 
 /// A curly underline from `x0` to `x1` along `y`, the way errors are
 /// marked: in the editor under the faulty code, in the file tree under

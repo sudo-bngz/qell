@@ -1039,6 +1039,17 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
         shade
     });
     let now = std::time::SystemTime::now();
+    // Tests: a ▶ (or the last result) beside each, left of the numbers.
+    let doc_path = app.docs[doc_idx].buffer.path().map(std::path::Path::to_path_buf);
+    let test_marks: Vec<(usize, String, Option<qell_core::testing::Status>)> =
+        match doc_path.as_ref().and_then(|p| app.test_runner(p).map(|r| (p.clone(), r))) {
+            Some((path, runner)) => {
+                app.docs[doc_idx].update_tests(runner);
+                app.docs[doc_idx].tests.iter().map(|t| (t.line, t.label.clone(), app.tests.status(&path, &t.label))).collect()
+            }
+            None => Vec::new(),
+        };
+    let mut test_click: Option<usize> = None;
     let gutter_w = blame_w + digits as f32 * char_width + GUTTER_PAD * 2.0;
     let text_x0 = gutter_w + FOLD_W + TEXT_PAD;
 
@@ -1048,6 +1059,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
     let palette_cur_line = app.palette.current_line;
     let palette_cursor = app.palette.cursor;
     let palette_err = app.palette.error;
+    let app_accent = app.palette.accent;
     let palette_warn = app.palette.warning;
     let token_colors: Vec<(qell_core::TokenKind, Color32)> =
         qell_core::TokenKind::ALL.iter().copied().map(|k| (k, app.palette.token(k))).collect();
@@ -1156,6 +1168,35 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
             wl.position_at(row, vr.indent + col.saturating_sub(vr.start), |l| b.line_len(l))
         };
         let pos_at = |b: &Buffer, p: Pos2| point_to(b, p, true);
+        // The test marks in the gutter: hovered one, and a click runs it.
+        let test_at = |p: Pos2| -> Option<usize> {
+            if test_marks.is_empty() || p.x < origin.x + blame_w || p.x >= origin.x + blame_w + GUTTER_PAD + 2.0 {
+                return None;
+            }
+            let row = ((p.y - content_top) / row_height).floor().max(0.0) as usize;
+            let vr = wl.row(row.min(row_total.saturating_sub(1)));
+            (vr.start == 0).then_some(vr.line).filter(|l| test_marks.iter().any(|(tl, _, _)| tl == l))
+        };
+        let hovered_test = resp.hover_pos().and_then(test_at);
+        if let Some(line) = hovered_test {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            if let Some((_, label, status)) = test_marks.iter().find(|(l, _, _)| *l == line) {
+                let state = match status {
+                    Some(qell_core::testing::Status::Passed) => " (passed last time)",
+                    Some(qell_core::testing::Status::Failed) => " (failed last time)",
+                    Some(qell_core::testing::Status::Running) => " (running)",
+                    _ => "",
+                };
+                egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), id.with("test-tip"), egui::PopupAnchor::Pointer)
+                    .gap(12.0)
+                    .show(|ui| ui.add(egui::Label::new(format!("Run {label}{state}")).wrap_mode(egui::TextWrapMode::Extend)));
+            }
+        }
+        let on_test = resp.clicked() && resp.interact_pointer_pos().and_then(test_at).is_some();
+        if on_test {
+            test_click = resp.interact_pointer_pos().and_then(test_at);
+            clicked_editor = true;
+        }
         // Merge conflicts: the actions after each `<<<<<<<` line, where
         // they are on screen.
         let conflicts = doc.conflicts().to_vec();
@@ -1246,7 +1287,8 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                 }
             }
         }
-        if !on_mark && !on_blame && !on_fold && !on_sticky && !on_conflict && (resp.clicked() || resp.drag_started()) {
+        if !on_mark && !on_blame && !on_fold && !on_sticky && !on_conflict && !on_test && (resp.clicked() || resp.drag_started())
+        {
             clicked_editor = true;
             if let Some(p) = resp.interact_pointer_pos() {
                 let (shift, alt) = ui.input(|i| (i.modifiers.shift, i.modifiers.alt));
@@ -1508,6 +1550,27 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                 let pill = Rect::from_min_size(Pos2::new(x, y + 2.0), Vec2::new(3.0 * char_width, row_height - 4.0));
                 painter.rect_filled(pill, 3.0, palette_sel);
                 painter.text(pill.center(), Align2::CENTER_CENTER, "⋯", font.clone(), palette_text);
+            }
+
+            // A test: ▶ to run it, or how it went last time.
+            if vr.start == 0 {
+                if let Some((_, _, status)) = test_marks.iter().find(|(l, _, _)| *l == row) {
+                    use qell_core::testing::Status;
+                    let hot = hovered_test == Some(row);
+                    let (mark, color) = match status {
+                        Some(Status::Passed) if !hot => ("✓", super::tests::PASS),
+                        Some(Status::Failed) if !hot => ("✗", palette_err),
+                        Some(Status::Running) => ("◌", app_accent),
+                        _ => ("▶", if hot { palette_text } else { palette_gutter }),
+                    };
+                    painter.text(
+                        Pos2::new(origin.x + blame_w + 7.0, y + row_height / 2.0),
+                        Align2::CENTER_CENTER,
+                        mark,
+                        font_small.clone(),
+                        color,
+                    );
+                }
             }
 
             // Gutter: the number on a line's first row only.
@@ -1776,6 +1839,9 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
     }
     if let Some(p) = cursor_screen.filter(|_| !inactive) {
         app.completion.anchor = p;
+    }
+    if let Some(line) = test_click {
+        app.run_test_at_line(line);
     }
     if let Some((i, choice)) = conflict_action {
         app.resolve_conflict(i, choice);

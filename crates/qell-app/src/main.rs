@@ -19,6 +19,7 @@ mod preview;
 mod recent;
 mod session;
 mod snippet;
+mod testrun;
 mod theme;
 mod views;
 mod vim;

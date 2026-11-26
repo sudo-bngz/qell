@@ -16,6 +16,7 @@ pub mod history;
 pub mod position;
 pub mod structure;
 pub mod syntax;
+pub mod testing;
 pub mod wrap;
 
 pub use buffer::Buffer;

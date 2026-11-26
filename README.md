@@ -79,6 +79,18 @@ bottom, and language-server completion for the languages you actually use.
   for the commit's message and date; click to copy its hash. It follows
   your edits (unsaved lines show as *not committed*) and refreshes after a
   commit.
+- **Tests** — a ▶ beside every test in a test file: Go `TestX` /
+  `BenchmarkX` (`*_test.go`), Rust `#[test]` (and `#[tokio::test]`),
+  Jest or Vitest `it` / `test` / `describe` (`*.test.*`, `*.spec.*`; Vitest
+  when package.json mentions it), pytest `test_` functions and `Test`
+  classes. Click it to run that test; *Test: Run Tests in File*, *Run Test
+  at Cursor* (`Ctrl/⌘+Alt+T`) and *Run Last Again* in the palette. The
+  runner's own command (`go test -run '^TestSub$'`, `cargo test --exact`,
+  `npx vitest run -t`, `pytest file::test`) runs in a terminal tab, so you
+  see its real output, and the tab stays as a shell there afterwards. The
+  ▶ turns into ✓ or ✗; the **Tests** tab beside Problems lists the results,
+  failures first with their message, a click away from the failing line.
+  The file is saved first; nothing ever runs on its own.
 - **Integrated terminals** — the Alacritty terminal core in a panel
   (`` Ctrl+` ``), with 256/true colour, scrollback and application-cursor mode.
   Run several shells as tabs: `` Ctrl+Shift+` `` (`⌘T` on macOS) opens a new one,

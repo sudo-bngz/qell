@@ -44,6 +44,10 @@ pub struct Document {
     changes_key: Option<i32>,
     /// Who last changed each line, shown beside the line numbers.
     pub blame: BlameState,
+    /// The tests the file defines (a test file), and the version they were
+    /// found in.
+    pub tests: Vec<qell_core::testing::TestFn>,
+    tests_key: Option<i32>,
     /// The language server's inlay hints, sorted by position.
     pub inlays: Vec<crate::hints::Inlay>,
     /// (version, line count) the hints are placed for, to move them with
@@ -277,6 +281,8 @@ impl Document {
             changes: Vec::new(),
             changes_key: None,
             blame: BlameState::default(),
+            tests: Vec::new(),
+            tests_key: None,
             inlays: Vec::new(),
             inlay_key: None,
             inlay_for: None,
@@ -647,6 +653,15 @@ impl Document {
         let pos = w.position_at(target, vr.indent + col.saturating_sub(vr.start), |l| b.line_len(l));
         self.buffer.set_cursor(pos, extend);
         self.goal_col = Some(x);
+    }
+
+    /// Find the tests again if the text changed.
+    pub fn update_tests(&mut self, runner: qell_core::testing::Runner) {
+        let version = self.buffer.version();
+        if self.tests_key != Some(version) {
+            self.tests = qell_core::testing::find(runner, &self.buffer.text());
+            self.tests_key = Some(version);
+        }
     }
 
     /// The merge conflicts in the text (found again when it changed).
