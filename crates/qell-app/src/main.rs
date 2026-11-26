@@ -11,6 +11,7 @@ mod config;
 mod document;
 mod format;
 mod gitops;
+mod hints;
 mod icons;
 mod native_menu;
 mod preview;

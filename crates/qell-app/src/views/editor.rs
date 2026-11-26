@@ -80,6 +80,60 @@ pub fn show_central(app: &mut QellApp, ctx: &Context) {
         ui.allocate_rect(full, Sense::hover());
     });
     show_completion_popup(app, ctx);
+    show_signature_popup(app, ctx);
+}
+
+/// The signature of the call being typed, above the cursor, the parameter
+/// being filled in standing out.
+fn show_signature_popup(app: &mut QellApp, ctx: &Context) {
+    let Some(help) = &app.signature.help else { return };
+    if app.focus != Focus::Editor {
+        return;
+    }
+    let Some((pre, param, post, active, count)) = crate::hints::split_label(help) else { return };
+    let sig = &help.signatures[active];
+    let font = app.palette.mono(app.font_size);
+    let row_h = ctx.fonts_mut(|f| f.row_height(&font)).ceil() + 2.0;
+    let (text, dim, accent) = (app.palette.text, app.palette.text_dim, app.palette.accent);
+    let doc_text = |d: &qell_lsp::lsp_types::Documentation| match d {
+        qell_lsp::lsp_types::Documentation::String(s) => s.clone(),
+        qell_lsp::lsp_types::Documentation::MarkupContent(m) => m.value.clone(),
+    };
+    // The parameter's own documentation, then the function's, a few lines.
+    let param_doc = sig
+        .active_parameter
+        .or(help.active_parameter)
+        .and_then(|p| sig.parameters.as_ref()?.get(p as usize)?.documentation.as_ref())
+        .map(doc_text);
+    let sig_doc = sig.documentation.as_ref().map(doc_text);
+    let short = |s: String| {
+        let lines: Vec<&str> = s.lines().filter(|l| !l.trim().is_empty() && !l.starts_with("```")).take(3).collect();
+        lines.join("\n")
+    };
+    let anchor = app.completion.anchor - Vec2::new(0.0, row_h + 4.0);
+    egui::Area::new(egui::Id::new("signature_popup"))
+        .order(egui::Order::Foreground)
+        .pivot(Align2::LEFT_BOTTOM)
+        .fixed_pos(anchor)
+        .interactable(false)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).inner_margin(egui::Margin::symmetric(8, 5)).show(ui, |ui| {
+                ui.set_max_width(640.0);
+                let mut job = LayoutJob::default();
+                let fmt = |color: Color32| TextFormat { font_id: font.clone(), color, ..Default::default() };
+                if count > 1 {
+                    job.append(&format!("{}/{}  ", active + 1, count), 0.0, fmt(dim));
+                }
+                job.append(&pre, 0.0, fmt(text));
+                job.append(&param, 0.0, TextFormat { underline: Stroke::new(1.0_f32, accent), color: accent, ..fmt(accent) });
+                job.append(&post, 0.0, fmt(text));
+                job.wrap.max_width = 640.0;
+                ui.label(job);
+                for d in [param_doc, sig_doc].into_iter().flatten().map(short).filter(|d| !d.is_empty()) {
+                    ui.label(egui::RichText::new(d).size(app.font_size * 0.85).color(dim));
+                }
+            });
+        });
 }
 
 /// One side of a split editor. The side without focus is drawn with its
@@ -633,6 +687,13 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
             t
         }
     };
+    // Characters that open the signature help (`(`, `,`…).
+    let sig_triggers: Vec<char> = {
+        let lang = app.docs.get(doc_idx).and_then(|d| d.buffer.language()).unwrap_or("");
+        app.lsp.signature_triggers(lang).iter().filter_map(|t| t.chars().next()).collect()
+    };
+    let mut want_signature = false;
+    let mut close_signature = false;
     let mut close_completion = false;
     let mut accept = false;
     let mut consumed_events = Vec::new();
@@ -745,6 +806,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                             doc.scroll_to_cursor = true;
                             let ident = t.chars().all(|c| c.is_alphanumeric() || c == '_');
                             let single = t.chars().next().filter(|_| t.chars().count() == 1);
+                            want_signature |= single.is_some_and(|c| sig_triggers.contains(&c));
                             if ident && (auto_complete || app.completion.open) {
                                 want_completion = true;
                             } else if let Some(c) = single.filter(|c| triggers.iter().any(|t| t.starts_with(*c))) {
@@ -900,6 +962,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                                 b.clear_extra_cursors();
                                 b.set_cursor(h, false);
                                 close_completion = true;
+                                close_signature = true;
                                 app.snippet = None;
                             }
                             _ => used = false,
@@ -941,6 +1004,11 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
         app.request_completion(trigger);
     } else if close_completion || many_cursors {
         app.completion.open = false;
+    }
+    if close_signature || many_cursors {
+        app.close_signature();
+    } else if want_signature {
+        app.request_signature(false);
     }
 
     // ---- layout + paint ---------------------------------------------------
@@ -1024,6 +1092,12 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
             (text_x0 + (max_cols + 4.0) * char_width).max(ui.available_width())
         };
         let origin = ui.cursor().min;
+        // Inlay hints, and each line's columns with them in.
+        let inlays = doc.inlays.clone();
+        let line_cols = |b: &Buffer, line: usize| -> Vec<usize> {
+            let widths: Vec<(usize, usize)> = hints_on(&inlays, line).iter().map(|h| (h.col, h.label.chars().count())).collect();
+            columns::display_cols_with(&b.line(line), tab_size, &widths)
+        };
         let rows_h = (range.end - range.start) as f32 * row_height;
         let (rect, resp) = ui.allocate_exact_size(Vec2::new(content_w, rows_h), Sense::click_and_drag());
         if has_focus_before {
@@ -1067,7 +1141,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
             let row = ((p.y - content_top) / row_height).floor().max(0.0) as usize;
             let row = row.min(row_total.saturating_sub(1));
             let vr = wl.row(row);
-            let cols = columns::display_cols(&b.line(vr.line), tab_size);
+            let cols = line_cols(b, vr.line);
             let x = (p.x - (origin.x + text_x0)) / char_width - vr.indent as f32;
             let col = columns::col_at(&cols, vr.start, x.max(0.0), round);
             wl.position_at(row, vr.indent + col.saturating_sub(vr.start), |l| b.line_len(l))
@@ -1121,7 +1195,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                 } else if doc.folds.contains(&line) {
                     let len = doc.buffer.line_len(line);
                     let last = wl.rows_of_line(line).end.saturating_sub(1);
-                    let cols = columns::display_cols(&doc.buffer.line(line), tab_size);
+                    let cols = line_cols(&doc.buffer, line);
                     let pill = origin.x + text_x0 + row_x(&cols, wl.row(last), len) as f32 * char_width + char_width;
                     if wl.row_of(Position::new(line, len)) == row && p.x >= pill && p.x <= pill + 3.0 * char_width {
                         doc.set_fold(line, false);
@@ -1255,7 +1329,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
             let seg_end = vr.end.min(line_chars);
             let last_seg = vr.end >= line_chars;
             let in_seg = |c: usize| c >= vr.start && (c < seg_end || last_seg);
-            let cols = columns::display_cols(&doc.buffer.line(row), tab_size);
+            let cols = line_cols(&doc.buffer, row);
             let xcol = |c: usize| origin.x + text_x0 + row_x(&cols, vr, c) as f32 * char_width;
             // Clip a column range of the line to this row ([s, e), the
             // last row keeping anything past the end).
@@ -1421,10 +1495,22 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
             // Text with highlighting.
             let line_text = doc.buffer.line(row);
             let job = line_job(&doc.buffer, &doc.brackets, &spans, row, vr.start, seg_end, &style);
+            // Inlay hints of this row, set in the text, dimmed. One right
+            // at the row's start is drawn before it.
+            let row_hints: Vec<(usize, &str)> = hints_on(&inlays, row)
+                .iter()
+                .filter(|h| h.col >= vr.start && (h.col < seg_end || (last_seg && h.col <= line_chars)))
+                .map(|h| (h.col - vr.start, h.label.as_str()))
+                .collect();
+            let lead: usize =
+                row_hints.iter().filter(|(at, _)| *at == 0 && vr.start < line_chars).map(|(_, l)| l.chars().count()).sum();
+            let hint_fmt =
+                TextFormat { font_id: font.clone(), color: palette_gutter, background: palette_cur_line, ..Default::default() };
+            let job = insert_hints(job, &row_hints, &hint_fmt);
             // Tabs drawn as the spaces up to their tab stop.
-            let job = expand_job_tabs(job, columns::disp(&cols, vr.start), tab_size);
+            let job = expand_job_tabs(job, columns::disp(&cols, vr.start) - lead, tab_size);
             let galley = ui.fonts_mut(|f| f.layout_job(job));
-            painter.galley(Pos2::new(xcol(vr.start), y + 1.0), galley, palette_text);
+            painter.galley(Pos2::new(xcol(vr.start) - lead as f32 * char_width, y + 1.0), galley, palette_text);
 
             // ⌘ / Ctrl held over a symbol: underline it as a link.
             if let Some((lrow, ls, le)) = link {
@@ -1555,7 +1641,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
         if doc.scroll_to_cursor && !inactive {
             doc.scroll_to_cursor = false;
             let hrow = wl.row_of(head);
-            let cols = columns::display_cols(&doc.buffer.line(head.line), tab_size);
+            let cols = line_cols(&doc.buffer, head.line);
             let x = origin.x + text_x0 + row_x(&cols, wl.row(hrow), head.col) as f32 * char_width;
             let y = content_top + hrow as f32 * row_height;
             let target = Rect::from_min_size(
@@ -1840,6 +1926,53 @@ fn date(secs: i64) -> String {
 /// row `vr` (`cols`: its line's `display_cols`).
 fn row_x(cols: &[usize], vr: qell_core::wrap::VisualRow, col: usize) -> usize {
     vr.indent + columns::disp(cols, col).saturating_sub(columns::disp(cols, vr.start))
+}
+
+/// The inlay hints on one line (they are sorted).
+fn hints_on(all: &[crate::hints::Inlay], line: usize) -> &[crate::hints::Inlay] {
+    let start = all.partition_point(|h| h.line < line);
+    let end = all.partition_point(|h| h.line <= line);
+    &all[start..end]
+}
+
+/// A row's text with the hints put in at their char offsets (from the
+/// row's start), in `fmt`.
+fn insert_hints(job: LayoutJob, hints: &[(usize, &str)], fmt: &TextFormat) -> LayoutJob {
+    if hints.is_empty() {
+        return job;
+    }
+    let mut out = LayoutJob { sections: Vec::new(), text: String::new(), ..job.clone() };
+    let mut pending = hints.iter().peekable();
+    let mut chars = 0usize;
+    let push = |out: &mut LayoutJob, text: &str, format: &TextFormat| {
+        if text.is_empty() {
+            return;
+        }
+        let begin = out.text.len();
+        out.text.push_str(text);
+        out.sections.push(egui::text::LayoutSection {
+            leading_space: 0.0,
+            byte_range: begin..out.text.len(),
+            format: format.clone(),
+        });
+    };
+    for s in &job.sections {
+        let part = &job.text[s.byte_range.clone()];
+        let mut from = 0;
+        for (i, (b, _)) in part.char_indices().enumerate() {
+            while let Some((_, label)) = pending.next_if(|(at, _)| *at <= chars + i) {
+                push(&mut out, &part[from..b], &s.format);
+                from = b;
+                push(&mut out, label, fmt);
+            }
+        }
+        push(&mut out, &part[from..], &s.format);
+        chars += part.chars().count();
+    }
+    for (_, label) in pending {
+        push(&mut out, label, fmt);
+    }
+    out
 }
 
 /// A row's text with each tab turned into the spaces up to its tab stop,

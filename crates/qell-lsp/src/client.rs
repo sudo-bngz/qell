@@ -76,6 +76,19 @@ pub enum Event {
         id: RequestId,
         hover: Option<Hover>,
     },
+    /// Answer to `textDocument/signatureHelp`: the call the cursor is in.
+    SignatureHelp {
+        id: RequestId,
+        help: Option<SignatureHelp>,
+    },
+    /// Answer to `textDocument/inlayHint`.
+    InlayHints {
+        id: RequestId,
+        hints: Vec<InlayHint>,
+    },
+    /// The server's hints changed (it finished loading the project):
+    /// ask for them again.
+    RefreshInlayHints,
     Diagnostics {
         uri: Uri,
         diagnostics: Vec<Diagnostic>,
@@ -106,6 +119,8 @@ enum Pending {
     Locations,
     Formatting,
     Hover,
+    SignatureHelp,
+    InlayHints,
     Rename,
     Symbols,
     CodeActions,
@@ -299,6 +314,16 @@ impl Client {
                         content_format: Some(vec![MarkupKind::PlainText, MarkupKind::Markdown]),
                         ..Default::default()
                     }),
+                    signature_help: Some(SignatureHelpClientCapabilities {
+                        signature_information: Some(SignatureInformationSettings {
+                            documentation_format: Some(vec![MarkupKind::PlainText, MarkupKind::Markdown]),
+                            parameter_information: Some(ParameterInformationSettings { label_offset_support: Some(true) }),
+                            active_parameter_support: Some(true),
+                        }),
+                        context_support: Some(true),
+                        ..Default::default()
+                    }),
+                    inlay_hint: Some(InlayHintClientCapabilities { dynamic_registration: None, resolve_support: None }),
                     publish_diagnostics: Some(PublishDiagnosticsClientCapabilities::default()),
                     synchronization: Some(TextDocumentSyncClientCapabilities { did_save: Some(true), ..Default::default() }),
                     ..Default::default()
@@ -306,6 +331,7 @@ impl Client {
                 ..Default::default()
             },
             client_info: Some(ClientInfo { name: "qell".into(), version: Some(env!("CARGO_PKG_VERSION").into()) }),
+            initialization_options: initialization_options(&self.language),
             ..Default::default()
         };
         self.request("initialize", params, Pending::Other);
@@ -564,6 +590,58 @@ impl Client {
         )
     }
 
+    /// Whether the server shows the parameters of the call being typed.
+    pub fn supports_signature_help(&self) -> bool {
+        self.capabilities.lock().unwrap().as_ref().is_some_and(|c| c.signature_help_provider.is_some())
+    }
+
+    /// Characters that open (and keep up to date) the signature help.
+    pub fn signature_triggers(&self) -> Vec<String> {
+        let caps = self.capabilities.lock().unwrap();
+        let Some(p) = caps.as_ref().and_then(|c| c.signature_help_provider.as_ref()) else { return Vec::new() };
+        let mut out = p.trigger_characters.clone().unwrap_or_default();
+        out.extend(p.retrigger_characters.clone().unwrap_or_default());
+        out
+    }
+
+    pub fn signature_help(&self, uri: Uri, position: Position, retrigger: bool) -> RequestId {
+        self.request(
+            "textDocument/signatureHelp",
+            SignatureHelpParams {
+                context: Some(SignatureHelpContext {
+                    trigger_kind: SignatureHelpTriggerKind::INVOKED,
+                    trigger_character: None,
+                    is_retrigger: retrigger,
+                    active_signature_help: None,
+                }),
+                text_document_position_params: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri },
+                    position,
+                },
+                work_done_progress_params: Default::default(),
+            },
+            Pending::SignatureHelp,
+        )
+    }
+
+    /// Whether the server gives inlay hints (types, parameter names).
+    pub fn supports_inlay_hints(&self) -> bool {
+        let caps = self.capabilities.lock().unwrap();
+        caps.as_ref().and_then(|c| c.inlay_hint_provider.as_ref()).is_some_and(|p| !matches!(p, OneOf::Left(false)))
+    }
+
+    pub fn inlay_hints(&self, uri: Uri, range: Range) -> RequestId {
+        self.request(
+            "textDocument/inlayHint",
+            InlayHintParams {
+                text_document: TextDocumentIdentifier { uri },
+                range,
+                work_done_progress_params: Default::default(),
+            },
+            Pending::InlayHints,
+        )
+    }
+
     pub fn shutdown(&mut self) {
         self.request("shutdown", Value::Null, Pending::Other);
         self.notify("exit", Value::Null);
@@ -652,6 +730,39 @@ fn is_missing_component(stderr: &str) -> bool {
     stderr.contains("Unknown binary") || stderr.contains("is not installed") || stderr.contains("not applicable")
 }
 
+/// Settings a server asks for by section (`workspace/configuration`):
+/// turn on the inlay hints of the servers that keep them off by default.
+fn section_settings(section: &str) -> Value {
+    match section {
+        "gopls" => json!({ "hints": {
+            "assignVariableTypes": true,
+            "compositeLiteralFields": true,
+            "constantValues": true,
+            "functionTypeParameters": true,
+            "parameterNames": true,
+            "rangeVariableTypes": true
+        } }),
+        _ => Value::Null,
+    }
+}
+
+/// Options sent with `initialize`, by language: inlay hints for the
+/// TypeScript server (off unless asked for) and gopls.
+fn initialization_options(language: &str) -> Option<Value> {
+    match language {
+        "typescript" | "javascript" | "tsx" | "jsx" | "typescriptreact" | "javascriptreact" => Some(json!({ "preferences": {
+            "includeInlayParameterNameHints": "all",
+            "includeInlayFunctionParameterTypeHints": true,
+            "includeInlayVariableTypeHints": true,
+            "includeInlayPropertyDeclarationTypeHints": true,
+            "includeInlayFunctionLikeReturnTypeHints": true,
+            "includeInlayEnumMemberValueHints": true
+        } })),
+        "go" => Some(section_settings("gopls")),
+        _ => None,
+    }
+}
+
 fn parse<T: DeserializeOwned>(v: Value) -> Option<T> {
     serde_json::from_value(v).ok()
 }
@@ -677,11 +788,21 @@ fn dispatch(
             }
             return;
         }
+        if method == "workspace/inlayHint/refresh" {
+            let _ = events.send(Event::RefreshInlayHints);
+        }
         let result = match method {
             "window/workDoneProgress/create" | "client/registerCapability" | "client/unregisterCapability" => Value::Null,
             "workspace/configuration" => {
-                let n = msg["params"]["items"].as_array().map(Vec::len).unwrap_or(1);
-                Value::Array(vec![Value::Null; n])
+                // Settings asked for by section; only inlay hints are given
+                // (gopls reads them this way), the rest keeps its defaults.
+                let items = msg["params"]["items"].as_array().cloned().unwrap_or_default();
+                let n = items.len().max(1);
+                Value::Array(
+                    (0..n)
+                        .map(|i| items.get(i).and_then(|it| it["section"].as_str()).map_or(Value::Null, section_settings))
+                        .collect(),
+                )
             }
             _ => Value::Null,
         };
@@ -774,6 +895,13 @@ fn dispatch(
         }
         Some(Pending::Hover) => {
             let _ = events.send(Event::Hover { id, hover: parse(result) });
+        }
+        Some(Pending::SignatureHelp) => {
+            let _ = events.send(Event::SignatureHelp { id, help: parse(result) });
+        }
+        Some(Pending::InlayHints) => {
+            let hints = parse::<Vec<InlayHint>>(result).unwrap_or_default();
+            let _ = events.send(Event::InlayHints { id, hints });
         }
         Some(Pending::Other) => {
             // The only "other" request we care about is initialize (id 1).

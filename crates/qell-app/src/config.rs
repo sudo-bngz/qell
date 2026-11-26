@@ -53,6 +53,8 @@ pub struct Config {
     pub outline: bool,
     /// Keep the lines opening the blocks scrolled into at the top of the editor.
     pub sticky_scroll: bool,
+    /// Show the language server's inlay hints (types, parameter names) in the code.
+    pub inlay_hints: bool,
     /// Scale of the whole interface (1.0 = 100%).
     pub ui_scale: f32,
     /// Show file-type icons in the file tree and tabs.
@@ -117,6 +119,7 @@ impl Default for Config {
             indent_guides: true,
             outline: true,
             sticky_scroll: true,
+            inlay_hints: true,
             ui_scale: 1.0,
             file_icons: true,
             git_status: true,
