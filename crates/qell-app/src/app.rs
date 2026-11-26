@@ -499,6 +499,9 @@ pub struct QellApp {
     pub problems: HashMap<PathBuf, Vec<Diagnostic>>,
     /// The bottom panel shows Problems rather than a terminal.
     pub problems_open: bool,
+    /// The bottom panel shows the Tests tab.
+    pub tests_open: bool,
+    pub tests: crate::testrun::Tests,
     /// What the Markdown preview keeps between frames (scroll, layout).
     pub markdown: egui_commonmark::CommonMarkCache,
     /// Which pane had the keyboard last frame, to notice coming back to
@@ -623,6 +626,8 @@ impl QellApp {
             errors: HashMap::new(),
             problems: HashMap::new(),
             problems_open: false,
+            tests_open: false,
+            tests: Default::default(),
             markdown: egui_commonmark::CommonMarkCache::default(),
             last_focus: Focus::Editor,
             k8s: views::k8s::K8sState::default(),
@@ -932,7 +937,7 @@ impl QellApp {
         self.write_active_or_ask(false);
     }
 
-    fn write_active_or_ask(&mut self, force_dialog: bool) {
+    pub fn write_active_or_ask(&mut self, force_dialog: bool) {
         let Some(doc) = self.docs.get_mut(self.active) else { return };
         if doc.buffer.path().is_none() || force_dialog {
             let Some(path) = rfd::FileDialog::new().set_directory(&self.root).save_file() else { return };
@@ -2949,12 +2954,30 @@ impl QellApp {
                 Some(doc) if doc.buffer.language() == Some("markdown") => doc.preview = !doc.preview,
                 _ => self.notify("The preview is for Markdown files."),
             },
+            Command::TestRunAtCursor => self.run_test_at_cursor(),
+            Command::TestRunFile => self.run_tests_in_file(),
+            Command::TestRerun => self.rerun_tests(),
+            Command::ShowTests => {
+                if self.tests.run.is_none() {
+                    self.notify("No tests have run yet: the ▶ beside a test, or Test: Run Tests in File.");
+                } else if self.show_terminal && self.tests_open {
+                    self.show_terminal = false;
+                } else {
+                    self.show_terminal = true;
+                    self.tests_open = true;
+                    self.problems_open = false;
+                }
+                if self.focus == Focus::Terminal {
+                    self.focus = self.focus_behind_terminal();
+                }
+            }
             Command::ShowProblems => {
                 if self.show_terminal && self.problems_open {
                     self.show_terminal = false;
                 } else {
                     self.show_terminal = true;
                     self.problems_open = true;
+                    self.tests_open = false;
                 }
                 if self.focus == Focus::Terminal {
                     self.focus = self.focus_behind_terminal();
@@ -2968,6 +2991,7 @@ impl QellApp {
             Command::NewTerminal => {
                 self.show_terminal = true;
                 self.problems_open = false;
+                self.tests_open = false;
                 self.new_terminal();
                 self.focus = Focus::Terminal;
             }
@@ -3313,16 +3337,29 @@ impl QellApp {
     /// so Ctrl+C or closing it is how you stop it — nothing of Qell's
     /// keeps running where you can't see it.
     pub fn run_in_terminal(&mut self, name: String, program: &str, args: Vec<String>) {
-        match Terminal::command(80, 24, Some(self.root.clone()), program, args) {
+        let root = self.root.clone();
+        self.run_in_terminal_at(name, root, program, args);
+    }
+
+    /// Run a program in a new terminal tab, from `cwd`, and show it.
+    /// Returns the tab's number.
+    pub fn run_in_terminal_at(&mut self, name: String, cwd: PathBuf, program: &str, args: Vec<String>) -> Option<usize> {
+        match Terminal::command(80, 24, Some(cwd), program, args) {
             Ok(term) => {
                 let number = self.next_terminal_number;
                 self.next_terminal_number += 1;
                 self.terminals.push(TerminalTab { term, number, name: Some(name) });
                 self.active_terminal = self.terminals.len() - 1;
                 self.show_terminal = true;
+                self.problems_open = false;
+                self.tests_open = false;
                 self.focus = Focus::Terminal;
+                Some(number)
             }
-            Err(e) => self.notify_error(format!("Cannot start {program}: {e:#}")),
+            Err(e) => {
+                self.notify_error(format!("Cannot start {program}: {e:#}"));
+                None
+            }
         }
     }
 
@@ -3577,6 +3614,7 @@ impl eframe::App for QellApp {
         // apply started from a manifest tab), so they are drained here
         // rather than while drawing the panel.
         views::k8s::update(self, ctx);
+        self.poll_tests(ctx);
         views::outline::update(self, ctx);
         self.update_hints(ctx);
         views::aws::update(self, ctx);
