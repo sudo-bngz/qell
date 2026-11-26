@@ -90,6 +90,22 @@ pub struct NavPoint {
     pub pos: Position,
 }
 
+/// What is being closed while something in it is unsaved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CloseAsk {
+    /// These tabs.
+    Tabs(Vec<usize>),
+    /// The window.
+    Quit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseAnswer {
+    Save,
+    Discard,
+    Cancel,
+}
+
 /// A formatting request still out, from the language server.
 struct PendingFormat {
     id: RequestId,
@@ -343,6 +359,10 @@ pub struct QellApp {
     pub tree_edit: Option<TreeEdit>,
     /// "Move to Trash?" asked for this path.
     pub confirm_delete: Option<PathBuf>,
+    /// Closing something with unsaved changes, waiting for an answer.
+    pub ask_close: Option<CloseAsk>,
+    /// The answer to closing the window with unsaved changes was yes.
+    quit_confirmed: bool,
     /// Go Back / Go Forward stacks.
     pub nav_back: Vec<NavPoint>,
     pub nav_forward: Vec<NavPoint>,
@@ -442,6 +462,8 @@ impl QellApp {
             hunk_menu: None,
             tree_edit: None,
             confirm_delete: None,
+            ask_close: None,
+            quit_confirmed: false,
             nav_back: Vec::new(),
             nav_forward: Vec::new(),
             snippet: None,
@@ -747,6 +769,67 @@ impl QellApp {
         }
         self.active = self.active.min(self.docs.len() - 1);
         self.completion.open = false;
+    }
+
+    /// Close these tabs, asking first when any has unsaved changes.
+    pub fn request_close(&mut self, tabs: Vec<usize>) {
+        if tabs.iter().any(|&i| self.unsaved(i)) {
+            self.ask_close = Some(CloseAsk::Tabs(tabs));
+        } else {
+            self.close_tabs_where(|j| tabs.contains(&j));
+        }
+    }
+
+    /// Whether tab `i` holds changes that closing would lose.
+    pub fn unsaved(&self, i: usize) -> bool {
+        self.docs.get(i).is_some_and(|d| d.buffer.is_dirty() && !d.read_only)
+    }
+
+    /// The tabs the pending question is about that have unsaved changes.
+    pub fn asked_unsaved(&self) -> Vec<usize> {
+        match &self.ask_close {
+            Some(CloseAsk::Tabs(tabs)) => tabs.iter().copied().filter(|&i| self.unsaved(i)).collect(),
+            Some(CloseAsk::Quit) => (0..self.docs.len()).filter(|&i| self.unsaved(i)).collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// The answer to "save before closing?".
+    pub fn answer_close(&mut self, answer: CloseAnswer, ctx: &Context) {
+        let Some(ask) = self.ask_close.take() else { return };
+        if answer == CloseAnswer::Cancel {
+            return;
+        }
+        if answer == CloseAnswer::Save {
+            // Written as they are: formatting answers later, and the tab
+            // is about to go. An untitled file asks where to save it.
+            let unsaved: Vec<usize> = (0..self.docs.len()).filter(|&i| self.unsaved(i)).collect();
+            for i in unsaved {
+                let asked = match &ask {
+                    CloseAsk::Tabs(tabs) => tabs.contains(&i),
+                    CloseAsk::Quit => true,
+                };
+                if asked {
+                    self.write_doc(i);
+                }
+            }
+        }
+        let discard = answer == CloseAnswer::Discard;
+        match ask {
+            CloseAsk::Tabs(tabs) => {
+                // A save that was cancelled keeps its tab open.
+                let close: Vec<usize> = tabs.into_iter().filter(|&i| discard || !self.unsaved(i)).collect();
+                self.close_tabs_where(|j| close.contains(&j));
+            }
+            CloseAsk::Quit => {
+                if discard || !self.any_unsaved() {
+                    self.quit_confirmed = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                } else {
+                    self.notify("Not closed: a file is still unsaved.");
+                }
+            }
+        }
     }
 
     /// Close the tabs whose index matches (tab menu: others, to the right,
@@ -1570,6 +1653,7 @@ impl QellApp {
             || self.find.typing
             || self.tree_edit.is_some()
             || self.confirm_delete.is_some()
+            || self.ask_close.is_some()
     }
 
     // ---- Vim commands that need the app ---------------------------------------
@@ -2313,7 +2397,7 @@ impl QellApp {
             }
             Command::Save => self.save_active(false),
             Command::SaveAs => self.save_active(true),
-            Command::CloseTab => self.close_active(),
+            Command::CloseTab => self.request_close(vec![self.active]),
             Command::NextTab => {
                 if !self.docs.is_empty() {
                     self.active = (self.active + 1) % self.docs.len();
@@ -2991,6 +3075,12 @@ impl QellApp {
 
 impl eframe::App for QellApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        // Closing the window (its button, ⌘Q, Quit) with unsaved changes
+        // waits for an answer.
+        if ctx.input(|i| i.viewport().close_requested()) && !self.quit_confirmed && self.any_unsaved() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.ask_close = Some(CloseAsk::Quit);
+        }
         self.notifications.retain(|n| n.at.elapsed() < Duration::from_secs(if n.is_error { 8 } else { 4 }));
         self.handle_native_menu(ctx);
         self.handle_lsp_events();
@@ -3019,6 +3109,7 @@ impl eframe::App for QellApp {
         views::palette::show(self, ctx);
         views::settings::show(self, ctx);
         views::sidebar::show_confirm_delete(self, ctx);
+        views::editor::show_ask_close(self, ctx);
         self.recent.save_if_dirty();
 
         for action in std::mem::take(&mut self.pending_vim) {
