@@ -54,6 +54,17 @@ bottom, and language-server completion for the languages you actually use.
   it changed, click a file to open its diff (read-only, inline, with
   syntax colours; `F7` / `Shift+F7` jump between changes). Right-click a
   commit to copy its hash or message.
+- **Branches** — click the branch in the status bar (or in Source
+  Control), or *Git: Switch Branch…*: local branches newest first, then
+  remote ones (a remote one is checked out as a local branch tracking it);
+  type a name that doesn't exist and *Create new branch* makes it where you
+  are. *Git: Create Branch…*, *Delete Branch…* and *Force Delete Branch…*
+  too. When git refuses (changes in the way, an unmerged branch), the
+  message says what to do instead.
+- **Stash** — *Git: Stash* (with an optional message), *Stash (Include
+  Untracked)*, *Pop Latest Stash*, and *Pop / Apply / Drop Stash…* to pick
+  one. Source Control lists each repository's stashes under *STASHES*, with
+  Apply, Pop and Drop, and a **+** to stash what you have.
 - **Git blame** — `Ctrl/⌘+Alt+B`, *View → Git Blame*, or the palette: a
   column beside the line numbers names the author and age of the commit
   that last changed each block of lines, newer commits brighter. Hover it

@@ -198,6 +198,36 @@ pub enum PaletteMode {
     Rename,
     /// Picking one of the server's quick fixes.
     CodeActions,
+    /// Picking a branch to switch to (or "create").
+    Branches,
+    /// Typing the name of a new branch.
+    NewBranch,
+    /// Picking a local branch to delete.
+    DeleteBranch {
+        force: bool,
+    },
+    /// Typing an (optional) message for a stash.
+    StashMessage {
+        untracked: bool,
+    },
+    /// Picking a stash to apply, pop or drop.
+    Stashes(StashAction),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StashAction {
+    Apply,
+    Pop,
+    Drop,
+}
+
+/// The repository a branch or stash command works on, and what it has.
+#[derive(Debug, Clone, Default)]
+pub struct GitPick {
+    /// Workspace-relative root of the repository ("" for the workspace).
+    pub repo: PathBuf,
+    pub branches: Vec<qell_git::refs::Branch>,
+    pub stashes: Vec<qell_git::refs::Stash>,
 }
 
 /// Command palette / quick open / go-to-line overlay.
@@ -409,6 +439,8 @@ pub struct QellApp {
     pending_action_resolve: Option<RequestId>,
     /// The symbol F2 is renaming, shown in the prompt.
     pub rename_symbol: String,
+    /// Branches or stashes being picked from in the palette.
+    pub git_pick: GitPick,
     /// Git's version of open files, fetched off the UI thread for the
     /// gutter's change marks.
     git_base_tx: std::sync::mpsc::Sender<(PathBuf, Option<String>)>,
@@ -543,6 +575,7 @@ impl QellApp {
             extractor: None,
             pending_action_resolve: None,
             rename_symbol: String::new(),
+            git_pick: GitPick::default(),
             git_base_tx,
             git_base_rx,
             blame_tx,
@@ -1163,6 +1196,24 @@ impl QellApp {
                         .map(|(h, s)| format!("{} {s}", h.rsplit(' ').next().unwrap_or("")))
                         .unwrap_or(first.to_string());
                     self.notify(format!("Committed {summary}"));
+                }
+                (
+                    kind @ (views::scm::JobKind::Switch
+                    | views::scm::JobKind::CreateBranch
+                    | views::scm::JobKind::DeleteBranch
+                    | views::scm::JobKind::Stash
+                    | views::scm::JobKind::Unstash),
+                    result,
+                ) => {
+                    // The stash list of that repository changed.
+                    self.scm.stashes.remove(&job.repo);
+                    match result {
+                        Ok(msg) => self.notify(msg),
+                        Err(e) => {
+                            log::warn!("git {kind:?} failed: {e}");
+                            self.notify_error(crate::gitops::explain(kind, &e));
+                        }
+                    }
                 }
                 (_, Ok(_)) => {}
                 (kind, Err(e)) => {
@@ -2568,6 +2619,8 @@ impl QellApp {
             // in the tree too.
             self.tree_cache.clear();
             self.git_status = st;
+            // A stash made or popped in the terminal shows up too.
+            self.scm.stashes.clear();
             // A commit, a checkout, staging…: what files are compared with
             // may have changed. Keep the marks until the new version is in.
             for d in &mut self.docs {
@@ -2763,6 +2816,16 @@ impl QellApp {
             }
             Command::ShowExplorer => self.show_sidebar_view(SidebarView::Explorer),
             Command::StageHunk => self.stage_hunk_at_cursor(),
+            Command::GitSwitchBranch => self.pick_git(PaletteMode::Branches),
+            Command::GitCreateBranch => self.pick_git(PaletteMode::NewBranch),
+            Command::GitDeleteBranch => self.pick_git(PaletteMode::DeleteBranch { force: false }),
+            Command::GitForceDeleteBranch => self.pick_git(PaletteMode::DeleteBranch { force: true }),
+            Command::GitStash => self.pick_git(PaletteMode::StashMessage { untracked: false }),
+            Command::GitStashUntracked => self.pick_git(PaletteMode::StashMessage { untracked: true }),
+            Command::GitStashPopLatest => self.pop_latest_stash(),
+            Command::GitStashPop => self.pick_git(PaletteMode::Stashes(StashAction::Pop)),
+            Command::GitStashApply => self.pick_git(PaletteMode::Stashes(StashAction::Apply)),
+            Command::GitStashDrop => self.pick_git(PaletteMode::Stashes(StashAction::Drop)),
             Command::RevertHunk => self.revert_hunk_at_cursor(),
             Command::ToggleBlame => match self.docs.get_mut(self.active) {
                 Some(doc) if doc.buffer.path().is_some() && doc.media.is_none() && doc.label.is_none() => {
@@ -2896,7 +2959,7 @@ impl QellApp {
         }
     }
 
-    fn open_palette(&mut self, mode: PaletteMode) {
+    pub fn open_palette(&mut self, mode: PaletteMode) {
         let p = &mut self.command_palette;
         p.open = true;
         p.mode = mode;

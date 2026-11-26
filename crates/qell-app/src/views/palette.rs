@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use egui::{Context, Key, Modifiers, Sense, Vec2};
 use qell_core::Position;
 
-use crate::app::{Focus, PaletteMode, QellApp};
+use crate::app::{Focus, PaletteMode, QellApp, StashAction};
 use crate::commands::{fuzzy_score, Command};
 
 /// Walk the workspace for quick open. Bounded so a huge monorepo doesn't
@@ -45,6 +45,11 @@ enum Choice {
     Command(Command),
     Plugin(String),
     File(PathBuf),
+    /// Index into `app.git_pick.branches`.
+    Branch(usize),
+    /// "Create new branch…" at the top of the branch list.
+    NewBranch,
+    Stash(usize),
 }
 
 pub fn show(app: &mut QellApp, ctx: &Context) {
@@ -116,7 +121,45 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                 }
             }
         }
-        PaletteMode::GoToLine | PaletteMode::Rename => {}
+        PaletteMode::Branches | PaletteMode::DeleteBranch { .. } => {
+            if mode == PaletteMode::Branches {
+                let label = if query.trim().is_empty() {
+                    "+ Create new branch…".to_string()
+                } else {
+                    format!("+ Create new branch \"{}\"", query.trim())
+                };
+                choices.push((label, String::new(), Choice::NewBranch));
+            }
+            let now = std::time::SystemTime::now();
+            for (i, b) in app.git_pick.branches.iter().enumerate() {
+                if fuzzy_score(&query, &b.name).is_none() {
+                    continue;
+                }
+                let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(b.time.max(0) as u64);
+                let mut hint = super::sidebar::ago(when, now);
+                if b.current {
+                    hint = format!("current · {hint}");
+                } else if b.remote {
+                    hint = format!("remote · {hint}");
+                } else if let Some(up) = &b.upstream {
+                    hint = format!("{up} · {hint}");
+                }
+                let mark = if b.current { "● " } else { "  " };
+                choices.push((format!("{mark}{}", b.name), hint, Choice::Branch(i)));
+            }
+        }
+        PaletteMode::Stashes(_) => {
+            let now = std::time::SystemTime::now();
+            for (i, s) in app.git_pick.stashes.iter().enumerate() {
+                let label = crate::gitops::short_stash(&s.message);
+                if fuzzy_score(&query, &label).is_none() {
+                    continue;
+                }
+                let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(s.time.max(0) as u64);
+                choices.push((label, format!("{} · {}", s.reference(), super::sidebar::ago(when, now)), Choice::Stash(i)));
+            }
+        }
+        PaletteMode::GoToLine | PaletteMode::Rename | PaletteMode::NewBranch | PaletteMode::StashMessage { .. } => {}
     }
     if choices.is_empty() {
         app.command_palette.selected = 0;
@@ -146,6 +189,14 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
         PaletteMode::Symbols => "Go to symbol in this file…",
         PaletteMode::Rename => "New name",
         PaletteMode::CodeActions => "Quick fix…",
+        PaletteMode::Branches => "Switch to branch… (or type a new name)",
+        PaletteMode::NewBranch => "New branch name",
+        PaletteMode::DeleteBranch { force: false } => "Delete branch…",
+        PaletteMode::DeleteBranch { force: true } => "Force delete branch (even unmerged)…",
+        PaletteMode::StashMessage { .. } => "Stash message (optional)",
+        PaletteMode::Stashes(StashAction::Apply) => "Apply stash…",
+        PaletteMode::Stashes(StashAction::Pop) => "Pop stash…",
+        PaletteMode::Stashes(StashAction::Drop) => "Drop stash…",
     };
     let text_dim = app.palette.text_dim;
     let screen = ctx.content_rect();
@@ -184,6 +235,15 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                 if mode == PaletteMode::Rename {
                     let hint = format!("Renaming {}, everywhere the language server finds it", app.rename_symbol);
                     ui.label(egui::RichText::new(hint).size(11.0).color(text_dim));
+                    return;
+                }
+                if mode == PaletteMode::NewBranch {
+                    ui.label(egui::RichText::new("Made from where you are, and switched to").size(11.0).color(text_dim));
+                    return;
+                }
+                if let PaletteMode::StashMessage { untracked } = mode {
+                    let what = if untracked { "Changes and new files" } else { "Changes to tracked files" };
+                    ui.label(egui::RichText::new(format!("{what} are put away; Enter to stash")).size(11.0).color(text_dim));
                     return;
                 }
                 egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
@@ -246,6 +306,18 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                 app.rename_to(&name);
                 close = true;
             }
+            PaletteMode::NewBranch => {
+                let name = app.command_palette.query.trim().to_string();
+                if !name.is_empty() {
+                    app.create_branch(&name);
+                    close = true;
+                }
+            }
+            PaletteMode::StashMessage { untracked } => {
+                let message = app.command_palette.query.clone();
+                app.stash(&message, untracked);
+                close = true;
+            }
             _ => chosen = chosen.or(Some(app.command_palette.selected)),
         }
     }
@@ -257,6 +329,25 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                 Choice::File(p) => app.open_file(p),
                 Choice::Action(i) => app.run_code_action(i),
                 Choice::Symbol(i) => app.go_to_symbol_row(i),
+                Choice::Branch(i) => match mode {
+                    PaletteMode::DeleteBranch { force } => app.delete_branch(i, force),
+                    _ => app.switch_branch(i),
+                },
+                Choice::NewBranch => {
+                    let name = app.command_palette.query.trim().to_string();
+                    if name.is_empty() {
+                        // Ask for the name: the palette stays, empty.
+                        app.command_palette.mode = PaletteMode::NewBranch;
+                        app.command_palette.selected = 0;
+                        return;
+                    }
+                    app.create_branch(&name);
+                }
+                Choice::Stash(i) => {
+                    if let PaletteMode::Stashes(action) = mode {
+                        app.stash_action(i, action);
+                    }
+                }
             }
         }
         close = true;

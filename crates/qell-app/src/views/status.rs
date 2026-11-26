@@ -46,8 +46,13 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                 ui.label(RichText::new("\u{e0a0}").monospace().size(12.0).color(palette_text_dim));
                 ui.add_space(-10.0);
                 let changed = ws.changed_files();
-                let resp = ui.label(small(label).color(palette_text_dim));
-                let mut tip = format!("{changed} changed file{}", if changed == 1 { "" } else { "s" });
+                let resp = ui
+                    .add(egui::Label::new(small(label).color(palette_text_dim)).sense(egui::Sense::click()))
+                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                if resp.clicked() {
+                    app.pending_commands.push(crate::commands::Command::GitSwitchBranch);
+                }
+                let mut tip = format!("{changed} changed file{}\nClick to switch branch", if changed == 1 { "" } else { "s" });
                 if repos > 1 {
                     tip.push_str(&format!(" in {repos} repositories"));
                 }
