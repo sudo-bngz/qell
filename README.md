@@ -122,6 +122,8 @@ bottom, and language-server completion for the languages you actually use.
   focused side (thin accent line on top; the other side's tab is
   underlined in grey). Click a side, or `Ctrl/⌘+1` / `Ctrl/⌘+2`, to move
   between them; drag the border to resize; `Ctrl/⌘+\` again joins them.
+  The same file on both sides keeps a cursor and selection per side, and
+  the split (sides, focus, width) comes back with the session.
 - **Markdown preview** — `Ctrl/⌘+Alt+V`, *View → Markdown Preview*, or
   *◧ Preview* in the status bar renders a Markdown file beside its source,
   updating as you type: headings, lists, tables, task lists, quotes, code
