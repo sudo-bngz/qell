@@ -258,11 +258,95 @@ pub struct Notification {
 /// Two editors side by side. The focused side always shows `active`, so
 /// everything that works on the current tab works on it; `other` is the
 /// tab on the side without focus. Changing sides swaps the two.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Split {
     pub other: usize,
     pub right_focused: bool,
+    /// Share of the width the left side takes.
+    pub ratio: f32,
+    /// The same tab on both sides: the other side's own cursors, kept
+    /// here while the focused side uses the tab's.
+    pub parked: Option<Parked>,
 }
+
+/// Cursors of the side without focus, and the text they were placed in
+/// (line count and version), to move them with edits made above them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Parked {
+    /// The main cursor last.
+    pub cursors: Vec<qell_core::Cursor>,
+    lines: usize,
+    version: i32,
+}
+
+impl Parked {
+    /// The cursors of a document as they are.
+    pub fn of(doc: &Document) -> Self {
+        let mut cursors = doc.buffer.extra_cursors().to_vec();
+        cursors.push(doc.buffer.cursor);
+        Self { cursors, lines: doc.buffer.line_count(), version: doc.buffer.version() }
+    }
+
+    /// Cursors at one place (a restored session).
+    pub fn at(doc: &Document, p: Position) -> Self {
+        let p = doc.buffer.clamp(p);
+        Self { cursors: vec![qell_core::Cursor::at(p)], lines: doc.buffer.line_count(), version: doc.buffer.version() }
+    }
+
+    /// Put these cursors on the document (kept inside its text).
+    pub fn apply(&self, doc: &mut Document) {
+        let b = &doc.buffer;
+        let cursors = self
+            .cursors
+            .iter()
+            .map(|c| {
+                let mut c = *c;
+                c.selection.anchor = b.clamp(c.selection.anchor);
+                c.selection.head = b.clamp(c.selection.head);
+                c
+            })
+            .collect();
+        doc.buffer.set_cursors(cursors);
+        doc.goal_col = None;
+    }
+
+    /// The text changed since: move the cursors below the edit (made where
+    /// the focused cursor is) by the lines it added or removed.
+    fn follow(&mut self, doc: &Document) {
+        let version = doc.buffer.version();
+        if version == self.version {
+            return;
+        }
+        let lines = doc.buffer.line_count();
+        let delta = lines as isize - self.lines as isize;
+        let focused = doc.buffer.cursor.head().line;
+        for c in &mut self.cursors {
+            for p in [&mut c.selection.anchor, &mut c.selection.head] {
+                p.line = shift_line(p.line, focused, delta);
+            }
+        }
+        self.lines = lines;
+        self.version = version;
+    }
+}
+
+/// Where a line of the other side goes after an edit that changed the line
+/// count by `delta`, the focused cursor now being on line `focused`: lines
+/// added end just above the cursor, lines removed were just below it.
+pub fn shift_line(line: usize, focused: usize, delta: isize) -> usize {
+    let n = delta.unsigned_abs();
+    if delta > 0 && line > focused.saturating_sub(n) {
+        line + n
+    } else if delta < 0 && line > focused {
+        line.saturating_sub(n).max(focused)
+    } else {
+        line
+    }
+}
+
+/// What changes the remembered session: the tabs, the one in front, and
+/// the split (other side's tab, which side has focus).
+type SessionKey = (Vec<PathBuf>, usize, Option<(usize, bool)>);
 
 pub struct QellApp {
     pub config: Config,
@@ -336,7 +420,7 @@ pub struct QellApp {
     /// The tabs of each workspace, reopened on the next start.
     session: crate::session::Store,
     /// Paths and active tab the session was last written for.
-    session_key: (Vec<PathBuf>, usize),
+    session_key: SessionKey,
     /// Files opened in each workspace, for the file tree's shortcuts.
     pub recent: crate::recent::Recent,
     /// Expand the tree down to this path and scroll to it.
@@ -465,7 +549,7 @@ impl QellApp {
             blame_rx,
             find: Default::default(),
             session: crate::session::Store::load(),
-            session_key: (Vec::new(), 0),
+            session_key: (Vec::new(), 0, None),
             recent: crate::recent::Recent::load(),
             reveal: None,
             vim: crate::vim::Vim::new(),
@@ -535,9 +619,10 @@ impl QellApp {
     // ---- session ---------------------------------------------------------
 
     /// The tabs to remember: saved files, in order, and which was in front.
-    fn session_state(&self) -> ((Vec<PathBuf>, usize), crate::session::Workspace) {
+    fn session_state(&self) -> (SessionKey, crate::session::Workspace) {
         let mut ws = crate::session::Workspace::default();
         let mut paths = Vec::new();
+        let mut other_tab = None;
         for (i, doc) in self.docs.iter().enumerate() {
             // Untitled tabs and read-only diffs have nothing to reopen,
             // and a manifest is a scratch copy of something in a cluster:
@@ -546,11 +631,24 @@ impl QellApp {
             if i == self.active {
                 ws.active = ws.tabs.len();
             }
+            if self.split.as_ref().is_some_and(|s| s.other == i) {
+                other_tab = Some(ws.tabs.len());
+            }
             let head = doc.buffer.cursor.head();
             ws.tabs.push(crate::session::Tab { path: path.to_path_buf(), line: head.line, col: head.col });
             paths.push(path.to_path_buf());
         }
-        ((paths, ws.active), ws)
+        // The split, when the other side shows a tab that is remembered.
+        if let (Some(s), Some(other)) = (&self.split, other_tab) {
+            let cursor = s.parked.as_ref().and_then(|p| p.cursors.last()).map(|c| {
+                let h = c.head();
+                (h.line, h.col)
+            });
+            ws.split =
+                Some(crate::session::Split { other, right_focused: s.right_focused, ratio: s.ratio, other_cursor: cursor });
+        }
+        let split_key = ws.split.as_ref().map(|s| (s.other, s.right_focused));
+        ((paths, ws.active, split_key), ws)
     }
 
     /// Write the session (tabs opened or closed, or Qell closing).
@@ -593,19 +691,34 @@ impl QellApp {
                 self.show_terminal = ws.panel;
             }
         }
+        // Tab of the session → its document, for the tabs that opened.
+        let mut opened = Vec::with_capacity(ws.tabs.len());
         for tab in &ws.tabs {
             match Document::open(tab.path.clone()) {
                 Ok(mut doc) => {
                     let p = doc.buffer.clamp(Position::new(tab.line, tab.col));
                     doc.buffer.set_cursor(p, false);
                     doc.scroll_to_cursor = true;
+                    opened.push(Some(self.docs.len()));
                     self.docs.push(doc);
                 }
-                Err(e) => log::warn!("cannot reopen {}: {e}", tab.path.display()),
+                Err(e) => {
+                    log::warn!("cannot reopen {}: {e}", tab.path.display());
+                    opened.push(None);
+                }
             }
         }
         if !self.docs.is_empty() {
-            self.active = ws.active.min(self.docs.len() - 1);
+            self.active = opened.get(ws.active).copied().flatten().unwrap_or(ws.active).min(self.docs.len() - 1);
+        }
+        if let Some(s) = &ws.split {
+            if let Some(other) = opened.get(s.other).copied().flatten() {
+                let parked = s
+                    .other_cursor
+                    .filter(|_| other == self.active)
+                    .map(|(line, col)| Parked::at(&self.docs[other], Position::new(line, col)));
+                self.split = Some(Split { other, right_focused: s.right_focused, ratio: s.ratio, parked });
+            }
         }
         self.docs.len()
     }
@@ -812,7 +925,7 @@ impl QellApp {
     pub fn toggle_split(&mut self) {
         self.split = match self.split {
             Some(_) => None,
-            None => Some(Split { other: self.active, right_focused: true }),
+            None => Some(Split { other: self.active, right_focused: true, ratio: 0.5, parked: None }),
         };
         self.completion.open = false;
         self.show_editor_area();
@@ -821,8 +934,18 @@ impl QellApp {
 
     /// Move the focus to the left or right editor (when split).
     pub fn focus_side(&mut self, right: bool) {
+        self.fix_split();
         let Some(s) = &mut self.split else { return };
         if s.right_focused != right {
+            // The same tab on both sides: each side takes back its cursors.
+            if s.other == self.active {
+                if let Some(doc) = self.docs.get_mut(self.active) {
+                    let mine = Parked::of(doc);
+                    if let Some(theirs) = s.parked.replace(mine) {
+                        theirs.apply(doc);
+                    }
+                }
+            }
             std::mem::swap(&mut self.active, &mut s.other);
             s.right_focused = right;
             self.completion.open = false;
@@ -830,12 +953,29 @@ impl QellApp {
         self.focus = Focus::Editor;
     }
 
-    /// Keep the split pointing at a tab that exists.
+    /// Keep the split pointing at a tab that exists, and each side's
+    /// cursors its own: parked while both sides show the same tab, given
+    /// back to that tab when the focused side moves to another.
     pub fn fix_split(&mut self) {
-        if let Some(s) = &mut self.split {
-            if s.other >= self.docs.len() {
-                s.other = self.active;
+        let Some(s) = &mut self.split else { return };
+        if s.other >= self.docs.len() {
+            s.other = self.active;
+            s.parked = None;
+        }
+        let same = s.other == self.active;
+        match (s.parked.as_mut(), same) {
+            (None, true) => s.parked = self.docs.get(self.active).map(Parked::of),
+            (Some(p), true) => {
+                if let Some(doc) = self.docs.get(self.active) {
+                    p.follow(doc);
+                }
             }
+            (Some(_), false) => {
+                if let (Some(p), Some(doc)) = (s.parked.take(), self.docs.get_mut(s.other)) {
+                    p.apply(doc);
+                }
+            }
+            (None, false) => {}
         }
     }
 
@@ -855,7 +995,10 @@ impl QellApp {
             match s.other.cmp(&removed) {
                 std::cmp::Ordering::Greater => s.other -= 1,
                 // The same file on both sides: both move on to the next tab.
-                std::cmp::Ordering::Equal => s.other = self.active,
+                std::cmp::Ordering::Equal => {
+                    s.other = self.active;
+                    s.parked = None;
+                }
                 std::cmp::Ordering::Less => {}
             }
         }
@@ -930,7 +1073,7 @@ impl QellApp {
         let mut active = None;
         let mut other = None;
         let mut closed: Vec<bool> = Vec::new();
-        let other_before = self.split.map(|s| s.other);
+        let other_before = self.split.as_ref().map(|s| s.other);
         for (i, doc) in std::mem::take(&mut self.docs).into_iter().enumerate() {
             if close(i) {
                 closed.push(doc.from_cluster);
@@ -954,6 +1097,9 @@ impl QellApp {
         self.docs = kept;
         // The other side's tab closed: it shows what this side shows.
         if let Some(s) = &mut self.split {
+            if other.is_none() {
+                s.parked = None;
+            }
             s.other = other.unwrap_or(self.active);
         }
         // Closing the one cluster tab goes back to the list; closing a
@@ -3418,6 +3564,20 @@ fn blame_error(name: &str, err: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn other_side_lines_follow_edits_above_them() {
+        use super::shift_line;
+        // Two lines added at line 3 (the cursor ends on 5).
+        assert_eq!(shift_line(10, 5, 2), 12);
+        assert_eq!(shift_line(3, 5, 2), 3);
+        assert_eq!(shift_line(4, 5, 2), 6);
+        // Two lines removed below line 5.
+        assert_eq!(shift_line(10, 5, -2), 8);
+        assert_eq!(shift_line(6, 5, -2), 5);
+        assert_eq!(shift_line(2, 5, -2), 2);
+        assert_eq!(shift_line(7, 5, 0), 7);
+    }
+
     use super::zoom_step;
 
     #[test]

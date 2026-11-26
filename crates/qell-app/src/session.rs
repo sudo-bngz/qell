@@ -26,8 +26,26 @@ pub struct Shell {
     pub cwd: PathBuf,
 }
 
+/// The editor split in two: the tab on the side without focus (an index
+/// into the tabs), and where its cursor was when both sides showed the
+/// same tab.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Split {
+    pub other: usize,
+    pub right_focused: bool,
+    /// Share of the width the left side takes.
+    #[serde(default = "half")]
+    pub ratio: f32,
+    #[serde(default)]
+    pub other_cursor: Option<(usize, usize)>,
+}
+
+fn half() -> f32 {
+    0.5
+}
+
 /// The tabs of one workspace.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Workspace {
     #[serde(default)]
     pub tabs: Vec<Tab>,
@@ -43,6 +61,9 @@ pub struct Workspace {
     /// Whether the terminal panel was showing.
     #[serde(default)]
     pub panel: bool,
+    /// The editor was split.
+    #[serde(default)]
+    pub split: Option<Split>,
 }
 
 /// Shells remembered per workspace, at most.
@@ -80,6 +101,10 @@ impl Store {
                 if i == ws.active {
                     out.active = out.tabs.len();
                 }
+                // The split stays when the other side's file is still there.
+                if let Some(s) = ws.split.as_ref().filter(|s| s.other == i) {
+                    out.split = Some(Split { other: out.tabs.len(), ..s.clone() });
+                }
                 out.tabs.push(tab.clone());
             }
         }
@@ -102,6 +127,9 @@ impl Store {
         ws.shells.truncate(MAX_SHELLS);
         ws.active_shell = ws.active_shell.min(ws.shells.len().saturating_sub(1));
         ws.active = ws.active.min(ws.tabs.len().saturating_sub(1));
+        if ws.split.as_ref().is_some_and(|s| s.other >= ws.tabs.len()) {
+            ws.split = None;
+        }
         self.order.retain(|p| p != root);
         self.order.push(root.to_path_buf());
         self.roots.insert(root.to_path_buf(), ws);
@@ -128,6 +156,27 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn split_follows_its_tab_or_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.go");
+        let b = dir.path().join("b.go");
+        let gone = dir.path().join("gone.go");
+        std::fs::write(&a, "").unwrap();
+        std::fs::write(&b, "").unwrap();
+        let tab = |p: &std::path::Path| Tab { path: p.to_path_buf(), line: 0, col: 0 };
+        let split = |other| Some(Split { other, right_focused: true, ratio: 0.4, other_cursor: Some((3, 1)) });
+        let mut store = Store::default();
+        store.roots.insert(
+            dir.path().to_path_buf(),
+            Workspace { tabs: vec![tab(&gone), tab(&a), tab(&b)], active: 1, split: split(2), ..Default::default() },
+        );
+        let ws = store.take(dir.path());
+        assert_eq!(ws.split, split(1), "b moved up when gone.go was dropped");
+        store.roots.get_mut(dir.path()).unwrap().split = split(0);
+        assert_eq!(store.take(dir.path()).split, None, "its file is gone");
+    }
+
     use super::*;
 
     fn tab(path: &Path) -> Tab {

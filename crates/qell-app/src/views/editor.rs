@@ -38,22 +38,43 @@ pub fn show_central(app: &mut QellApp, ctx: &Context) {
         }
         show_tabs(app, ui);
         app.fix_split();
-        let Some(split) = app.split else {
+        let Some(split) = app.split.clone() else {
             show_pane(app, ui, ctx);
             return;
         };
-        // Split: the right side in a resizable panel, the left in the rest.
+        // Split: the two sides share the width by `ratio`, which the border
+        // between them drags (kept as a share, so resizing the window or
+        // reopening keeps the proportion).
         let border = app.palette.border;
-        let width = ui.available_width();
-        egui::SidePanel::right("split_right")
-            .resizable(true)
-            .default_width(width / 2.0)
-            .width_range(160.0..=(width - 160.0).max(160.0))
-            .frame(egui::Frame::new().fill(bg).stroke(Stroke::new(1.0_f32, border)))
-            .show_inside(ui, |ui| show_side(app, ui, ctx, true, split));
-        egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(bg))
-            .show_inside(ui, |ui| show_side(app, ui, ctx, false, split));
+        let full = ui.available_rect_before_wrap();
+        let min = (160.0 / full.width()).min(0.5);
+        let ratio = split.ratio.clamp(min, 1.0 - min);
+        let mid = (full.left() + full.width() * ratio).round();
+        let left = Rect::from_min_max(full.min, Pos2::new(mid, full.bottom()));
+        let right = Rect::from_min_max(Pos2::new(mid + 1.0, full.top()), full.max);
+        ui.scope_builder(egui::UiBuilder::new().max_rect(right).id_salt("split_right"), |ui| {
+            ui.set_clip_rect(right);
+            show_side(app, ui, ctx, true, split.right_focused);
+        });
+        ui.scope_builder(egui::UiBuilder::new().max_rect(left).id_salt("split_left"), |ui| {
+            ui.set_clip_rect(left);
+            show_side(app, ui, ctx, false, split.right_focused);
+        });
+        // The border, on top of both sides so it gets the drag.
+        let handle = Rect::from_x_y_ranges(mid - 3.0..=mid + 3.0, full.y_range());
+        let resp = ui.interact(handle, ui.id().with("split_handle"), Sense::drag());
+        let active = resp.hovered() || resp.dragged();
+        if active {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        }
+        if resp.dragged() {
+            if let (Some(p), Some(s)) = (resp.interact_pointer_pos(), app.split.as_mut()) {
+                s.ratio = ((p.x - full.left()) / full.width()).clamp(min, 1.0 - min);
+            }
+        }
+        let color = if active { app.palette.accent } else { border };
+        ui.painter().vline(mid + 0.5, full.y_range(), Stroke::new(1.0_f32, color));
+        ui.allocate_rect(full, Sense::hover());
     });
     show_completion_popup(app, ctx);
 }
@@ -61,19 +82,35 @@ pub fn show_central(app: &mut QellApp, ctx: &Context) {
 /// One side of a split editor. The side without focus is drawn with its
 /// tab swapped in for the moment; pressing the mouse in it moves the focus
 /// there.
-fn show_side(app: &mut QellApp, ui: &mut egui::Ui, ctx: &Context, right: bool, split: crate::app::Split) {
-    let inactive = split.right_focused != right;
+fn show_side(app: &mut QellApp, ui: &mut egui::Ui, ctx: &Context, right: bool, right_focused: bool) {
+    let inactive = right_focused != right;
     let rect = ui.max_rect();
     let pressed = ui.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| rect.contains(p)));
     let focused = app.active;
+    // The same tab on both sides: this side's cursors go on it while it is
+    // drawn, the focused side's come back after.
+    let mut focused_cursors = None;
     if inactive {
+        // Edits the focused side made this frame move this side's cursors.
+        app.fix_split();
+        let Some(split) = app.split.clone() else { return };
         app.active = split.other;
         app.pane_inactive = true;
+        if let (Some(parked), Some(doc)) = (&split.parked, app.docs.get_mut(split.other)) {
+            focused_cursors = Some(crate::app::Parked::of(doc));
+            parked.apply(doc);
+        }
     }
     show_pane(app, ui, ctx);
     if inactive {
         // Whatever happened in there (a click moved its cursor) stays with
-        // that tab; the focused one comes back.
+        // that side; the focused one comes back.
+        if let (Some(mine), Some(s)) = (focused_cursors, app.split.as_mut()) {
+            if let Some(doc) = app.docs.get_mut(s.other) {
+                s.parked = Some(crate::app::Parked::of(doc));
+                mine.apply(doc);
+            }
+        }
         app.active = focused;
         app.pane_inactive = false;
     }
@@ -81,7 +118,7 @@ fn show_side(app: &mut QellApp, ui: &mut egui::Ui, ctx: &Context, right: bool, s
         app.focus_side(right);
     }
     // The focused side: a line of the accent colour along its top.
-    if app.split.is_some_and(|s| s.right_focused == right) && app.focus == Focus::Editor {
+    if app.split.as_ref().is_some_and(|s| s.right_focused == right) && app.focus == Focus::Editor {
         let r = ui.max_rect();
         ui.painter().hline(r.x_range(), r.top() + 0.5, Stroke::new(1.0_f32, app.palette.accent));
     }
@@ -283,7 +320,7 @@ fn show_tabs(app: &mut QellApp, ui: &mut egui::Ui) {
                 let mut close = None;
                 let mut tab_menu: Option<(usize, TabMenu)> = None;
                 let count = app.docs.len();
-                let other_side = app.split.map(|s| s.other);
+                let other_side = app.split.as_ref().map(|s| s.other);
                 for (i, doc) in app.docs.iter().enumerate() {
                     let active = i == app.active;
                     let title = doc.title();
