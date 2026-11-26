@@ -10,6 +10,7 @@ pub mod buffer;
 pub mod columns;
 pub mod comment;
 pub mod conf;
+pub mod conflict;
 pub mod fold;
 pub mod history;
 pub mod position;

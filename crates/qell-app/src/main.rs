@@ -12,6 +12,7 @@ mod document;
 mod format;
 mod gitops;
 mod icons;
+mod merge;
 mod native_menu;
 mod preview;
 mod recent;

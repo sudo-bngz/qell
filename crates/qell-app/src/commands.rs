@@ -54,6 +54,13 @@ pub enum Command {
     GitStashPop,
     GitStashApply,
     GitStashDrop,
+    MergeAcceptCurrent,
+    MergeAcceptIncoming,
+    MergeAcceptBoth,
+    MergeAcceptAllCurrent,
+    MergeAcceptAllIncoming,
+    MergeNextConflict,
+    MergePrevConflict,
     RevertHunk,
     ToggleBlame,
     GoToDefinition,
@@ -135,6 +142,13 @@ impl Command {
         Command::GitStashPop,
         Command::GitStashApply,
         Command::GitStashDrop,
+        Command::MergeAcceptCurrent,
+        Command::MergeAcceptIncoming,
+        Command::MergeAcceptBoth,
+        Command::MergeAcceptAllCurrent,
+        Command::MergeAcceptAllIncoming,
+        Command::MergeNextConflict,
+        Command::MergePrevConflict,
         Command::RevertHunk,
         Command::ToggleBlame,
         Command::GoToDefinition,
@@ -223,6 +237,13 @@ impl Command {
             Command::GitStashPop => "Git: Pop Stash…",
             Command::GitStashApply => "Git: Apply Stash…",
             Command::GitStashDrop => "Git: Drop Stash…",
+            Command::MergeAcceptCurrent => "Merge: Accept Current Change",
+            Command::MergeAcceptIncoming => "Merge: Accept Incoming Change",
+            Command::MergeAcceptBoth => "Merge: Accept Both Changes",
+            Command::MergeAcceptAllCurrent => "Merge: Accept All Current",
+            Command::MergeAcceptAllIncoming => "Merge: Accept All Incoming",
+            Command::MergeNextConflict => "Merge: Next Conflict",
+            Command::MergePrevConflict => "Merge: Previous Conflict",
             Command::RevertHunk => "Git: Revert This Change",
             Command::ToggleBlame => "Git: Toggle Blame",
             Command::ToggleCluster => "View: Toggle Kubernetes Cluster",
@@ -329,6 +350,13 @@ impl Command {
             | Command::GitStashPop
             | Command::GitStashApply
             | Command::GitStashDrop => None,
+            Command::MergeAcceptCurrent
+            | Command::MergeAcceptIncoming
+            | Command::MergeAcceptBoth
+            | Command::MergeAcceptAllCurrent
+            | Command::MergeAcceptAllIncoming
+            | Command::MergeNextConflict
+            | Command::MergePrevConflict => None,
             Command::ToggleBlame => s(cmd | Modifiers::ALT, Key::B),
             Command::ToggleCluster => s(cmd_shift, Key::K),
             Command::ToggleAws => s(cmd_shift, Key::A),
