@@ -117,6 +117,11 @@ bottom, and language-server completion for the languages you actually use.
   Unfold All* are in the Edit menu. Blocks come from indentation, so it
   works the same for every language; moving the cursor into a fold (a
   search, a jump) opens it.
+- **Split editor** — `Ctrl/⌘+\` (*View → Split Editor*) puts the
+  current file on both sides; open or pick any tab and it goes to the
+  focused side (thin accent line on top; the other side's tab is
+  underlined in grey). Click a side, or `Ctrl/⌘+1` / `Ctrl/⌘+2`, to move
+  between them; drag the border to resize; `Ctrl/⌘+\` again joins them.
 - **Markdown preview** — `Ctrl/⌘+Alt+V`, *View → Markdown Preview*, or
   *◧ Preview* in the status bar renders a Markdown file beside its source,
   updating as you type: headings, lists, tables, task lists, quotes, code

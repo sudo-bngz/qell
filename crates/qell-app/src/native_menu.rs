@@ -196,6 +196,9 @@ pub fn layout() -> Vec<(&'static str, Vec<Entry>)> {
                 Cmd(C::ToggleTerminal, Some("Toggle Terminal")),
                 Cmd(C::ShowProblems, Some("Problems")),
                 Cmd(C::MarkdownPreview, Some("Markdown Preview")),
+                Cmd(C::SplitEditor, Some("Split Editor")),
+                Cmd(C::FocusLeftEditor, Some("Focus Left Editor")),
+                Cmd(C::FocusRightEditor, Some("Focus Right Editor")),
                 Cmd(C::ToggleCluster, Some("Toggle Kubernetes Cluster")),
                 Cmd(C::ToggleAws, Some("Toggle AWS")),
                 Cmd(C::NewTerminal, Some("New Terminal")),
@@ -252,6 +255,7 @@ pub fn accelerator(sc: &KeyboardShortcut) -> Option<String> {
     let code = match sc.logical_key {
         Key::Backtick => "Backquote".to_string(),
         Key::Equals => "Equal".to_string(),
+        Key::Backslash => "Backslash".to_string(),
         Key::Plus => "Equal".to_string(),
         Key::OpenBracket => "BracketLeft".to_string(),
         Key::CloseBracket => "BracketRight".to_string(),

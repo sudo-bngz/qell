@@ -255,12 +255,26 @@ pub struct Notification {
     pub is_error: bool,
 }
 
+/// Two editors side by side. The focused side always shows `active`, so
+/// everything that works on the current tab works on it; `other` is the
+/// tab on the side without focus. Changing sides swaps the two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Split {
+    pub other: usize,
+    pub right_focused: bool,
+}
+
 pub struct QellApp {
     pub config: Config,
     pub palette: Palette,
     pub root: PathBuf,
     pub docs: Vec<Document>,
     pub active: usize,
+    /// The editor split in two, side by side (View: Split Editor).
+    pub split: Option<Split>,
+    /// The editor being drawn is the side without focus: it shows, takes
+    /// clicks, but no keys.
+    pub pane_inactive: bool,
     pub focus: Focus,
     pub languages: LanguageRegistry,
     pub lsp: LspRegistry,
@@ -488,6 +502,8 @@ impl QellApp {
             root,
             docs: Vec::new(),
             active: 0,
+            split: None,
+            pane_inactive: false,
             focus: Focus::Editor,
             terminals: Vec::new(),
             active_terminal: 0,
@@ -791,17 +807,58 @@ impl QellApp {
         }
     }
 
+    /// Split the editor in two, the current file on both sides and the
+    /// new right side focused; again joins them, keeping the focused tab.
+    pub fn toggle_split(&mut self) {
+        self.split = match self.split {
+            Some(_) => None,
+            None => Some(Split { other: self.active, right_focused: true }),
+        };
+        self.completion.open = false;
+        self.show_editor_area();
+        self.focus = Focus::Editor;
+    }
+
+    /// Move the focus to the left or right editor (when split).
+    pub fn focus_side(&mut self, right: bool) {
+        let Some(s) = &mut self.split else { return };
+        if s.right_focused != right {
+            std::mem::swap(&mut self.active, &mut s.other);
+            s.right_focused = right;
+            self.completion.open = false;
+        }
+        self.focus = Focus::Editor;
+    }
+
+    /// Keep the split pointing at a tab that exists.
+    pub fn fix_split(&mut self) {
+        if let Some(s) = &mut self.split {
+            if s.other >= self.docs.len() {
+                s.other = self.active;
+            }
+        }
+    }
+
     fn close_active(&mut self) {
         if self.docs.is_empty() {
             return;
         }
-        let doc = self.docs.remove(self.active);
+        let removed = self.active;
+        let doc = self.docs.remove(removed);
         self.back_to_cluster |= doc.from_cluster;
         self.lsp.did_close(&doc.buffer);
         if self.docs.is_empty() {
             self.docs.push(Document::untitled());
         }
         self.active = self.active.min(self.docs.len() - 1);
+        if let Some(s) = &mut self.split {
+            match s.other.cmp(&removed) {
+                std::cmp::Ordering::Greater => s.other -= 1,
+                // The same file on both sides: both move on to the next tab.
+                std::cmp::Ordering::Equal => s.other = self.active,
+                std::cmp::Ordering::Less => {}
+            }
+        }
         self.completion.open = false;
     }
 
@@ -871,7 +928,9 @@ impl QellApp {
     pub fn close_tabs_where(&mut self, close: impl Fn(usize) -> bool) {
         let mut kept = Vec::new();
         let mut active = None;
+        let mut other = None;
         let mut closed: Vec<bool> = Vec::new();
+        let other_before = self.split.map(|s| s.other);
         for (i, doc) in std::mem::take(&mut self.docs).into_iter().enumerate() {
             if close(i) {
                 closed.push(doc.from_cluster);
@@ -879,6 +938,9 @@ impl QellApp {
             } else {
                 if i == self.active {
                     active = Some(kept.len());
+                }
+                if Some(i) == other_before {
+                    other = Some(kept.len());
                 }
                 kept.push(doc);
             }
@@ -890,6 +952,10 @@ impl QellApp {
         let fallback = self.active.min(kept.len()).saturating_sub(1);
         self.active = active.unwrap_or(fallback).min(kept.len() - 1);
         self.docs = kept;
+        // The other side's tab closed: it shows what this side shows.
+        if let Some(s) = &mut self.split {
+            s.other = other.unwrap_or(self.active);
+        }
         // Closing the one cluster tab goes back to the list; closing a
         // whole row of tabs is housekeeping, and shouldn't open a view.
         self.back_to_cluster |= closed.as_slice() == [true];
@@ -2620,6 +2686,9 @@ impl QellApp {
                     self.notify("Nothing to fold here.");
                 }
             }
+            Command::SplitEditor => self.toggle_split(),
+            Command::FocusLeftEditor => self.focus_side(false),
+            Command::FocusRightEditor => self.focus_side(true),
             Command::MarkdownPreview => match self.docs.get_mut(self.active) {
                 Some(doc) if doc.buffer.language() == Some("markdown") => doc.preview = !doc.preview,
                 _ => self.notify("The preview is for Markdown files."),

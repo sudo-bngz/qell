@@ -58,6 +58,9 @@ pub enum Command {
     ToggleTerminal,
     ShowProblems,
     MarkdownPreview,
+    SplitEditor,
+    FocusLeftEditor,
+    FocusRightEditor,
     NewTerminal,
     KillTerminal,
     NextTerminal,
@@ -126,6 +129,9 @@ impl Command {
         Command::ToggleTerminal,
         Command::ShowProblems,
         Command::MarkdownPreview,
+        Command::SplitEditor,
+        Command::FocusLeftEditor,
+        Command::FocusRightEditor,
         Command::NewTerminal,
         Command::KillTerminal,
         Command::NextTerminal,
@@ -194,6 +200,9 @@ impl Command {
             Command::ToggleTerminal => "View: Toggle Terminal",
             Command::ShowProblems => "View: Show Problems",
             Command::MarkdownPreview => "Markdown: Toggle Preview",
+            Command::SplitEditor => "View: Split Editor",
+            Command::FocusLeftEditor => "View: Focus Left Editor",
+            Command::FocusRightEditor => "View: Focus Right Editor",
             Command::NewTerminal => "Terminal: New Terminal",
             Command::KillTerminal => "Terminal: Kill Active Terminal",
             Command::NextTerminal => "Terminal: Focus Next Terminal",
@@ -287,6 +296,9 @@ impl Command {
             Command::ShowProblems => s(cmd_shift, Key::M),
             // Not ⇧V: that is Paste (as plain text) on every system.
             Command::MarkdownPreview => s(cmd | Modifiers::ALT, Key::V),
+            Command::SplitEditor => s(cmd, Key::Backslash),
+            Command::FocusLeftEditor => s(cmd, Key::Num1),
+            Command::FocusRightEditor => s(cmd, Key::Num2),
             // ⌘T on macOS, as in its terminals. Elsewhere Ctrl+T belongs
             // to the shell (it swaps two characters), so the VS Code
             // chord stays.
