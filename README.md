@@ -188,6 +188,16 @@ bottom, and language-server completion for the languages you actually use.
 - **Sticky scroll** — while you scroll inside a function or a block, the
   lines that open it (`func …`, `for …`, `if …`) stay at the top of the
   editor, up to four. Click one to go to it. *Settings → Sticky Scroll*.
+- **Signature help** — typing `(` or `,` in a call shows the function's
+  signature above the cursor, the parameter being filled in underlined, with
+  its documentation; it follows the cursor and closes with `Esc` or when you
+  leave the call. `Ctrl/⌘+Shift+Space` opens it by hand. Needs a language
+  server.
+- **Inlay hints** — types and parameter names the language server infers,
+  shown dimmed inside the code (`const total: number[]`, `greet(name: "hi")`);
+  they aren't part of the file and the cursor steps over them. Turned on in
+  the TypeScript server and gopls, which keep them off by default;
+  rust-analyzer sends them as is. *Settings → Inlay Hints* hides them.
 - **Rename a symbol** (`F2`) through the language server, across every file
   it is used in. The files it touches open as tabs with unsaved changes, so
   nothing is written until you save them.

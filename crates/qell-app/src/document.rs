@@ -44,6 +44,12 @@ pub struct Document {
     changes_key: Option<i32>,
     /// Who last changed each line, shown beside the line numbers.
     pub blame: BlameState,
+    /// The language server's inlay hints, sorted by position.
+    pub inlays: Vec<crate::hints::Inlay>,
+    /// (version, line count) the hints are placed for, to move them with
+    /// edits; and the version they were asked for.
+    inlay_key: Option<(i32, usize)>,
+    inlay_for: Option<i32>,
     /// Size and time of the file when it was last read or written.
     pub disk: Option<DiskState>,
     /// It changed (or went) on disk since, and you have unsaved edits:
@@ -269,6 +275,9 @@ impl Document {
             changes: Vec::new(),
             changes_key: None,
             blame: BlameState::default(),
+            inlays: Vec::new(),
+            inlay_key: None,
+            inlay_for: None,
             disk: None,
             conflict: None,
             wrap: WrapLayout::plain(1),
@@ -439,6 +448,44 @@ impl Document {
             self.max_cols = (widest, Some(key));
         }
         self.max_cols.0
+    }
+
+    /// Version of the text the inlay hints were asked for.
+    pub fn inlays_version(&self) -> Option<i32> {
+        self.inlay_for
+    }
+
+    /// Ask for the hints again (the server said they changed), keeping
+    /// these until the new ones come.
+    pub fn refresh_inlays(&mut self) {
+        self.inlay_for = None;
+    }
+
+    /// Hints the server sent for text version `version`.
+    pub fn set_inlays(&mut self, hints: Vec<crate::hints::Inlay>, version: i32) {
+        self.inlays = hints;
+        self.inlay_for = Some(version);
+        self.inlay_key = Some((version, self.buffer.line_count()));
+        // The text moved on while the server worked: place them as of now.
+        self.follow_inlays();
+    }
+
+    /// The text changed: hints on the line being edited go (they'd be in
+    /// the wrong place), those below move with lines added or removed.
+    pub fn follow_inlays(&mut self) {
+        let version = self.buffer.version();
+        let Some((v, lines)) = self.inlay_key else { return };
+        if v == version {
+            return;
+        }
+        let now = self.buffer.line_count();
+        let delta = now as isize - lines as isize;
+        let at = self.buffer.cursor.head().line;
+        for h in &mut self.inlays {
+            h.line = crate::app::shift_line(h.line, at, delta);
+        }
+        self.inlays.retain(|h| h.line != at && h.line < now);
+        self.inlay_key = Some((version, now));
     }
 
     pub fn update_wrap(&mut self, width: usize, tab: usize) {
@@ -827,5 +874,29 @@ mod tab_tests {
         let mut d = Document::new(Buffer::from_text("\t\tab\nabcdef\n", None));
         assert_eq!(d.max_display_cols(4), 10);
         assert_eq!(d.max_display_cols(2), 6);
+    }
+}
+
+#[cfg(test)]
+mod inlay_tests {
+    use super::*;
+    use crate::hints::Inlay;
+    use qell_core::Position;
+
+    #[test]
+    fn hints_move_with_lines_added_above_and_go_from_the_edited_line() {
+        let mut d = Document::new(Buffer::from_text("let a = 1;\nlet b = 2;\nlet c = 3;\n", None));
+        let hint = |line| Inlay { line, col: 5, label: ": i32".into() };
+        d.set_inlays(vec![hint(0), hint(1), hint(2)], d.buffer.version());
+        // A new line under the first: b and c move down.
+        d.buffer.set_cursor(Position::new(0, 10), false);
+        d.buffer.insert("\n");
+        d.follow_inlays();
+        assert_eq!(d.inlays.iter().map(|h| h.line).collect::<Vec<_>>(), vec![0, 2, 3]);
+        // Typing on c's line: its hint goes until the server answers.
+        d.buffer.set_cursor(Position::new(3, 3), false);
+        d.buffer.insert("x");
+        d.follow_inlays();
+        assert_eq!(d.inlays.iter().map(|h| h.line).collect::<Vec<_>>(), vec![0, 2]);
     }
 }

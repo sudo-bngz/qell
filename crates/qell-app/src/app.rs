@@ -456,6 +456,9 @@ pub struct QellApp {
     pub symbols: Vec<SymbolRow>,
     /// The Outline section under the file tree.
     pub outline: crate::views::outline::Outline,
+    /// The signature of the call being typed.
+    pub signature: crate::hints::Signature,
+    pub inlay: crate::hints::InlayState,
     pending_symbols: Option<RequestId>,
     /// Reads definitions out of a file; built the first time it is needed
     /// (compiling the tree-sitter queries takes a moment).
@@ -598,6 +601,8 @@ impl QellApp {
             symbols: Vec::new(),
             pending_symbols: None,
             outline: Default::default(),
+            signature: Default::default(),
+            inlay: Default::default(),
             extractor: None,
             pending_action_resolve: None,
             rename_symbol: String::new(),
@@ -1810,7 +1815,7 @@ impl QellApp {
 
     /// Why a language-server feature isn't available for `lang`. `needs`
     /// opens the sentence, e.g. "Quick fixes need".
-    fn no_server_hint(&self, lang: &str, needs: &str) -> String {
+    pub fn no_server_hint(&self, lang: &str, needs: &str) -> String {
         let name = self.languages.get(lang).map(|l| l.name).unwrap_or(lang);
         match self.lsp.status(lang) {
             "ready" => format!("The {name} language server doesn't do that."),
@@ -2889,6 +2894,7 @@ impl QellApp {
             Command::GoToDefinition => self.go_to_definition(),
             Command::FindReferences => self.find_references(),
             Command::GoToSymbol => self.go_to_symbol(),
+            Command::ParameterHints => self.request_signature(true),
             Command::RenameSymbol => self.start_rename(),
             Command::QuickFix => self.quick_fix(),
             Command::GoBack => self.navigate(true),
@@ -3209,6 +3215,13 @@ impl QellApp {
                     }
                 }
                 LspEvent::Hover { .. } => {}
+                LspEvent::SignatureHelp { id, help } => self.handle_signature(id, help),
+                LspEvent::InlayHints { id, hints } => self.handle_inlay_hints(id, hints),
+                LspEvent::RefreshInlayHints => {
+                    for d in &mut self.docs {
+                        d.refresh_inlays();
+                    }
+                }
                 LspEvent::Diagnostics { uri, diagnostics } => {
                     if let Some(path) = convert::uri_to_path(&uri) {
                         self.set_diagnostics(&path, diagnostics);
@@ -3557,6 +3570,7 @@ impl eframe::App for QellApp {
         // rather than while drawing the panel.
         views::k8s::update(self, ctx);
         views::outline::update(self, ctx);
+        self.update_hints(ctx);
         views::aws::update(self, ctx);
         self.handle_config(ctx);
         // The tabs changed: remember them (cursors are saved again on exit).

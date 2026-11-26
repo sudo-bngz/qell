@@ -18,6 +18,31 @@ pub fn display_cols(line: &str, tab: usize) -> Vec<usize> {
     cols
 }
 
+/// `display_cols`, with text shown between chars that isn't in the line
+/// (inlay hints): `inserts` are (char column, width), sorted. An insert at
+/// a char pushes that char right; one at the line's end adds nothing.
+pub fn display_cols_with(line: &str, tab: usize, inserts: &[(usize, usize)]) -> Vec<usize> {
+    if inserts.is_empty() {
+        return display_cols(line, tab);
+    }
+    let tab = tab.max(1);
+    let mut cols = Vec::with_capacity(line.len() + 1);
+    let mut x = 0;
+    let mut next = inserts.iter().peekable();
+    for (i, c) in line.chars().enumerate() {
+        if c == '\n' || c == '\r' {
+            break;
+        }
+        while let Some((_, w)) = next.next_if(|(at, _)| *at <= i) {
+            x += w;
+        }
+        cols.push(x);
+        x = if c == '\t' { (x / tab + 1) * tab } else { x + 1 };
+    }
+    cols.push(x);
+    cols
+}
+
 /// Screen column of char `col`, given `display_cols`. Past the end, one
 /// column per char (virtual space).
 pub fn disp(cols: &[usize], col: usize) -> usize {
@@ -96,6 +121,16 @@ mod tests {
         assert_eq!(col_at(&cols, 0, 13.2, true), 7);
         // From a later start (a wrapped row).
         assert_eq!(col_at(&cols, 2, 0.6, true), 3);
+    }
+
+    #[test]
+    fn inserts_push_the_text_right() {
+        // "a: " (3 wide) before char 4 of "foo(x)".
+        assert_eq!(display_cols_with("foo(x)", 4, &[(4, 3)]), vec![0, 1, 2, 3, 7, 8, 9]);
+        // At the end: nothing moves.
+        assert_eq!(display_cols_with("ab", 4, &[(2, 5)]), vec![0, 1, 2]);
+        // A tab after an insert reaches the stop after it.
+        assert_eq!(display_cols_with("x\ty", 4, &[(1, 2)]), vec![0, 3, 4, 5]);
     }
 
     #[test]

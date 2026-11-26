@@ -334,6 +334,45 @@ impl Registry {
         self.client(lang_id).map(|c| c.completion_triggers()).unwrap_or_default()
     }
 
+    /// Ask for the signature of the call the cursor is in. `None` when no
+    /// ready server offers it.
+    pub fn request_signature_help(
+        &mut self,
+        languages: &LanguageRegistry,
+        buffer: &mut Buffer,
+        retrigger: bool,
+    ) -> Option<RequestId> {
+        self.sync(languages, buffer);
+        let lang = buffer.language()?;
+        let uri = buffer.path().and_then(path_to_uri)?;
+        let client = self.client_at(lang, buffer.path()).filter(|c| c.is_ready() && c.supports_signature_help())?;
+        let p = buffer.cursor.head();
+        Some(client.signature_help(uri, to_lsp_position(&buffer.line(p.line), p), retrigger))
+    }
+
+    /// Characters that open the signature help in this language (`(` and
+    /// `,` when the server doesn't say).
+    pub fn signature_triggers(&self, lang_id: &str) -> Vec<String> {
+        let t = self.client(lang_id).map(|c| c.signature_triggers()).unwrap_or_default();
+        if t.is_empty() {
+            vec!["(".into(), ",".into()]
+        } else {
+            t
+        }
+    }
+
+    /// Ask for the inlay hints of the whole file.
+    pub fn request_inlay_hints(&mut self, languages: &LanguageRegistry, buffer: &mut Buffer) -> Option<RequestId> {
+        self.sync(languages, buffer);
+        let lang = buffer.language()?;
+        let uri = buffer.path().and_then(path_to_uri)?;
+        let client = self.client_at(lang, buffer.path()).filter(|c| c.is_ready() && c.supports_inlay_hints())?;
+        let last = buffer.line_count().saturating_sub(1);
+        let end = to_lsp_position(&buffer.line(last), qell_core::Position::new(last, buffer.line_len(last)));
+        let range = lsp_types::Range { start: lsp_types::Position::new(0, 0), end };
+        Some(client.inlay_hints(uri, range))
+    }
+
     pub fn request_hover(&mut self, buffer: &Buffer) -> Option<RequestId> {
         let lang = buffer.language()?;
         let uri = buffer.path().and_then(path_to_uri)?;

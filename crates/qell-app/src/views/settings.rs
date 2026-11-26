@@ -92,6 +92,7 @@ fn defs() -> Vec<Def> {
         ),
         def("outline", "Editor", "Outline", "An Outline section under the file tree lists what the open file defines; click to jump."),
         def("sticky_scroll", "Editor", "Sticky Scroll", "The lines that open the blocks you are scrolled into (a function, an if) stay at the top of the editor."),
+        def("inlay_hints", "Editor", "Inlay Hints", "Types and parameter names from the language server, shown dimmed inside the code (they are not part of the file)."),
         def(
             "minimap",
             "Appearance",
@@ -197,6 +198,7 @@ fn is_modified(key: &str, c: &Config) -> bool {
         "indent_guides" => c.indent_guides != d.indent_guides,
         "outline" => c.outline != d.outline,
         "sticky_scroll" => c.sticky_scroll != d.sticky_scroll,
+        "inlay_hints" => c.inlay_hints != d.inlay_hints,
         "ui_scale" => c.ui_scale != d.ui_scale,
         "file_icons" => c.file_icons != d.file_icons,
         "inline_problems" => c.inline_problems != d.inline_problems,
@@ -232,6 +234,7 @@ fn reset(key: &str, c: &mut Config) {
         "indent_guides" => c.indent_guides = d.indent_guides,
         "outline" => c.outline = d.outline,
         "sticky_scroll" => c.sticky_scroll = d.sticky_scroll,
+        "inlay_hints" => c.inlay_hints = d.inlay_hints,
         "ui_scale" => c.ui_scale = d.ui_scale,
         "file_icons" => c.file_icons = d.file_icons,
         "inline_problems" => c.inline_problems = d.inline_problems,
@@ -343,6 +346,9 @@ fn control(ui: &mut egui::Ui, key: &str, c: &mut Config, drafts: &mut HashMap<St
         }
         "sticky_scroll" => {
             ui.checkbox(&mut c.sticky_scroll, "Enabled");
+        }
+        "inlay_hints" => {
+            ui.checkbox(&mut c.inlay_hints, "Enabled");
         }
         "file_icons" => {
             ui.checkbox(&mut c.file_icons, "Enabled");
@@ -548,6 +554,7 @@ mod tests {
                 "indent_guides" => c.indent_guides = false,
                 "outline" => c.outline = false,
                 "sticky_scroll" => c.sticky_scroll = false,
+                "inlay_hints" => c.inlay_hints = false,
                 "ui_scale" => c.ui_scale = 1.5,
                 "file_icons" => c.file_icons = false,
                 "inline_problems" => c.inline_problems = false,
