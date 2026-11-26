@@ -534,15 +534,41 @@ impl QellApp {
         if !self.config.restore_session {
             return;
         }
-        let (key, ws) = self.session_state();
+        let (key, mut ws) = self.session_state();
         self.session_key = key;
+        // The shells, where each one is now. Tabs Qell started for one
+        // command (logs, a pod's shell) ran something that has to be asked
+        // for again; only plain shells come back.
+        let mut active_shell = 0;
+        for (i, t) in self.terminals.iter().enumerate() {
+            if t.name.is_some() {
+                continue;
+            }
+            let Some(cwd) = t.term.cwd() else { continue };
+            if i == self.active_terminal {
+                active_shell = ws.shells.len();
+            }
+            ws.shells.push(crate::session::Shell { cwd });
+        }
+        ws.active_shell = active_shell;
+        ws.panel = self.show_terminal && !ws.shells.is_empty();
         let root = self.root.clone();
         self.session.save(&root, ws);
     }
 
-    /// Reopen the tabs of this workspace. Returns how many opened.
+    /// Reopen the tabs of this workspace, and its shells in their folders.
+    /// Returns how many tabs opened.
     fn restore_session(&mut self) -> usize {
         let ws = self.session.take(&self.root);
+        if self.terminals.is_empty() {
+            for shell in &ws.shells {
+                self.new_terminal_in(shell.cwd.clone());
+            }
+            if !self.terminals.is_empty() {
+                self.active_terminal = ws.active_shell.min(self.terminals.len() - 1);
+                self.show_terminal = ws.panel;
+            }
+        }
         for tab in &ws.tabs {
             match Document::open(tab.path.clone()) {
                 Ok(mut doc) => {

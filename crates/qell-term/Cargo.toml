@@ -12,3 +12,7 @@ log.workspace = true
 alacritty_terminal.workspace = true
 parking_lot.workspace = true
 crossbeam-channel.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# To ask the system where the shell is (proc_pidinfo).
+libc = "0.2"
