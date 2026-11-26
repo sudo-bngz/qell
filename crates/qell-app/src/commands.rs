@@ -27,6 +27,10 @@ pub enum Command {
     ToggleVimMode,
     FormatDocument,
     ToggleComment,
+    Fold,
+    Unfold,
+    FoldAll,
+    UnfoldAll,
     AddNextOccurrence,
     SelectAllOccurrences,
     AddCursorAbove,
@@ -90,6 +94,10 @@ impl Command {
         Command::ToggleVimMode,
         Command::FormatDocument,
         Command::ToggleComment,
+        Command::Fold,
+        Command::Unfold,
+        Command::FoldAll,
+        Command::UnfoldAll,
         Command::AddNextOccurrence,
         Command::SelectAllOccurrences,
         Command::AddCursorAbove,
@@ -153,6 +161,10 @@ impl Command {
             Command::ToggleVimMode => "View: Toggle Vim Mode",
             Command::FormatDocument => "Format Document",
             Command::ToggleComment => "Toggle Line Comment",
+            Command::Fold => "Fold",
+            Command::Unfold => "Unfold",
+            Command::FoldAll => "Fold All",
+            Command::UnfoldAll => "Unfold All",
             Command::AddNextOccurrence => "Selection: Add Next Occurrence",
             Command::SelectAllOccurrences => "Selection: Select All Occurrences",
             Command::AddCursorAbove => "Selection: Add Cursor Above",
@@ -224,10 +236,15 @@ impl Command {
             Command::ToggleWordWrap => s(Modifiers::ALT, Key::Z),
             // No default shortcut, like VS Code (it's in View and the palette).
             Command::ToggleMinimap => None,
+            Command::FoldAll | Command::UnfoldAll => None,
             Command::ToggleVimMode => None,
             // VS Code's ⇧⌥F / Shift+Alt+F.
             Command::FormatDocument => s(Modifiers::SHIFT | Modifiers::ALT, Key::F),
             Command::ToggleComment => s(cmd, Key::Slash),
+            // As in VS Code on macOS; Ctrl+Shift+[ elsewhere would clash
+            // with keyboards that need Shift for brackets.
+            Command::Fold => s(cmd | Modifiers::ALT, Key::OpenBracket),
+            Command::Unfold => s(cmd | Modifiers::ALT, Key::CloseBracket),
             Command::AddNextOccurrence => s(cmd, Key::D),
             Command::SelectAllOccurrences => s(cmd_shift, Key::L),
             // VS Code: ⌥⌘↑/↓ on macOS, Ctrl+Alt+↑/↓ elsewhere.

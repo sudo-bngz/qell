@@ -162,6 +162,12 @@ pub fn layout() -> Vec<(&'static str, Vec<Entry>)> {
                 Edit(E::SelectAll),
                 Separator,
                 Cmd(C::ToggleComment, Some("Toggle Comment")),
+                Separator,
+                Cmd(C::Fold, Some("Fold")),
+                Cmd(C::Unfold, Some("Unfold")),
+                Cmd(C::FoldAll, Some("Fold All")),
+                Cmd(C::UnfoldAll, Some("Unfold All")),
+                Separator,
                 Cmd(C::RenameSymbol, Some("Rename Symbol")),
                 Cmd(C::QuickFix, Some("Quick Fix")),
                 Cmd(C::FormatDocument, Some("Format Document")),
@@ -246,6 +252,8 @@ pub fn accelerator(sc: &KeyboardShortcut) -> Option<String> {
         Key::Backtick => "Backquote".to_string(),
         Key::Equals => "Equal".to_string(),
         Key::Plus => "Equal".to_string(),
+        Key::OpenBracket => "BracketLeft".to_string(),
+        Key::CloseBracket => "BracketRight".to_string(),
         Key::Comma | Key::Minus | Key::Period | Key::Slash | Key::Space | Key::Tab | Key::Enter | Key::PageUp | Key::PageDown => {
             name.to_string()
         }

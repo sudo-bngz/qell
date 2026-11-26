@@ -50,7 +50,15 @@ pub struct Document {
     /// Rows on screen (word wrap), for the width last drawn at.
     pub wrap: WrapLayout,
     /// (buffer version, wrap width) `wrap` was computed for.
-    wrap_key: Option<(i32, usize)>,
+    wrap_key: Option<(i32, usize, u64)>,
+    /// Folded regions, by header line.
+    pub folds: std::collections::BTreeSet<usize>,
+    /// What can be folded: header line → last line of its region.
+    pub fold_regions: std::collections::BTreeMap<usize, usize>,
+    /// The text the regions were found in, and its line count.
+    fold_key: Option<(i32, usize)>,
+    /// Bumped when `folds` changes, so the layout is redone.
+    folds_gen: u64,
     /// Screen column Up/Down aim for across wrapped rows of different
     /// lengths; reset by any other move.
     pub goal_col: Option<usize>,
@@ -247,6 +255,10 @@ impl Document {
             conflict: None,
             wrap: WrapLayout::plain(1),
             wrap_key: None,
+            folds: Default::default(),
+            fold_regions: Default::default(),
+            fold_key: None,
+            folds_gen: 0,
             goal_col: None,
             minimap: Default::default(),
         }
@@ -392,22 +404,139 @@ impl Document {
     /// Lay the text out in rows of `width` columns (0: no wrapping), if the
     /// text or the width changed.
     pub fn update_wrap(&mut self, width: usize) {
-        let key = (self.buffer.version(), width);
+        self.update_folds();
+        let key = (self.buffer.version(), width, self.folds_gen);
         if self.wrap_key == Some(key) {
             return;
         }
         self.wrap_key = Some(key);
-        self.wrap = if width == 0 {
+        self.wrap = if width == 0 && self.folds.is_empty() {
             WrapLayout::plain(self.buffer.line_count())
         } else {
-            WrapLayout::wrapped(self.buffer.rope().lines().map(|l| l.to_string()), width)
+            let mut hidden = vec![false; self.buffer.line_count()];
+            for (h, end) in self.folds.iter().filter_map(|h| Some((*h, *self.fold_regions.get(h)?))) {
+                for slot in hidden.iter_mut().take(end + 1).skip(h + 1) {
+                    *slot = true;
+                }
+            }
+            WrapLayout::layout(self.buffer.rope().lines().map(|l| l.to_string()), width, |l| {
+                hidden.get(l).copied().unwrap_or(false)
+            })
         };
+    }
+
+    /// Keep the folds right as the text changes: find the regions again,
+    /// move folds below an edit with it, drop those whose region is gone,
+    /// and open any the cursor has gone into (a search, a jump).
+    fn update_folds(&mut self) {
+        let lines = self.buffer.line_count();
+        let version = self.buffer.version();
+        let mut changed = false;
+        if self.fold_key.map(|(v, _)| v) != Some(version) {
+            let before = self.fold_key.map_or(lines, |(_, n)| n);
+            self.fold_key = Some((version, lines));
+            self.fold_regions = qell_core::fold::regions(self.buffer.rope().lines().map(|l| l.to_string()), 4);
+            if !self.folds.is_empty() {
+                let delta = lines as isize - before as isize;
+                let at = self.buffer.cursor.head().line as isize;
+                let moved: std::collections::BTreeSet<usize> = self
+                    .folds
+                    .iter()
+                    .filter_map(|&h| {
+                        let h = h as isize;
+                        // Lines went in above (the cursor ends after them)
+                        // or came out above (the cursor ends where they were).
+                        let h = if delta > 0 && h > at - delta {
+                            h + delta
+                        } else if delta < 0 && h > at {
+                            let n = h + delta;
+                            (n > at).then_some(n)?
+                        } else {
+                            h
+                        };
+                        Some(h as usize)
+                    })
+                    .filter(|h| self.fold_regions.contains_key(h))
+                    .collect();
+                changed = moved != self.folds;
+                self.folds = moved;
+            }
+        }
+        let line = self.buffer.cursor.head().line;
+        let inside: Vec<usize> =
+            self.folds.iter().copied().filter(|h| self.fold_regions.get(h).is_some_and(|&e| line > *h && line <= e)).collect();
+        if !inside.is_empty() {
+            for h in inside {
+                self.folds.remove(&h);
+            }
+            changed = true;
+        }
+        if changed {
+            self.folds_gen += 1;
+        }
+    }
+
+    /// Fold the innermost open region around `line`. Says whether one was.
+    pub fn fold_at(&mut self, line: usize) -> bool {
+        let open: std::collections::BTreeMap<usize, usize> =
+            self.fold_regions.iter().filter(|(h, _)| !self.folds.contains(h)).map(|(h, e)| (*h, *e)).collect();
+        let Some((h, _)) = qell_core::fold::around(&open, line) else { return false };
+        self.set_fold(h, true);
+        true
+    }
+
+    /// Open the fold at `line`, or the innermost one around it.
+    pub fn unfold_at(&mut self, line: usize) -> bool {
+        if self.folds.contains(&line) {
+            self.set_fold(line, false);
+            return true;
+        }
+        let folded: std::collections::BTreeMap<usize, usize> =
+            self.fold_regions.iter().filter(|(h, _)| self.folds.contains(h)).map(|(h, e)| (*h, *e)).collect();
+        let Some((h, _)) = qell_core::fold::around(&folded, line) else { return false };
+        self.set_fold(h, false);
+        true
+    }
+
+    /// Fold or open the region headed by `line`.
+    pub fn set_fold(&mut self, line: usize, folded: bool) {
+        let changed = if folded && self.fold_regions.contains_key(&line) {
+            // The cursor can't stay inside: it moves to the header.
+            let end = self.fold_regions[&line];
+            let head = self.buffer.cursor.head();
+            if head.line > line && head.line <= end {
+                let p = qell_core::Position::new(line, self.buffer.line_len(line));
+                self.buffer.set_cursor(p, false);
+            }
+            self.folds.insert(line)
+        } else {
+            self.folds.remove(&line)
+        };
+        if changed {
+            self.folds_gen += 1;
+        }
+    }
+
+    /// Fold every region (`true`) or open them all.
+    pub fn fold_all(&mut self, folded: bool) {
+        if folded {
+            let head = self.buffer.cursor.head().line;
+            // The cursor goes to the top-level header it was under.
+            if let Some((h, _)) = self.fold_regions.iter().find(|(h, e)| **h < head && **e >= head) {
+                let p = qell_core::Position::new(*h, self.buffer.line_len(*h));
+                self.buffer.set_cursor(p, false);
+            }
+            self.folds = self.fold_regions.keys().copied().collect();
+        } else {
+            self.folds.clear();
+        }
+        self.folds_gen += 1;
     }
 
     /// Whether `wrap` matches the current text (it is computed when drawing,
     /// so edits earlier in the frame make it stale).
     pub fn wrap_is_current(&self) -> bool {
-        self.wrap_key.is_some_and(|(v, _)| v == self.buffer.version())
+        self.wrap_key.is_some_and(|(v, _, _)| v == self.buffer.version())
     }
 
     /// Up/Down over wrapped rows: `delta` rows, keeping the screen column.
@@ -569,5 +698,60 @@ mod hunk_tests {
         // A line replaced and another added right after it.
         let hs = hunks("a\nb\n", "a\nB\nC\n");
         assert_eq!(hs, vec![Hunk { base: 1..2, new: 1..3 }]);
+    }
+}
+
+#[cfg(test)]
+mod fold_tests {
+    use super::*;
+    use qell_core::Position;
+
+    const CODE: &str = "fn a() {\n    one();\n    two();\n}\n\nfn b() {\n    three();\n}\n";
+
+    fn doc() -> Document {
+        let mut d = Document::new(Buffer::from_text(CODE, None));
+        d.update_wrap(0);
+        d
+    }
+
+    fn rows(d: &Document) -> Vec<usize> {
+        (0..d.wrap.row_count()).map(|r| d.wrap.row(r).line).collect()
+    }
+
+    #[test]
+    fn folding_hides_the_body_and_keeps_the_closing_line() {
+        let mut d = doc();
+        assert!(d.fold_at(1), "inside a's body folds a");
+        d.update_wrap(0);
+        assert_eq!(rows(&d)[..3], [0, 3, 4]);
+        // The cursor was inside: it is moved to the header.
+        assert_eq!(d.buffer.cursor.head().line, 0);
+        assert!(d.unfold_at(0));
+        d.update_wrap(0);
+        assert_eq!(rows(&d).len(), d.buffer.line_count());
+    }
+
+    #[test]
+    fn a_fold_moves_with_lines_added_above_it() {
+        let mut d = doc();
+        d.set_fold(5, true);
+        d.update_wrap(0);
+        d.buffer.set_cursor(Position::new(0, 0), false);
+        d.buffer.insert("// one\n// two\n");
+        d.update_wrap(0);
+        assert!(d.folds.contains(&7), "{:?}", d.folds);
+        assert!(!rows(&d).contains(&8), "b's body is still hidden");
+    }
+
+    #[test]
+    fn going_into_a_fold_opens_it() {
+        let mut d = doc();
+        d.fold_all(true);
+        d.update_wrap(0);
+        assert_eq!(d.folds.len(), 2);
+        d.buffer.set_cursor(Position::new(6, 2), false);
+        d.update_wrap(0);
+        assert!(!d.folds.contains(&5));
+        assert!(d.folds.contains(&0));
     }
 }
