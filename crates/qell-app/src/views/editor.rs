@@ -16,6 +16,7 @@ use crate::app::{Focus, QellApp};
 use crate::commands::Command;
 use crate::document::{DiskChange, LineMark};
 use qell_core::columns;
+use qell_core::conflict::Choice;
 
 const GUTTER_PAD: f32 = 12.0;
 const TEXT_PAD: f32 = 8.0;
@@ -539,6 +540,13 @@ const BRACKET_UNMATCHED: Color32 = Color32::from_rgb(0xe5, 0x6b, 0x5e);
 const BRACKET_MATCH_BG: Color32 = Color32::from_rgba_premultiplied(0x1a, 0x1a, 0x1a, 0x1a);
 const BRACKET_MATCH_BORDER: Color32 = Color32::from_rgb(0x8a, 0x83, 0x7c);
 /// Gutter marks for lines changed since the last commit.
+/// Merge conflict tints (as RGB; the alpha depends on the line).
+const CONFLICT_CURRENT: (u8, u8, u8) = (0x9d, 0xb8, 0x82);
+const CONFLICT_INCOMING: (u8, u8, u8) = (0x86, 0xa9, 0xc9);
+const CONFLICT_MID: (u8, u8, u8) = (0x80, 0x80, 0x80);
+/// What each conflict offers, after its `<<<<<<<` line.
+const CONFLICT_ACTIONS: [(&str, Choice); 3] =
+    [("Accept Current", Choice::Current), ("Accept Incoming", Choice::Incoming), ("Accept Both", Choice::Both)];
 const GUTTER_ADDED: Color32 = Color32::from_rgb(0x9d, 0xb8, 0x82);
 const GUTTER_MODIFIED: Color32 = Color32::from_rgb(0xd9, 0xb9, 0x8a);
 const GUTTER_DELETED: Color32 = Color32::from_rgb(0xc9, 0x6a, 0x5d);
@@ -1071,6 +1079,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
     let mut gutter_hunk: Option<(usize, Pos2)> = None;
     let mut cursor_screen: Option<Pos2> = None;
     let mut blame_copied: Option<String> = None;
+    let mut conflict_action: Option<(usize, Choice)> = None;
 
     // Clicks and drags on the minimap scroll the editor this frame.
     let mut area = egui::ScrollArea::both().id_salt(id).auto_shrink([false, false]);
@@ -1147,6 +1156,36 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
             wl.position_at(row, vr.indent + col.saturating_sub(vr.start), |l| b.line_len(l))
         };
         let pos_at = |b: &Buffer, p: Pos2| point_to(b, p, true);
+        // Merge conflicts: the actions after each `<<<<<<<` line, where
+        // they are on screen.
+        let conflicts = doc.conflicts().to_vec();
+        let mut conflict_buttons: Vec<(Rect, usize, Choice)> = Vec::new();
+        for (i, c) in conflicts.iter().enumerate() {
+            let len = doc.buffer.line_len(c.start);
+            let row = wl.row_of(Position::new(c.start, len));
+            if !range.contains(&row) {
+                continue;
+            }
+            let cols = columns::display_cols(&doc.buffer.line(c.start), tab_size);
+            let mut x = origin.x + text_x0 + (row_x(&cols, wl.row(row), len) + 3) as f32 * char_width;
+            let y = content_top + row as f32 * row_height;
+            for (label, choice) in CONFLICT_ACTIONS {
+                let w = label.chars().count() as f32 * char_width;
+                conflict_buttons.push((Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, row_height)), i, choice));
+                x += w + 3.0 * char_width;
+            }
+        }
+        let hovered_action = resp.hover_pos().and_then(|p| conflict_buttons.iter().position(|(r, _, _)| r.contains(p)));
+        if hovered_action.is_some() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        let on_conflict = !on_sticky && resp.clicked() && hovered_action.is_some();
+        if on_conflict {
+            if let Some(&(_, i, choice)) = hovered_action.and_then(|k| conflict_buttons.get(k)) {
+                conflict_action = Some((i, choice));
+                clicked_editor = true;
+            }
+        }
         // The blame column: its commit on hover, its hash copied on click.
         let in_blame = |p: Pos2| blame_w > 0.0 && p.x < origin.x + blame_w;
         let on_blame = !on_sticky && resp.clicked() && resp.interact_pointer_pos().is_some_and(in_blame);
@@ -1207,7 +1246,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                 }
             }
         }
-        if !on_mark && !on_blame && !on_fold && !on_sticky && (resp.clicked() || resp.drag_started()) {
+        if !on_mark && !on_blame && !on_fold && !on_sticky && !on_conflict && (resp.clicked() || resp.drag_started()) {
             clicked_editor = true;
             if let Some(p) = resp.interact_pointer_pos() {
                 let (shift, alt) = ui.input(|i| (i.modifiers.shift, i.modifiers.alt));
@@ -1342,6 +1381,22 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
             // Current line background.
             if row == head.line && cursor.selection.is_empty() {
                 painter.rect_filled(row_rect, 0.0, palette_cur_line);
+            }
+
+            // Merge conflict: ours tinted green, theirs blue, the common
+            // ancestor grey, the marker lines a little stronger.
+            if let Some(c) = conflicts.iter().find(|c| (c.start..=c.end).contains(&row)) {
+                let (rgb, marker) = if row == c.start || c.current().contains(&row) {
+                    (CONFLICT_CURRENT, row == c.start)
+                } else if row == c.mid {
+                    (CONFLICT_MID, true)
+                } else if c.incoming().contains(&row) || row == c.end {
+                    (CONFLICT_INCOMING, row == c.end)
+                } else {
+                    (CONFLICT_MID, Some(row) == c.base)
+                };
+                let alpha = if marker { 70 } else { 32 };
+                painter.rect_filled(row_rect, 0.0, Color32::from_rgba_unmultiplied(rgb.0, rgb.1, rgb.2, alpha));
             }
 
             // Inline diff: added / removed line backgrounds (VS Code's
@@ -1511,6 +1566,29 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
             let job = expand_job_tabs(job, columns::disp(&cols, vr.start) - lead, tab_size);
             let galley = ui.fonts_mut(|f| f.layout_job(job));
             painter.galley(Pos2::new(xcol(vr.start) - lead as f32 * char_width, y + 1.0), galley, palette_text);
+
+            // The conflict's actions after its `<<<<<<<` line.
+            for (k, (r, i, _)) in conflict_buttons.iter().enumerate() {
+                let label = CONFLICT_ACTIONS[k % CONFLICT_ACTIONS.len()].0;
+                if conflicts[*i].start != row || !last_seg {
+                    continue;
+                }
+                let hot = hovered_action == Some(k);
+                let color = if hot { palette_text } else { palette_gutter };
+                painter.text(Pos2::new(r.left(), y + row_height / 2.0), Align2::LEFT_CENTER, label, font.clone(), color);
+                if hot {
+                    painter.hline(r.x_range(), r.bottom() - 3.0, Stroke::new(1.0_f32, color));
+                }
+                if k % CONFLICT_ACTIONS.len() > 0 {
+                    painter.text(
+                        Pos2::new(r.left() - 1.5 * char_width, y + row_height / 2.0),
+                        Align2::CENTER_CENTER,
+                        "·",
+                        font.clone(),
+                        palette_gutter,
+                    );
+                }
+            }
 
             // ⌘ / Ctrl held over a symbol: underline it as a link.
             if let Some((lrow, ls, le)) = link {
@@ -1698,6 +1776,9 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
     }
     if let Some(p) = cursor_screen.filter(|_| !inactive) {
         app.completion.anchor = p;
+    }
+    if let Some((i, choice)) = conflict_action {
+        app.resolve_conflict(i, choice);
     }
     if let Some(short) = blame_copied {
         app.notify(format!("Copied commit {short}."));

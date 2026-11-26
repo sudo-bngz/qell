@@ -65,6 +65,14 @@ bottom, and language-server completion for the languages you actually use.
   Untracked)*, *Pop Latest Stash*, and *Pop / Apply / Drop Stash…* to pick
   one. Source Control lists each repository's stashes under *STASHES*, with
   Apply, Pop and Drop, and a **+** to stash what you have.
+- **Merge conflicts** — a file git left with `<<<<<<<` / `=======` /
+  `>>>>>>>` blocks (a merge, a rebase, a stash pop) shows them tinted: your
+  side green, the incoming side blue, the common ancestor grey (diff3).
+  Each `<<<<<<<` line ends with **Accept Current · Accept Incoming · Accept
+  Both**; one click replaces the block, as one undo step. *Merge: Accept
+  Current / Incoming / Both Change* work on the block around the cursor,
+  *Accept All Current / Incoming* on the whole file, *Next / Previous
+  Conflict* move between them. When none are left, save and stage the file.
 - **Git blame** — `Ctrl/⌘+Alt+B`, *View → Git Blame*, or the palette: a
   column beside the line numbers names the author and age of the commit
   that last changed each block of lines, newer commits brighter. Hover it

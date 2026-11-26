@@ -66,6 +66,8 @@ pub struct Document {
     pub folds: std::collections::BTreeSet<usize>,
     /// What can be folded: header line → last line of its region.
     pub fold_regions: std::collections::BTreeMap<usize, usize>,
+    /// Merge conflict blocks, and the version they were found in.
+    conflicts: (Vec<qell_core::conflict::Conflict>, Option<i32>),
     /// The text the regions were found in, and its line count.
     fold_key: Option<(i32, usize)>,
     /// Bumped when `folds` changes, so the layout is redone.
@@ -285,6 +287,7 @@ impl Document {
             max_cols: (0, None),
             folds: Default::default(),
             fold_regions: Default::default(),
+            conflicts: (Vec::new(), None),
             fold_key: None,
             folds_gen: 0,
             goal_col: None,
@@ -646,6 +649,43 @@ impl Document {
         self.goal_col = Some(x);
     }
 
+    /// The merge conflicts in the text (found again when it changed).
+    pub fn conflicts(&mut self) -> &[qell_core::conflict::Conflict] {
+        let version = self.buffer.version();
+        if self.conflicts.1 != Some(version) {
+            let found = if self.buffer.rope().chunks().any(|c| c.contains("<<<<<<<")) {
+                qell_core::conflict::conflicts(self.buffer.rope().lines().map(|l| l.to_string()))
+            } else {
+                Vec::new()
+            };
+            self.conflicts = (found, Some(version));
+        }
+        &self.conflicts.0
+    }
+
+    /// Replace conflict `i` by the lines of `choice`, as one undo step.
+    /// Returns how many conflicts are left.
+    pub fn resolve_conflict(&mut self, i: usize, choice: qell_core::conflict::Choice) -> usize {
+        use qell_core::Position;
+        let Some(c) = self.conflicts().get(i).cloned() else { return self.conflicts().len() };
+        let text = self.buffer.text();
+        let lines: Vec<&str> = text.split('\n').map(|l| l.trim_end_matches('\r')).collect();
+        let kept = c.resolve(&lines, choice);
+        let last = self.buffer.line_count().saturating_sub(1);
+        // Through the start of the line after the block, so its break goes
+        // too; at the end of the file, up to the end.
+        let (end, replacement) = if c.end < last {
+            (Position::new(c.end + 1, 0), kept.iter().map(|l| format!("{l}\n")).collect::<String>())
+        } else {
+            (Position::new(c.end, self.buffer.line_len(c.end)), kept.join("\n"))
+        };
+        self.buffer.replace_range(Position::new(c.start, 0), end, &replacement);
+        let at = Position::new(c.start.min(self.buffer.line_count().saturating_sub(1)), 0);
+        self.buffer.set_cursor(at, false);
+        self.scroll_to_cursor = true;
+        self.conflicts().len()
+    }
+
     /// Recompute brackets and the indentation step if the text changed.
     pub fn update_structure(&mut self, languages: &mut LanguageRegistry, tab_size: usize) {
         let key = (self.buffer.version(), tab_size);
@@ -792,6 +832,34 @@ mod hunk_tests {
         // A line replaced and another added right after it.
         let hs = hunks("a\nb\n", "a\nB\nC\n");
         assert_eq!(hs, vec![Hunk { base: 1..2, new: 1..3 }]);
+    }
+}
+
+#[cfg(test)]
+mod conflict_tests {
+    use super::*;
+    use qell_core::conflict::Choice;
+
+    const TEXT: &str = "a\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> b\nmid\n<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> b\n";
+
+    #[test]
+    fn resolving_one_then_undoing() {
+        let mut d = Document::new(Buffer::from_text(TEXT, None));
+        assert_eq!(d.conflicts().len(), 2);
+        assert_eq!(d.resolve_conflict(0, Choice::Incoming), 1);
+        assert_eq!(d.buffer.text(), "a\ntheirs\nmid\n<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> b\n");
+        d.buffer.undo();
+        assert_eq!(d.buffer.text(), TEXT);
+        assert_eq!(d.conflicts().len(), 2);
+        assert_eq!(d.resolve_conflict(1, Choice::Both), 1);
+        assert_eq!(d.buffer.text(), "a\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> b\nmid\nx\ny\n");
+    }
+
+    #[test]
+    fn a_block_ending_the_file() {
+        let mut d = Document::new(Buffer::from_text("<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> b", None));
+        assert_eq!(d.resolve_conflict(0, Choice::Current), 0);
+        assert_eq!(d.buffer.text(), "ours");
     }
 }
 

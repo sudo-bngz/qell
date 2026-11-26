@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use egui::{Context, Key, Modifiers};
+use qell_core::conflict::Choice;
 use qell_core::{Buffer, Cursor, LanguageRegistry, Position};
 use qell_git::{RepoStatus, Watcher as GitWatcher, WorkspaceStatus};
 use qell_lsp::convert::from_lsp_position;
@@ -2864,6 +2865,13 @@ impl QellApp {
             Command::GitStashPop => self.pick_git(PaletteMode::Stashes(StashAction::Pop)),
             Command::GitStashApply => self.pick_git(PaletteMode::Stashes(StashAction::Apply)),
             Command::GitStashDrop => self.pick_git(PaletteMode::Stashes(StashAction::Drop)),
+            Command::MergeAcceptCurrent => self.resolve_conflict_at_cursor(Choice::Current),
+            Command::MergeAcceptIncoming => self.resolve_conflict_at_cursor(Choice::Incoming),
+            Command::MergeAcceptBoth => self.resolve_conflict_at_cursor(Choice::Both),
+            Command::MergeAcceptAllCurrent => self.resolve_all_conflicts(Choice::Current),
+            Command::MergeAcceptAllIncoming => self.resolve_all_conflicts(Choice::Incoming),
+            Command::MergeNextConflict => self.go_to_conflict(true),
+            Command::MergePrevConflict => self.go_to_conflict(false),
             Command::RevertHunk => self.revert_hunk_at_cursor(),
             Command::ToggleBlame => match self.docs.get_mut(self.active) {
                 Some(doc) if doc.buffer.path().is_some() && doc.media.is_none() && doc.label.is_none() => {
