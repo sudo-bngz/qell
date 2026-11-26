@@ -2539,6 +2539,26 @@ impl QellApp {
             },
             // The panel's Problems tab; again hides the panel, like the
             // terminal's own toggle.
+            Command::Fold | Command::Unfold | Command::FoldAll | Command::UnfoldAll => {
+                let Some(doc) = self.docs.get_mut(self.active) else { return };
+                let line = doc.buffer.cursor.head().line;
+                let done = match cmd {
+                    Command::Fold => doc.fold_at(line),
+                    Command::Unfold => doc.unfold_at(line),
+                    Command::FoldAll => {
+                        doc.fold_all(true);
+                        true
+                    }
+                    _ => {
+                        doc.fold_all(false);
+                        true
+                    }
+                };
+                doc.scroll_to_cursor = true;
+                if !done {
+                    self.notify("Nothing to fold here.");
+                }
+            }
             Command::MarkdownPreview => match self.docs.get_mut(self.active) {
                 Some(doc) if doc.buffer.language() == Some("markdown") => doc.preview = !doc.preview,
                 _ => self.notify("The preview is for Markdown files."),

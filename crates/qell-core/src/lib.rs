@@ -9,6 +9,7 @@ pub mod alea;
 pub mod buffer;
 pub mod comment;
 pub mod conf;
+pub mod fold;
 pub mod history;
 pub mod position;
 pub mod structure;

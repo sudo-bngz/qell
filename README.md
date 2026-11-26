@@ -104,6 +104,13 @@ bottom, and language-server completion for the languages you actually use.
   that spot), run **Quick Fix…** on the first, or copy them; a folder lists
   its files with errors. In the editor, right-clicking a line with an
   error or warning shows the message in full, with Quick Fix and Copy.
+- **Code folding** — an arrow beside the line numbers (shown when the
+  pointer is over them, always on a folded line) folds the block below;
+  a folded line ends with `⋯`, click it to open. `Ctrl/⌘+Alt+[` folds the
+  block around the cursor, `Ctrl/⌘+Alt+]` opens it, and *Fold All /
+  Unfold All* are in the Edit menu. Blocks come from indentation, so it
+  works the same for every language; moving the cursor into a fold (a
+  search, a jump) opens it.
 - **Markdown preview** — `Ctrl/⌘+Alt+V`, *View → Markdown Preview*, or
   *◧ Preview* in the status bar renders a Markdown file beside its source,
   updating as you type: headings, lists, tables, task lists, quotes, code

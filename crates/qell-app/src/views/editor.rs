@@ -18,6 +18,8 @@ use crate::document::{DiskChange, LineMark};
 
 const GUTTER_PAD: f32 = 12.0;
 const TEXT_PAD: f32 = 8.0;
+/// The column between the line numbers and the text where fold arrows sit.
+const FOLD_W: f32 = 12.0;
 
 /// Central panel: tab strip + editor for the active document.
 pub fn show_central(app: &mut QellApp, ctx: &Context) {
@@ -548,7 +550,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                     doc.goal_col = None;
                 }
                 // Up/Down follow wrapped rows (when the layout is up to date).
-                let by_rows = doc.wrap.is_wrapped() && doc.wrap_is_current() && !app.completion.open;
+                let by_rows = doc.wrap.by_rows() && doc.wrap_is_current() && !app.completion.open;
                 if by_rows && vertical {
                     if let Event::Key { key, modifiers, .. } = ev {
                         let rows = match key {
@@ -784,7 +786,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
     let line_count = app.docs[doc_idx].buffer.line_count().max(line_count.min(1));
     let digits = line_count.to_string().len().max(3);
     let gutter_w = digits as f32 * char_width + GUTTER_PAD * 2.0;
-    let text_x0 = gutter_w + TEXT_PAD;
+    let text_x0 = gutter_w + FOLD_W + TEXT_PAD;
 
     let palette_text = app.palette.text;
     let palette_gutter = app.palette.gutter;
@@ -871,7 +873,34 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                 }
             }
         }
-        if !on_mark && (resp.clicked() || resp.drag_started()) {
+        // The fold arrow beside a header, or the ⋯ after a folded one.
+        let mut on_fold = false;
+        if !on_mark && resp.clicked() {
+            if let Some(p) = resp.interact_pointer_pos() {
+                let row = ((p.y - content_top) / row_height).floor().max(0.0) as usize;
+                let vr = wl.row(row.min(row_total.saturating_sub(1)));
+                let first_row = vr.start == 0;
+                let in_arrow = p.x >= origin.x + gutter_w && p.x < origin.x + gutter_w + FOLD_W;
+                let line = vr.line;
+                if first_row && in_arrow && doc.fold_regions.contains_key(&line) {
+                    let folded = doc.folds.contains(&line);
+                    doc.set_fold(line, !folded);
+                    on_fold = true;
+                } else if doc.folds.contains(&line) {
+                    let len = doc.buffer.line_len(line);
+                    let last = wl.rows_of_line(line).end.saturating_sub(1);
+                    let pill = origin.x + text_x0 + wl.screen_col(last, len) as f32 * char_width + char_width;
+                    if wl.row_of(Position::new(line, len)) == row && p.x >= pill && p.x <= pill + 3.0 * char_width {
+                        doc.set_fold(line, false);
+                        on_fold = true;
+                    }
+                }
+                if on_fold {
+                    clicked_editor = true;
+                }
+            }
+        }
+        if !on_mark && !on_fold && (resp.clicked() || resp.drag_started()) {
             clicked_editor = true;
             if let Some(p) = resp.interact_pointer_pos() {
                 let (shift, alt) = ui.input(|i| (i.modifiers.shift, i.modifiers.alt));
@@ -979,6 +1008,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
         let active = if indent_guides { active_guide(&line_indent, line_count, head.line, unit) } else { None };
 
         let inline_problems = app.config.inline_problems;
+        let gutter_hovered = resp.hover_pos().is_some_and(|p| p.x < origin.x + text_x0);
         for vrow in range.clone() {
             // A row on screen: all of a line, or a piece of a wrapped one.
             let vr = wl.row(vrow);
@@ -1089,6 +1119,30 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                 }
             }
 
+            // Fold arrows: always on a folded header, on the others while
+            // the pointer is over the gutter.
+            if vr.start == 0 && doc.fold_regions.contains_key(&row) {
+                let folded = doc.folds.contains(&row);
+                if folded || gutter_hovered {
+                    let c = Pos2::new(origin.x + gutter_w + FOLD_W / 2.0, y + row_height / 2.0);
+                    let s = (row_height * 0.18).max(3.0);
+                    let points = if folded {
+                        vec![c + Vec2::new(-s * 0.6, -s), c + Vec2::new(s * 0.8, 0.0), c + Vec2::new(-s * 0.6, s)]
+                    } else {
+                        vec![c + Vec2::new(-s, -s * 0.6), c + Vec2::new(s, -s * 0.6), c + Vec2::new(0.0, s * 0.8)]
+                    };
+                    let color = if folded { palette_text } else { palette_gutter };
+                    painter.add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
+                }
+            }
+            // A folded header ends with ⋯ (click it to open).
+            if last_seg && doc.folds.contains(&row) {
+                let x = xcol(line_chars) + char_width;
+                let pill = Rect::from_min_size(Pos2::new(x, y + 2.0), Vec2::new(3.0 * char_width, row_height - 4.0));
+                painter.rect_filled(pill, 3.0, palette_sel);
+                painter.text(pill.center(), Align2::CENTER_CENTER, "⋯", font.clone(), palette_text);
+            }
+
             // Gutter: the number on a line's first row only.
             if vr.start == 0 {
                 let num_color = if row == head.line { palette_text } else { palette_gutter };
@@ -1179,7 +1233,8 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                 if let Some(d) = worst {
                     let color = if d.severity == Some(DiagnosticSeverity::ERROR) { palette_err } else { palette_warn };
                     let what = d.message.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
-                    let x = xcol(line_chars) + char_width * 3.0;
+                    let past_fold = if doc.folds.contains(&row) { 4.0 } else { 0.0 };
+                    let x = xcol(line_chars) + char_width * (3.0 + past_fold);
                     let room = ((rect.right() - x) / char_width) as usize;
                     if room > 8 {
                         let text = if what.chars().count() > room {

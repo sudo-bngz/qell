@@ -1,8 +1,9 @@
-//! Word wrap: how text lines map to the rows drawn on screen.
+//! Word wrap and folding: how text lines map to the rows drawn on screen.
 //!
-//! Without wrapping, row `n` is line `n`. With it, a long line is split
-//! into several rows at word boundaries; continuation rows are indented
-//! like the line itself (VS Code's `wrappingIndent: "same"`).
+//! Without wrapping or folds, row `n` is line `n`. With wrapping, a long
+//! line is split into several rows at word boundaries; continuation rows
+//! are indented like the line itself (VS Code's `wrappingIndent: "same"`).
+//! Lines inside a folded region have no rows at all.
 
 use crate::Position;
 
@@ -22,6 +23,8 @@ pub struct VisualRow {
 pub struct WrapLayout {
     /// Columns per row; 0 when not wrapping.
     width: usize,
+    /// Rows are listed (wrapping or folds); otherwise row `n` is line `n`.
+    explicit: bool,
     lines: usize,
     rows: Vec<VisualRow>,
     /// Index of the first row of each line, plus one past the last.
@@ -34,16 +37,30 @@ pub const MIN_WRAP_WIDTH: usize = 20;
 impl WrapLayout {
     /// One row per line.
     pub fn plain(lines: usize) -> Self {
-        Self { width: 0, lines: lines.max(1), rows: Vec::new(), first: Vec::new() }
+        Self { width: 0, explicit: false, lines: lines.max(1), rows: Vec::new(), first: Vec::new() }
     }
 
     /// Wrap `lines` (without their line breaks) to `width` columns.
     pub fn wrapped<S: AsRef<str>>(lines: impl Iterator<Item = S>, width: usize) -> Self {
-        let width = width.max(MIN_WRAP_WIDTH);
+        Self::layout(lines, width.max(MIN_WRAP_WIDTH), |_| false)
+    }
+
+    /// Lay `lines` out: wrapped to `width` columns (0: not wrapped), with
+    /// the lines for which `hidden` is true given no row (they are folded
+    /// away under the line before them).
+    pub fn layout<S: AsRef<str>>(lines: impl Iterator<Item = S>, width: usize, hidden: impl Fn(usize) -> bool) -> Self {
+        let width = if width == 0 { 0 } else { width.max(MIN_WRAP_WIDTH) };
         let mut rows = Vec::new();
         let mut first = Vec::new();
         for (line, text) in lines.enumerate() {
             first.push(rows.len());
+            if line > 0 && hidden(line) {
+                continue;
+            }
+            if width == 0 {
+                rows.push(VisualRow { line, start: 0, end: usize::MAX, indent: 0 });
+                continue;
+            }
             let chars: Vec<char> = text.as_ref().trim_end_matches(['\n', '\r']).chars().collect();
             for (start, end, indent) in wrap_line(&chars, width) {
                 rows.push(VisualRow { line, start, end, indent });
@@ -55,11 +72,17 @@ impl WrapLayout {
         }
         let lines = first.len();
         first.push(rows.len());
-        Self { width, lines, rows, first }
+        Self { width, explicit: true, lines, rows, first }
     }
 
     pub fn is_wrapped(&self) -> bool {
         self.width > 0
+    }
+
+    /// Whether rows and lines differ (wrapping or folds), so moving up and
+    /// down goes by rows.
+    pub fn by_rows(&self) -> bool {
+        self.explicit
     }
 
     pub fn width(&self) -> usize {
@@ -67,7 +90,7 @@ impl WrapLayout {
     }
 
     pub fn row_count(&self) -> usize {
-        if self.is_wrapped() {
+        if self.explicit {
             self.rows.len()
         } else {
             self.lines
@@ -76,16 +99,16 @@ impl WrapLayout {
 
     /// Row `i` (clamped to the last one).
     pub fn row(&self, i: usize) -> VisualRow {
-        if self.is_wrapped() {
+        if self.explicit {
             self.rows[i.min(self.rows.len() - 1)]
         } else {
             VisualRow { line: i.min(self.lines - 1), start: 0, end: usize::MAX, indent: 0 }
         }
     }
 
-    /// The rows of one line.
+    /// The rows of one line (none for a folded-away line).
     pub fn rows_of_line(&self, line: usize) -> std::ops::Range<usize> {
-        if self.is_wrapped() {
+        if self.explicit {
             let l = line.min(self.lines - 1);
             self.first[l]..self.first[l + 1]
         } else {
@@ -95,12 +118,16 @@ impl WrapLayout {
 
     /// The row a position is drawn on. A column at a wrap point belongs to
     /// the row it starts.
+    /// A folded-away line is on the row of the line it is folded under.
     pub fn row_of(&self, p: Position) -> usize {
         let rows = self.rows_of_line(p.line);
-        if !self.is_wrapped() {
+        if !self.explicit {
             return rows.start.min(self.lines - 1);
         }
         let (s, e) = (rows.start, rows.end);
+        if s == e {
+            return s.saturating_sub(1).min(self.rows.len() - 1);
+        }
         s + self.rows[s..e].iter().rposition(|r| r.start <= p.col).unwrap_or(0)
     }
 
@@ -205,6 +232,21 @@ mod tests {
         assert_eq!(w.position_at(1, 50, len), Position::new(1, 19));
         assert_eq!(w.position_at(2, 50, len), Position::new(1, 34));
         assert_eq!(w.position_at(2, 3, len), Position::new(1, 23));
+    }
+
+    #[test]
+    fn folded_lines_have_no_rows() {
+        let text = ["fn a() {", "  one", "  two", "}", "fn b() {}"];
+        let w = WrapLayout::layout(text.iter(), 0, |l| l == 1 || l == 2);
+        assert!(w.by_rows() && !w.is_wrapped());
+        assert_eq!(w.row_count(), 3);
+        assert_eq!((w.row(0).line, w.row(1).line, w.row(2).line), (0, 3, 4));
+        assert!(w.rows_of_line(1).is_empty());
+        // A position inside the fold is drawn on the header's row.
+        assert_eq!(w.row_of(Position::new(2, 1)), 0);
+        assert_eq!(w.row_of(Position::new(3, 0)), 1);
+        // Down from the header lands after the fold.
+        assert_eq!(w.position_at(1, 0, |l| text[l].len()), Position::new(3, 0));
     }
 
     #[test]
