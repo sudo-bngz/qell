@@ -317,6 +317,11 @@ pub struct QellApp {
     pending_format: Option<PendingFormat>,
     /// Files language servers report errors in, and the errors.
     pub errors: HashMap<PathBuf, Vec<Diagnostic>>,
+    /// Everything servers report worth showing (errors, warnings, notes),
+    /// open files or not, for the Problems tab.
+    pub problems: HashMap<PathBuf, Vec<Diagnostic>>,
+    /// The bottom panel shows Problems rather than a terminal.
+    pub problems_open: bool,
     /// Which pane had the keyboard last frame, to notice coming back to
     /// the editor from the terminal.
     last_focus: Focus,
@@ -426,6 +431,8 @@ impl QellApp {
             pending_vim: Vec::new(),
             pending_format: None,
             errors: HashMap::new(),
+            problems: HashMap::new(),
+            problems_open: false,
             last_focus: Focus::Editor,
             k8s: views::k8s::K8sState::default(),
             aws: views::aws::AwsState::default(),
@@ -642,6 +649,7 @@ impl QellApp {
         self.git.set_root(path.clone());
         self.indexer.set_root(path.clone());
         self.errors.clear();
+        self.problems.clear();
         self.search = Default::default();
         self.nav_back.clear();
         self.nav_forward.clear();
@@ -2416,6 +2424,19 @@ impl QellApp {
                 (true, true) => views::aws::close(self),
                 (false, _) => views::aws::open(self, ctx),
             },
+            // The panel's Problems tab; again hides the panel, like the
+            // terminal's own toggle.
+            Command::ShowProblems => {
+                if self.show_terminal && self.problems_open {
+                    self.show_terminal = false;
+                } else {
+                    self.show_terminal = true;
+                    self.problems_open = true;
+                }
+                if self.focus == Focus::Terminal {
+                    self.focus = self.focus_behind_terminal();
+                }
+            }
             Command::ToggleTerminal => {
                 self.show_terminal = !self.show_terminal;
                 // Closing it hands the keyboard back to whatever is behind.
@@ -2423,6 +2444,7 @@ impl QellApp {
             }
             Command::NewTerminal => {
                 self.show_terminal = true;
+                self.problems_open = false;
                 self.new_terminal();
                 self.focus = Focus::Terminal;
             }
@@ -2717,6 +2739,15 @@ impl QellApp {
         } else {
             self.errors.insert(path.to_path_buf(), errors);
         }
+        // Hints are suggestions a server makes in passing, not problems.
+        let mut worth: Vec<Diagnostic> =
+            diagnostics.iter().filter(|d| d.severity != Some(qell_lsp::lsp_types::DiagnosticSeverity::HINT)).cloned().collect();
+        if worth.is_empty() {
+            self.problems.remove(path);
+        } else {
+            worth.sort_by_key(|d| (d.range.start.line, d.range.start.character));
+            self.problems.insert(path.to_path_buf(), worth);
+        }
         if let Some(d) = self.docs.iter_mut().find(|d| d.buffer.path() == Some(path)) {
             d.diagnostics = diagnostics;
         }
@@ -2887,6 +2918,7 @@ impl QellApp {
                 Command::ToggleCluster,
                 Command::ToggleAws,
                 Command::ToggleTerminal,
+                Command::ShowProblems,
                 Command::CommandPalette,
                 Command::ToggleSidebar,
                 // Asking for a file is asking for the editor back, and
@@ -2924,6 +2956,7 @@ impl QellApp {
                 && !matches!(
                     cmd,
                     Command::ToggleTerminal
+                        | Command::ShowProblems
                         | Command::ToggleCluster
                         | Command::ToggleAws
                         | Command::NewTerminal

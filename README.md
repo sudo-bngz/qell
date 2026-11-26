@@ -104,6 +104,12 @@ bottom, and language-server completion for the languages you actually use.
   that spot), run **Quick Fix…** on the first, or copy them; a folder lists
   its files with errors. In the editor, right-clicking a line with an
   error or warning shows the message in full, with Quick Fix and Copy.
+- **Problems** — the bottom panel has a *PROBLEMS* tab beside the
+  terminals (`Ctrl/⌘+Shift+M`, or click the error count in the status
+  bar): every error and warning the language servers report, by file,
+  files with errors first. Click one to go to it. In the editor, a line's
+  worst problem is also written in full after its end (Settings → *Problems
+  at Line End*).
 - **Branches in the tree** — each repository's folder shows the branch it
   is on, dimmed after its name (Settings → *Branches in File Tree* turns
   it off). Names in the tree and tabs are set at the editor's font size.

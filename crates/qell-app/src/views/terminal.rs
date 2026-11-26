@@ -21,12 +21,16 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
             // the tabs and buttons on top keep their own clicks. Covers the
             // padding (6 px sides, 4 px top) except the resize handles.
             let panel = ui.max_rect().expand2(Vec2::new(3.0, 1.0));
-            if ui.interact(panel, ui.id().with("terminal_panel_bg"), Sense::click()).clicked() {
+            if ui.interact(panel, ui.id().with("terminal_panel_bg"), Sense::click()).clicked() && !app.problems_open {
                 app.focus = Focus::Terminal;
             }
             show_header(app, ui);
             ui.add_space(2.0);
-            show_grid(app, ui);
+            if app.problems_open {
+                super::problems::show(app, ui);
+            } else {
+                show_grid(app, ui);
+            }
         });
 }
 
@@ -44,7 +48,9 @@ fn show_header(app: &mut QellApp, ui: &mut egui::Ui) {
         let mut hide = false;
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             hide = ui.small_button("×").on_hover_text("Hide panel").clicked();
-            restart = ui.small_button("⟳").on_hover_text("Restart this shell").clicked();
+            if !app.problems_open {
+                restart = ui.small_button("⟳").on_hover_text("Restart this shell").clicked();
+            }
             let new_tip = format!("New terminal ({})", Command::NewTerminal.shortcut_text(ui.ctx()));
             new = ui.small_button("+").on_hover_text(new_tip).clicked();
 
@@ -52,10 +58,12 @@ fn show_header(app: &mut QellApp, ui: &mut egui::Ui) {
                 egui::ScrollArea::horizontal().id_salt("terminal_tabs").auto_shrink([false, true]).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 2.0;
+                        // Problems first, then the shells, as in VS Code.
+                        problems_tab(app, ui);
                         let mut switch_to = None;
                         let mut kill = None;
                         for (i, tab) in app.terminals.iter().enumerate() {
-                            let active = i == app.active_terminal;
+                            let active = i == app.active_terminal && !app.problems_open;
                             let full = tab.label();
                             let label =
                                 if multiple { format!("{}: {}", tab.number, shorten(&full, 32)) } else { shorten(&full, 48) };
@@ -88,13 +96,14 @@ fn show_header(app: &mut QellApp, ui: &mut egui::Ui) {
                             if resp.middle_clicked() {
                                 kill = Some(i);
                             }
-                            if active && multiple {
+                            if active {
                                 let r = resp.rect;
                                 ui.painter().hline(r.x_range(), r.bottom(), Stroke::new(1.5_f32, accent));
                             }
                         }
                         if let Some(i) = switch_to {
                             app.active_terminal = i;
+                            app.problems_open = false;
                             app.focus = Focus::Terminal;
                         }
                         if let Some(i) = kill {
@@ -105,6 +114,7 @@ fn show_header(app: &mut QellApp, ui: &mut egui::Ui) {
             });
         });
         if new {
+            app.problems_open = false;
             app.new_terminal();
             app.focus = Focus::Terminal;
         }
@@ -116,6 +126,48 @@ fn show_header(app: &mut QellApp, ui: &mut egui::Ui) {
             app.focus = Focus::Editor;
         }
     });
+}
+
+/// The Problems tab: how many errors and warnings, and opens the list.
+fn problems_tab(app: &mut QellApp, ui: &mut egui::Ui) {
+    use qell_lsp::lsp_types::DiagnosticSeverity;
+    let all = app.problems.values().flatten();
+    let (mut errors, mut warnings) = (0, 0);
+    for d in all {
+        match d.severity {
+            Some(DiagnosticSeverity::ERROR) => errors += 1,
+            Some(DiagnosticSeverity::WARNING) => warnings += 1,
+            _ => {}
+        }
+    }
+    let open = app.problems_open;
+    let fmt = |color: Color32| egui::text::TextFormat { font_id: egui::FontId::proportional(11.0), color, ..Default::default() };
+    let mut job = egui::text::LayoutJob::default();
+    job.append("PROBLEMS", 0.0, fmt(if open { app.palette.text } else { app.palette.text_dim }));
+    if errors > 0 {
+        job.append(&errors.to_string(), 6.0, fmt(app.palette.error));
+    }
+    if warnings > 0 {
+        job.append(&warnings.to_string(), 6.0, fmt(app.palette.warning));
+    }
+    let inner = egui::Frame::new().inner_margin(egui::Margin::symmetric(6, 1)).show(ui, |ui| ui.label(job));
+    let shortcut = Command::ShowProblems.shortcut_text(ui.ctx());
+    let resp = inner
+        .response
+        .interact(Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(format!("Errors and warnings from the language servers ({shortcut})"));
+    if resp.clicked() {
+        app.problems_open = true;
+        if app.focus == Focus::Terminal {
+            app.focus = Focus::Editor;
+        }
+    }
+    if open {
+        let r = resp.rect;
+        ui.painter().hline(r.x_range(), r.bottom(), Stroke::new(1.5_f32, app.palette.accent));
+    }
+    ui.add_space(6.0);
 }
 
 /// Trim long shell titles ("user@host: /a/very/long/path") from the left,

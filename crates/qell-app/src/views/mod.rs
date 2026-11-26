@@ -10,6 +10,7 @@ pub mod media;
 pub mod menu;
 pub mod minimap;
 pub mod palette;
+pub mod problems;
 pub mod scm;
 pub mod search;
 pub mod settings;

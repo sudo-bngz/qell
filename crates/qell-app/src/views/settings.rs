@@ -99,6 +99,12 @@ fn defs() -> Vec<Def> {
         def("ui_scale", "Appearance", "UI Scale", "Size of the whole interface."),
         def("file_icons", "Appearance", "File Icons", "Show file-type icons in the file tree and tabs."),
         def(
+            "inline_problems",
+            "Editor",
+            "Problems at Line End",
+            "Write an error's or warning's message after the end of its line.",
+        ),
+        def(
             "tree_branches",
             "Appearance",
             "Branches in File Tree",
@@ -189,6 +195,7 @@ fn is_modified(key: &str, c: &Config) -> bool {
         "indent_guides" => c.indent_guides != d.indent_guides,
         "ui_scale" => c.ui_scale != d.ui_scale,
         "file_icons" => c.file_icons != d.file_icons,
+        "inline_problems" => c.inline_problems != d.inline_problems,
         "tree_branches" => c.tree_branches != d.tree_branches,
         "git_status" => c.git_status != d.git_status,
         "git_scan_depth" => c.git_scan_depth != d.git_scan_depth,
@@ -221,6 +228,7 @@ fn reset(key: &str, c: &mut Config) {
         "indent_guides" => c.indent_guides = d.indent_guides,
         "ui_scale" => c.ui_scale = d.ui_scale,
         "file_icons" => c.file_icons = d.file_icons,
+        "inline_problems" => c.inline_problems = d.inline_problems,
         "tree_branches" => c.tree_branches = d.tree_branches,
         "git_status" => c.git_status = d.git_status,
         "git_scan_depth" => c.git_scan_depth = d.git_scan_depth,
@@ -326,6 +334,9 @@ fn control(ui: &mut egui::Ui, key: &str, c: &mut Config, drafts: &mut HashMap<St
         }
         "file_icons" => {
             ui.checkbox(&mut c.file_icons, "Enabled");
+        }
+        "inline_problems" => {
+            ui.checkbox(&mut c.inline_problems, "Enabled");
         }
         "tree_branches" => {
             ui.checkbox(&mut c.tree_branches, "Enabled");
@@ -525,6 +536,7 @@ mod tests {
                 "indent_guides" => c.indent_guides = false,
                 "ui_scale" => c.ui_scale = 1.5,
                 "file_icons" => c.file_icons = false,
+                "inline_problems" => c.inline_problems = false,
                 "tree_branches" => c.tree_branches = false,
                 "git_status" => c.git_status = false,
                 "git_scan_depth" => c.git_scan_depth = 1,

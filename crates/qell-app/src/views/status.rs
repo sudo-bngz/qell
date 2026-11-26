@@ -63,8 +63,11 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                 let errors = doc.diagnostics.iter().filter(|d| d.severity == Some(DiagnosticSeverity::ERROR)).count();
                 let warnings = doc.diagnostics.iter().filter(|d| d.severity == Some(DiagnosticSeverity::WARNING)).count();
                 if errors + warnings > 0 {
-                    ui.label(small(format!("✖ {errors}")).color(error_color));
-                    ui.label(small(format!("⚠ {warnings}")).color(warning_color));
+                    let e = ui.add(egui::Label::new(small(format!("✖ {errors}")).color(error_color)).sense(egui::Sense::click()));
+                    let w = ui.add(egui::Label::new(small(format!("⚠ {warnings}")).color(warning_color)).sense(egui::Sense::click()));
+                    if e.on_hover_text("Show Problems").clicked() || w.clicked() {
+                        app.pending_commands.push(crate::commands::Command::ShowProblems);
+                    }
                 }
             }
 

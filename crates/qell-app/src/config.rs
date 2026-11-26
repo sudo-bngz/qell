@@ -70,6 +70,8 @@ pub struct Config {
     pub tree_changed: bool,
     /// Show each repository's current branch beside its folder.
     pub tree_branches: bool,
+    /// Write the message of a line's error or warning after its end.
+    pub inline_problems: bool,
     /// Show the file tree on startup.
     pub show_sidebar: bool,
     /// Show the terminal panel on startup.
@@ -119,6 +121,7 @@ impl Default for Config {
             tree_sort: TreeSort::Name,
             tree_changed: false,
             tree_branches: true,
+            inline_problems: true,
             show_sidebar: true,
             show_terminal: true,
             shell: String::new(),
