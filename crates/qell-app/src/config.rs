@@ -49,6 +49,10 @@ pub struct Config {
     pub bracket_pair_colors: bool,
     /// Vertical lines at each indentation level, the current block's brighter.
     pub indent_guides: bool,
+    /// An Outline section under the file tree, listing what the open file defines.
+    pub outline: bool,
+    /// Keep the lines opening the blocks scrolled into at the top of the editor.
+    pub sticky_scroll: bool,
     /// Scale of the whole interface (1.0 = 100%).
     pub ui_scale: f32,
     /// Show file-type icons in the file tree and tabs.
@@ -111,6 +115,8 @@ impl Default for Config {
             minimap: true,
             bracket_pair_colors: true,
             indent_guides: true,
+            outline: true,
+            sticky_scroll: true,
             ui_scale: 1.0,
             file_icons: true,
             git_status: true,

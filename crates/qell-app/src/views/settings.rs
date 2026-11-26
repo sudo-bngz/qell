@@ -90,6 +90,8 @@ fn defs() -> Vec<Def> {
             "Indent Guides",
             "Vertical lines at each indentation level; the block around the cursor is highlighted.",
         ),
+        def("outline", "Editor", "Outline", "An Outline section under the file tree lists what the open file defines; click to jump."),
+        def("sticky_scroll", "Editor", "Sticky Scroll", "The lines that open the blocks you are scrolled into (a function, an if) stay at the top of the editor."),
         def(
             "minimap",
             "Appearance",
@@ -193,6 +195,8 @@ fn is_modified(key: &str, c: &Config) -> bool {
         "minimap" => c.minimap != d.minimap,
         "bracket_pair_colors" => c.bracket_pair_colors != d.bracket_pair_colors,
         "indent_guides" => c.indent_guides != d.indent_guides,
+        "outline" => c.outline != d.outline,
+        "sticky_scroll" => c.sticky_scroll != d.sticky_scroll,
         "ui_scale" => c.ui_scale != d.ui_scale,
         "file_icons" => c.file_icons != d.file_icons,
         "inline_problems" => c.inline_problems != d.inline_problems,
@@ -226,6 +230,8 @@ fn reset(key: &str, c: &mut Config) {
         "minimap" => c.minimap = d.minimap,
         "bracket_pair_colors" => c.bracket_pair_colors = d.bracket_pair_colors,
         "indent_guides" => c.indent_guides = d.indent_guides,
+        "outline" => c.outline = d.outline,
+        "sticky_scroll" => c.sticky_scroll = d.sticky_scroll,
         "ui_scale" => c.ui_scale = d.ui_scale,
         "file_icons" => c.file_icons = d.file_icons,
         "inline_problems" => c.inline_problems = d.inline_problems,
@@ -331,6 +337,12 @@ fn control(ui: &mut egui::Ui, key: &str, c: &mut Config, drafts: &mut HashMap<St
         }
         "indent_guides" => {
             ui.checkbox(&mut c.indent_guides, "Enabled");
+        }
+        "outline" => {
+            ui.checkbox(&mut c.outline, "Visible");
+        }
+        "sticky_scroll" => {
+            ui.checkbox(&mut c.sticky_scroll, "Enabled");
         }
         "file_icons" => {
             ui.checkbox(&mut c.file_icons, "Enabled");
@@ -534,6 +546,8 @@ mod tests {
                 "minimap" => c.minimap = false,
                 "bracket_pair_colors" => c.bracket_pair_colors = false,
                 "indent_guides" => c.indent_guides = false,
+                "outline" => c.outline = false,
+                "sticky_scroll" => c.sticky_scroll = false,
                 "ui_scale" => c.ui_scale = 1.5,
                 "file_icons" => c.file_icons = false,
                 "inline_problems" => c.inline_problems = false,

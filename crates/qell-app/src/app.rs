@@ -344,6 +344,29 @@ pub fn shift_line(line: usize, focused: usize, delta: isize) -> usize {
     }
 }
 
+/// A language server's symbols as rows, in the columns of `doc`.
+fn server_symbol_rows(doc: &Document, symbols: Vec<qell_lsp::FileSymbol>) -> Vec<SymbolRow> {
+    let mut rows: Vec<SymbolRow> = symbols
+        .into_iter()
+        .map(|s| {
+            let line = s.range.start.line as usize;
+            let text = doc.buffer.line(line);
+            let start = from_lsp_position(&text, s.range.start);
+            let end = from_lsp_position(&text, s.range.end);
+            SymbolRow {
+                name: s.name,
+                kind: s.kind,
+                container: s.container,
+                line,
+                col: start.col,
+                end_col: end.col.max(start.col),
+            }
+        })
+        .collect();
+    rows.sort_by_key(|s| (s.line, s.col));
+    rows
+}
+
 /// What changes the remembered session: the tabs, the one in front, and
 /// the split (other side's tab, which side has focus).
 type SessionKey = (Vec<PathBuf>, usize, Option<(usize, bool)>);
@@ -401,6 +424,8 @@ pub struct QellApp {
     pub code_actions: Vec<qell_lsp::lsp_types::CodeActionOrCommand>,
     /// What the open file defines, for Go to Symbol.
     pub symbols: Vec<SymbolRow>,
+    /// The Outline section under the file tree.
+    pub outline: crate::views::outline::Outline,
     pending_symbols: Option<RequestId>,
     /// Reads definitions out of a file; built the first time it is needed
     /// (compiling the tree-sitter queries takes a moment).
@@ -540,6 +565,7 @@ impl QellApp {
             code_actions: Vec::new(),
             symbols: Vec::new(),
             pending_symbols: None,
+            outline: Default::default(),
             extractor: None,
             pending_action_resolve: None,
             rename_symbol: String::new(),
@@ -1589,22 +1615,7 @@ impl QellApp {
     pub fn go_to_symbol(&mut self) {
         let Some(doc) = self.docs.get(self.active) else { return };
         let lang = doc.buffer.language().unwrap_or("").to_string();
-        let text = doc.buffer.text();
-        let extractor = self.extractor.get_or_insert_with(qell_index::symbols::Extractor::new);
-        if extractor.supports(&lang) {
-            let mut rows: Vec<SymbolRow> = extractor
-                .extract(&lang, &text)
-                .into_iter()
-                .map(|s| SymbolRow {
-                    name: s.name,
-                    kind: s.kind,
-                    container: String::new(),
-                    line: s.line,
-                    col: s.col,
-                    end_col: s.end_col,
-                })
-                .collect();
-            rows.sort_by_key(|s| (s.line, s.col));
+        if let Some(rows) = self.local_symbols(self.active) {
             if rows.is_empty() {
                 self.notify("Nothing defined in this file.");
                 return;
@@ -1623,30 +1634,52 @@ impl QellApp {
         }
     }
 
+    /// What a tab defines, read by Qell itself; `None` for the languages
+    /// it can't read (the language server's job).
+    pub fn local_symbols(&mut self, doc: usize) -> Option<Vec<SymbolRow>> {
+        let doc = self.docs.get(doc)?;
+        let lang = doc.buffer.language().unwrap_or("").to_string();
+        let extractor = self.extractor.get_or_insert_with(qell_index::symbols::Extractor::new);
+        if !extractor.supports(&lang) {
+            return None;
+        }
+        let mut rows: Vec<SymbolRow> = extractor
+            .extract(&lang, &doc.buffer.text())
+            .into_iter()
+            .map(|s| SymbolRow {
+                name: s.name,
+                kind: s.kind,
+                container: String::new(),
+                line: s.line,
+                col: s.col,
+                end_col: s.end_col,
+            })
+            .collect();
+        rows.sort_by_key(|s| (s.line, s.col));
+        Some(rows)
+    }
+
+    /// Ask the language server what the active tab defines (for the
+    /// Outline). `None` when there is no server that can.
+    pub fn request_outline_symbols(&mut self) -> Option<RequestId> {
+        let doc = self.docs.get_mut(self.active)?;
+        self.lsp.request_symbols(&self.languages, &mut doc.buffer)
+    }
+
     fn handle_symbols(&mut self, id: RequestId, symbols: Vec<qell_lsp::FileSymbol>) {
+        if self.outline.pending == Some(id) {
+            self.outline.pending = None;
+            if let Some(doc) = self.docs.get(self.active) {
+                self.outline.rows = server_symbol_rows(doc, symbols);
+            }
+            return;
+        }
         if self.pending_symbols != Some(id) {
             return;
         }
         self.pending_symbols = None;
         let Some(doc) = self.docs.get(self.active) else { return };
-        let mut rows: Vec<SymbolRow> = symbols
-            .into_iter()
-            .map(|s| {
-                let line = s.range.start.line as usize;
-                let text = doc.buffer.line(line);
-                let start = from_lsp_position(&text, s.range.start);
-                let end = from_lsp_position(&text, s.range.end);
-                SymbolRow {
-                    name: s.name,
-                    kind: s.kind,
-                    container: s.container,
-                    line,
-                    col: start.col,
-                    end_col: end.col.max(start.col),
-                }
-            })
-            .collect();
-        rows.sort_by_key(|s| (s.line, s.col));
+        let rows = server_symbol_rows(doc, symbols);
         if rows.is_empty() {
             self.notify("The language server found nothing defined in this file.");
             return;
@@ -3460,6 +3493,7 @@ impl eframe::App for QellApp {
         // apply started from a manifest tab), so they are drained here
         // rather than while drawing the panel.
         views::k8s::update(self, ctx);
+        views::outline::update(self, ctx);
         views::aws::update(self, ctx);
         self.handle_config(ctx);
         // The tabs changed: remember them (cursors are saved again on exit).

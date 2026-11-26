@@ -56,9 +56,37 @@ pub fn around(regions: &BTreeMap<usize, usize>, line: usize) -> Option<(usize, u
     regions.range(..=line).rev().find(|(_, &end)| end >= line).map(|(&h, &e)| (h, e))
 }
 
+/// Sticky scroll: the lines opening the blocks around line `top`, the
+/// outermost first, at most `max`. They cover the first rows on screen, so
+/// a block is kept only while it still holds the first line visible below
+/// them.
+pub fn sticky(regions: &BTreeMap<usize, usize>, top: usize, max: usize) -> Vec<usize> {
+    let mut lines: Vec<(usize, usize)> =
+        regions.range(..top).filter(|(_, end)| **end >= top).map(|(h, e)| (*h, *e)).take(max).collect();
+    while lines.last().is_some_and(|(_, end)| *end < top + lines.len()) {
+        lines.pop();
+    }
+    lines.into_iter().map(|(h, _)| h).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sticky_lines_are_the_open_blocks() {
+        let code = "fn a() {\n    if x {\n        one();\n        two();\n        three();\n    }\n}\n";
+        let r = regions(code.lines(), 4);
+        assert_eq!(sticky(&r, 0, 3), Vec::<usize>::new());
+        // Scrolled to `one();`: fn and if stay on top, covering two rows,
+        // so the blocks are those around `three();` — the same.
+        assert_eq!(sticky(&r, 2, 3), vec![0, 1]);
+        assert_eq!(sticky(&r, 2, 1), vec![0]);
+        // At `three();`: the if would cover its own last line, so only fn.
+        assert_eq!(sticky(&r, 4, 3), vec![0]);
+        // At the if's `}`: fn's last line is hidden under it, so nothing.
+        assert_eq!(sticky(&r, 5, 3), Vec::<usize>::new());
+    }
 
     const CODE: &str = "\
 fn main() {

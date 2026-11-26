@@ -9,6 +9,7 @@ pub mod k8s;
 pub mod media;
 pub mod menu;
 pub mod minimap;
+pub mod outline;
 pub mod palette;
 pub mod problems;
 pub mod scm;
