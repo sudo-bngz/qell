@@ -73,6 +73,7 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                 item(ui, app, Command::ToggleTerminal);
                 item(ui, app, Command::ShowProblems);
                 item(ui, app, Command::MarkdownPreview);
+                item(ui, app, Command::SplitEditor);
                 item(ui, app, Command::ToggleCluster);
                 item(ui, app, Command::ToggleAws);
                 item(ui, app, Command::NewTerminal);

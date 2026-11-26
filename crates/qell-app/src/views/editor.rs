@@ -35,19 +35,68 @@ pub fn show_central(app: &mut QellApp, ctx: &Context) {
             return;
         }
         show_tabs(app, ui);
-        // A picture or a video is looked at, not edited.
-        if super::media::show(app, ui, ctx) {
+        app.fix_split();
+        let Some(split) = app.split else {
+            show_pane(app, ui, ctx);
             return;
-        }
-        show_manifest_bar(app, ui);
-        show_disk_bar(app, ui);
-        if app.config.vim_mode {
-            show_vim_bar(app, ui);
-        }
-        show_preview(app, ui);
-        show_editor(app, ui);
+        };
+        // Split: the right side in a resizable panel, the left in the rest.
+        let border = app.palette.border;
+        let width = ui.available_width();
+        egui::SidePanel::right("split_right")
+            .resizable(true)
+            .default_width(width / 2.0)
+            .width_range(160.0..=(width - 160.0).max(160.0))
+            .frame(egui::Frame::new().fill(bg).stroke(Stroke::new(1.0_f32, border)))
+            .show_inside(ui, |ui| show_side(app, ui, ctx, true, split));
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(bg))
+            .show_inside(ui, |ui| show_side(app, ui, ctx, false, split));
     });
     show_completion_popup(app, ctx);
+}
+
+/// One side of a split editor. The side without focus is drawn with its
+/// tab swapped in for the moment; pressing the mouse in it moves the focus
+/// there.
+fn show_side(app: &mut QellApp, ui: &mut egui::Ui, ctx: &Context, right: bool, split: crate::app::Split) {
+    let inactive = split.right_focused != right;
+    let rect = ui.max_rect();
+    let pressed = ui.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| rect.contains(p)));
+    let focused = app.active;
+    if inactive {
+        app.active = split.other;
+        app.pane_inactive = true;
+    }
+    show_pane(app, ui, ctx);
+    if inactive {
+        // Whatever happened in there (a click moved its cursor) stays with
+        // that tab; the focused one comes back.
+        app.active = focused;
+        app.pane_inactive = false;
+    }
+    if pressed && app.split.is_some() {
+        app.focus_side(right);
+    }
+    // The focused side: a line of the accent colour along its top.
+    if app.split.is_some_and(|s| s.right_focused == right) && app.focus == Focus::Editor {
+        let r = ui.max_rect();
+        ui.painter().hline(r.x_range(), r.top() + 0.5, Stroke::new(1.0_f32, app.palette.accent));
+    }
+}
+
+fn show_pane(app: &mut QellApp, ui: &mut egui::Ui, ctx: &Context) {
+    // A picture or a video is looked at, not edited.
+    if super::media::show(app, ui, ctx) {
+        return;
+    }
+    show_manifest_bar(app, ui);
+    show_disk_bar(app, ui);
+    if app.config.vim_mode && !app.pane_inactive {
+        show_vim_bar(app, ui);
+    }
+    show_preview(app, ui);
+    show_editor(app, ui);
 }
 
 /// A Markdown file rendered on the right half, live, while it is edited
@@ -60,7 +109,7 @@ fn show_preview(app: &mut QellApp, ui: &mut egui::Ui) {
     let border = app.palette.border;
     let id = egui::Id::new(("md_preview", doc.buffer.path().map(|p| p.to_path_buf())));
     let half = ui.available_width() / 2.0;
-    egui::SidePanel::right("md_preview")
+    egui::SidePanel::right(ui.id().with("md_preview"))
         .resizable(true)
         .default_width(half)
         .width_range(200.0..=ui.available_width() - 200.0)
@@ -232,6 +281,7 @@ fn show_tabs(app: &mut QellApp, ui: &mut egui::Ui) {
                 let mut close = None;
                 let mut tab_menu: Option<(usize, TabMenu)> = None;
                 let count = app.docs.len();
+                let other_side = app.split.map(|s| s.other);
                 for (i, doc) in app.docs.iter().enumerate() {
                     let active = i == app.active;
                     let title = doc.title();
@@ -293,6 +343,10 @@ fn show_tabs(app: &mut QellApp, ui: &mut egui::Ui) {
                     if active {
                         let r = resp.rect;
                         ui.painter().hline(r.x_range(), r.bottom() - 0.5, Stroke::new(1.0_f32, accent));
+                    } else if other_side == Some(i) {
+                        // Shown on the other side of a split.
+                        let r = resp.rect;
+                        ui.painter().hline(r.x_range(), r.bottom() - 0.5, Stroke::new(1.0_f32, text_dim));
                     }
                 }
                 if let Some(i) = switch_to {
@@ -436,7 +490,8 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
     let auto_close = app.config.auto_close;
     let indent_guides = app.config.indent_guides;
 
-    let has_focus_before = app.focus == Focus::Editor && !app.modal_open();
+    let inactive = app.pane_inactive;
+    let has_focus_before = app.focus == Focus::Editor && !app.modal_open() && !inactive;
     let id = ui.id().with("editor").with(doc_idx);
 
     // Esc in a tab the cluster view opened goes back to the list, the way
@@ -1295,7 +1350,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
         }
 
         // Keep the cursor in view.
-        if doc.scroll_to_cursor {
+        if doc.scroll_to_cursor && !inactive {
             doc.scroll_to_cursor = false;
             let hrow = wl.row_of(head);
             let x = origin.x + text_x0 + wl.screen_col(hrow, head.col) as f32 * char_width;
@@ -1318,8 +1373,11 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
     }
     outer.allocate_rect(full, Sense::hover());
 
-    // The find bar floats over the top-right of the editor.
-    super::find::show(app, outer, Rect::from_min_max(full.min, Pos2::new(full.right() - mm_w, full.bottom())));
+    // The find bar floats over the top-right of the editor (the focused
+    // one, when split).
+    if !inactive {
+        super::find::show(app, outer, Rect::from_min_max(full.min, Pos2::new(full.right() - mm_w, full.bottom())));
+    }
     if go_to_definition {
         app.go_to_definition();
     }
@@ -1349,7 +1407,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
     {
         app.focus = Focus::Editor;
     }
-    if let Some(p) = cursor_screen {
+    if let Some(p) = cursor_screen.filter(|_| !inactive) {
         app.completion.anchor = p;
     }
     if let Some((line, at)) = gutter_hunk {
