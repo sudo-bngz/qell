@@ -10,6 +10,7 @@ mod commands;
 mod config;
 mod document;
 mod format;
+mod gitops;
 mod icons;
 mod native_menu;
 mod preview;

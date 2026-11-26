@@ -15,6 +15,7 @@
 pub mod graph;
 
 pub mod blame;
+pub mod refs;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1051,6 +1052,39 @@ mod tests {
         for args in [&["add", "."][..], &["commit", "-q", "-m", "init"]] {
             assert!(Command::new("git").arg("-C").arg(dir).args(args).output().unwrap().status.success());
         }
+    }
+
+    #[test]
+    fn branches_and_stashes_in_a_real_repository() {
+        use crate::refs;
+        if !git_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        init_repo(root);
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        commit_all(root);
+        assert!(refs::valid_branch_name(root, "feat/x"));
+        assert!(!refs::valid_branch_name(root, "bad..name"));
+        refs::create(root, "feat/x").unwrap();
+        let b = refs::branches(root).unwrap();
+        assert_eq!(b.iter().find(|b| b.current).map(|b| b.name.as_str()), Some("feat/x"));
+        // Stash a change, see it listed, bring it back.
+        std::fs::write(root.join("a.txt"), "two\n").unwrap();
+        refs::stash(root, "half done", false).unwrap();
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "one\n");
+        let s = refs::stashes(root).unwrap();
+        assert!(s[0].message.contains("half done"));
+        refs::unstash(root, &s[0], true).unwrap();
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "two\n");
+        assert!(refs::stashes(root).unwrap().is_empty());
+        // Back to main, then the branch goes.
+        let main = b.iter().find(|b| b.name == "main").unwrap().clone();
+        refs::stash(root, "", false).unwrap();
+        refs::switch(root, &main, &b).unwrap();
+        refs::delete(root, "feat/x", false).unwrap();
+        assert!(refs::branches(root).unwrap().iter().all(|b| b.name != "feat/x"));
     }
 
     #[test]

@@ -26,6 +26,12 @@ pub enum JobKind {
     Stage,
     Unstage,
     Commit,
+    Switch,
+    CreateBranch,
+    DeleteBranch,
+    Stash,
+    /// Apply, pop or drop a stash.
+    Unstash,
 }
 
 pub struct ScmState {
@@ -35,6 +41,11 @@ pub struct ScmState {
     pub busy: HashSet<PathBuf>,
     /// A commit message box has the keyboard: the editor must not type.
     pub typing: bool,
+    /// Stashes per repository, read when shown and forgotten when git
+    /// status or a stash command changes them.
+    pub stashes: HashMap<PathBuf, Result<Vec<qell_git::refs::Stash>, String>>,
+    /// Repositories whose stash list is open.
+    pub stashes_open: HashSet<PathBuf>,
     tx: Sender<JobResult>,
     rx: Receiver<JobResult>,
     /// Repository whose history the Graph shows (picked by the user).
@@ -58,6 +69,8 @@ impl Default for ScmState {
             messages: HashMap::new(),
             busy: HashSet::new(),
             typing: false,
+            stashes: HashMap::new(),
+            stashes_open: HashSet::new(),
             tx,
             rx,
             graph_repo: None,
@@ -71,7 +84,7 @@ impl Default for ScmState {
 }
 
 impl ScmState {
-    fn spawn(
+    pub fn spawn(
         &mut self,
         root: &Path,
         repo: &Path,
@@ -247,7 +260,13 @@ fn show_repo(app: &mut QellApp, ui: &mut egui::Ui, rel: &Path, st: &RepoStatus) 
     ui.horizontal(|ui| {
         ui.label(RichText::new(icons::SOURCE_CONTROL.to_string()).font(icons::font(13.0)).color(dim));
         ui.label(RichText::new(repo_name(app, rel)).size(13.0).strong());
-        ui.label(RichText::new(&branch).size(12.0).color(dim));
+        let b = ui
+            .add(egui::Label::new(RichText::new(format!("{branch} ▾")).size(12.0).color(dim)).sense(egui::Sense::click()))
+            .on_hover_text("Switch branch")
+            .on_hover_cursor(CursorIcon::PointingHand);
+        if b.clicked() {
+            app.pick_git_in(rel.to_path_buf(), crate::app::PaletteMode::Branches);
+        }
         if busy {
             ui.add(egui::Spinner::new().size(12.0));
         }
@@ -337,6 +356,7 @@ fn show_repo(app: &mut QellApp, ui: &mut egui::Ui, rel: &Path, st: &RepoStatus) 
     if unstaged.is_empty() && staged.is_empty() {
         ui.label(RichText::new("No changes.").size(12.0).color(dim));
     }
+    show_stashes(app, ui, rel, busy, !(staged.is_empty() && unstaged.is_empty()));
 
     if !to_stage.is_empty() {
         stage(app, rel, to_stage);
@@ -350,6 +370,81 @@ fn show_repo(app: &mut QellApp, ui: &mut egui::Ui, rel: &Path, st: &RepoStatus) 
         } else {
             app.open_file(app.root.join(rel).join(p));
         }
+    }
+}
+
+/// The repository's stashes, folded by default: apply, pop or drop each;
+/// the header's button stashes the current changes.
+fn show_stashes(app: &mut QellApp, ui: &mut egui::Ui, rel: &Path, busy: bool, has_changes: bool) {
+    use crate::app::StashAction;
+    let dim = app.palette.text_dim;
+    let dir = app.root.join(rel);
+    let list = app.scm.stashes.entry(rel.to_path_buf()).or_insert_with(|| qell_git::refs::stashes(&dir)).clone();
+    let stashes = list.unwrap_or_default();
+    let open = app.scm.stashes_open.contains(rel);
+    ui.add_space(4.0);
+    let mut toggle = false;
+    let mut stash_now = false;
+    ui.horizontal(|ui| {
+        let arrow = if open { icons::CHEVRON_DOWN } else { icons::CHEVRON_RIGHT };
+        let h = ui.add(
+            egui::Label::new(RichText::new(arrow.to_string()).font(icons::font(11.0)).color(dim)).sense(egui::Sense::click()),
+        );
+        let t = ui.add(egui::Label::new(RichText::new("STASHES").size(11.0).strong().color(dim)).sense(egui::Sense::click()));
+        ui.label(RichText::new(stashes.len().to_string()).size(11.0).color(dim));
+        toggle = h.clicked() || t.on_hover_cursor(CursorIcon::PointingHand).clicked();
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let b = egui::Button::new(RichText::new(icons::ADD.to_string()).font(icons::font(13.0)).color(dim)).frame(false);
+            stash_now = ui
+                .add_enabled(!busy && has_changes, b)
+                .on_hover_text("Stash the changes")
+                .on_disabled_hover_text("Nothing to stash")
+                .on_hover_cursor(CursorIcon::PointingHand)
+                .clicked();
+        });
+    });
+    if toggle {
+        if open {
+            app.scm.stashes_open.remove(rel);
+        } else {
+            app.scm.stashes_open.insert(rel.to_path_buf());
+        }
+    }
+    if stash_now {
+        app.pick_git_in(rel.to_path_buf(), crate::app::PaletteMode::StashMessage { untracked: true });
+    }
+    if !open {
+        return;
+    }
+    if stashes.is_empty() {
+        ui.label(RichText::new("No stashes.").size(12.0).color(dim));
+        return;
+    }
+    let now = std::time::SystemTime::now();
+    let mut action = None;
+    for s in &stashes {
+        ui.horizontal(|ui| {
+            ui.add_space(14.0);
+            let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(s.time.max(0) as u64);
+            let text = crate::gitops::short_stash(&s.message);
+            ui.label(RichText::new(&text).size(12.0)).on_hover_text(format!("{}\n{}", s.reference(), s.message));
+            ui.label(RichText::new(super::sidebar::ago(when, now)).size(11.0).color(dim));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let small = |t: &str| egui::Button::new(RichText::new(t).size(11.0).color(dim)).frame(false);
+                if ui.add_enabled(!busy, small("Drop")).on_hover_text("Delete this stash").clicked() {
+                    action = Some((s.clone(), StashAction::Drop));
+                }
+                if ui.add_enabled(!busy, small("Pop")).on_hover_text("Bring the changes back and remove the stash").clicked() {
+                    action = Some((s.clone(), StashAction::Pop));
+                }
+                if ui.add_enabled(!busy, small("Apply")).on_hover_text("Bring the changes back, keep the stash").clicked() {
+                    action = Some((s.clone(), StashAction::Apply));
+                }
+            });
+        });
+    }
+    if let Some((stash, what)) = action {
+        app.stash_button(rel, stash, what);
     }
 }
 

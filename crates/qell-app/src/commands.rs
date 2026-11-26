@@ -44,6 +44,16 @@ pub enum Command {
     FindPrevious,
     ShowSourceControl,
     StageHunk,
+    GitSwitchBranch,
+    GitCreateBranch,
+    GitDeleteBranch,
+    GitForceDeleteBranch,
+    GitStash,
+    GitStashUntracked,
+    GitStashPopLatest,
+    GitStashPop,
+    GitStashApply,
+    GitStashDrop,
     RevertHunk,
     ToggleBlame,
     GoToDefinition,
@@ -115,6 +125,16 @@ impl Command {
         Command::FindPrevious,
         Command::ShowSourceControl,
         Command::StageHunk,
+        Command::GitSwitchBranch,
+        Command::GitCreateBranch,
+        Command::GitDeleteBranch,
+        Command::GitForceDeleteBranch,
+        Command::GitStash,
+        Command::GitStashUntracked,
+        Command::GitStashPopLatest,
+        Command::GitStashPop,
+        Command::GitStashApply,
+        Command::GitStashDrop,
         Command::RevertHunk,
         Command::ToggleBlame,
         Command::GoToDefinition,
@@ -193,6 +213,16 @@ impl Command {
             Command::GoForward => "Go: Forward",
             Command::ShowSourceControl => "View: Show Source Control",
             Command::StageHunk => "Git: Stage This Change",
+            Command::GitSwitchBranch => "Git: Switch Branch…",
+            Command::GitCreateBranch => "Git: Create Branch…",
+            Command::GitDeleteBranch => "Git: Delete Branch…",
+            Command::GitForceDeleteBranch => "Git: Force Delete Branch…",
+            Command::GitStash => "Git: Stash",
+            Command::GitStashUntracked => "Git: Stash (Include Untracked)",
+            Command::GitStashPopLatest => "Git: Pop Latest Stash",
+            Command::GitStashPop => "Git: Pop Stash…",
+            Command::GitStashApply => "Git: Apply Stash…",
+            Command::GitStashDrop => "Git: Drop Stash…",
             Command::RevertHunk => "Git: Revert This Change",
             Command::ToggleBlame => "Git: Toggle Blame",
             Command::ToggleCluster => "View: Toggle Kubernetes Cluster",
@@ -289,6 +319,16 @@ impl Command {
             Command::ShowSourceControl => s(Modifiers::CTRL | Modifiers::SHIFT, Key::G),
             // No default keys: from the gutter, the menu or the palette.
             Command::StageHunk | Command::RevertHunk => None,
+            Command::GitSwitchBranch
+            | Command::GitCreateBranch
+            | Command::GitDeleteBranch
+            | Command::GitForceDeleteBranch
+            | Command::GitStash
+            | Command::GitStashUntracked
+            | Command::GitStashPopLatest
+            | Command::GitStashPop
+            | Command::GitStashApply
+            | Command::GitStashDrop => None,
             Command::ToggleBlame => s(cmd | Modifiers::ALT, Key::B),
             Command::ToggleCluster => s(cmd_shift, Key::K),
             Command::ToggleAws => s(cmd_shift, Key::A),
