@@ -713,6 +713,9 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
             });
             tree_options(app, ui);
             ui.add_space(4.0);
+            if app.config.outline {
+                super::outline::show(app, ui);
+            }
             egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 1.0;
                 show_shortcuts(app, ui);

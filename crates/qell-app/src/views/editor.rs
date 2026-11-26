@@ -23,6 +23,8 @@ const TEXT_PAD: f32 = 8.0;
 const FOLD_W: f32 = 12.0;
 /// Width of the blame column, in characters of the gutter's font.
 const BLAME_COLS: usize = 24;
+/// Sticky scroll shows this many block lines at most.
+const STICKY_MAX: usize = 4;
 
 /// Central panel: tab strip + editor for the active document.
 pub fn show_central(app: &mut QellApp, ctx: &Context) {
@@ -511,6 +513,64 @@ fn append_recolored(job: &mut LayoutJob, text: &str, s: usize, e: usize, fmt: &T
 
 /// Per-line view of the highlight spans: binary search for the first span
 /// that could overlap a byte range.
+/// How code is coloured: the font, plain text, tokens, and whether
+/// brackets take their depth's colour.
+struct LineStyle<'a> {
+    font: egui::FontId,
+    text: Color32,
+    color_of: &'a dyn Fn(qell_core::TokenKind) -> Color32,
+    bracket_colors: bool,
+}
+
+/// Chars `c0..c1` of a line, highlighted: token colours and brackets by
+/// depth.
+fn line_job(
+    buffer: &Buffer,
+    brackets: &qell_core::structure::Brackets,
+    spans: &[HighlightSpan],
+    row: usize,
+    c0: usize,
+    c1: usize,
+    style: &LineStyle,
+) -> LayoutJob {
+    let line_start_byte = buffer.rope().line_to_byte(row);
+    let line_text = buffer.line(row);
+    let byte_of = |c: usize| line_text.char_indices().nth(c).map_or(line_text.len(), |(b, _)| b);
+    let (bs, be) = (byte_of(c0), byte_of(c1));
+    // Brackets recoloured by depth: (byte in line, colour).
+    let recolor: Vec<(usize, Color32)> = if style.bracket_colors {
+        brackets
+            .on_line(row)
+            .iter()
+            .map(|b| {
+                let color = if b.partner.is_some() { BRACKET_COLORS[b.depth % 3] } else { BRACKET_UNMATCHED };
+                (b.byte - line_start_byte, color)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let mut job = LayoutJob::default();
+    let mut at = bs;
+    let plain = TextFormat { font_id: style.font.clone(), color: style.text, ..Default::default() };
+    for s in spans_in(spans, line_start_byte + bs, line_start_byte + be) {
+        let s0 = s.start.max(line_start_byte + bs) - line_start_byte;
+        let s1 = s.end.min(line_start_byte + be) - line_start_byte;
+        if s0 > at && line_text.is_char_boundary(at) && line_text.is_char_boundary(s0) {
+            append_recolored(&mut job, &line_text, at, s0, &plain, &recolor);
+        }
+        if s1 > s0 && line_text.is_char_boundary(s0) && line_text.is_char_boundary(s1) {
+            let fmt = token_format(s.kind, style.font.clone(), (style.color_of)(s.kind));
+            append_recolored(&mut job, &line_text, s0, s1, &fmt, &recolor);
+            at = s1;
+        }
+    }
+    if at < be {
+        append_recolored(&mut job, &line_text, at, be, &plain, &recolor);
+    }
+    job
+}
+
 fn spans_in(spans: &[HighlightSpan], start: usize, end: usize) -> &[HighlightSpan] {
     let first = spans.partition_point(|s| s.end <= start);
     let last = spans[first..].partition_point(|s| s.start < end) + first;
@@ -529,6 +589,9 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
     let vim_on = app.config.vim_mode;
     let auto_close = app.config.auto_close;
     let indent_guides = app.config.indent_guides;
+    let sticky_scroll = app.config.sticky_scroll;
+    let palette_bg = app.palette.editor_bg;
+    let palette_border = app.palette.border;
 
     let inactive = app.pane_inactive;
     let has_focus_before = app.focus == Focus::Editor && !app.modal_open() && !inactive;
@@ -968,6 +1031,34 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
         }
         let painter = ui.painter_at(rect.union(ui.clip_rect()));
         let content_top = origin.y - range.start as f32 * row_height;
+        // Sticky scroll: the lines opening the blocks the top of the view
+        // is inside, held at the top.
+        let view_top = ui.clip_rect().top();
+        let sticky: Vec<usize> = if sticky_scroll {
+            let first = (((view_top - content_top) / row_height).floor().max(0.0) as usize).min(row_total.saturating_sub(1));
+            let top_line = wl.row(first).line;
+            if first == 0 {
+                Vec::new()
+            } else {
+                qell_core::fold::sticky(&doc.fold_regions, top_line, STICKY_MAX)
+            }
+        } else {
+            Vec::new()
+        };
+        let sticky_bottom = view_top + sticky.len() as f32 * row_height;
+        let on_sticky = resp.clicked() && resp.interact_pointer_pos().is_some_and(|p| p.y < sticky_bottom);
+        if on_sticky {
+            if let Some(p) = resp.interact_pointer_pos() {
+                let i = ((p.y - view_top) / row_height).floor().max(0.0) as usize;
+                if let Some(&line) = sticky.get(i) {
+                    let col = doc.buffer.line(line).chars().take_while(|c| c.is_whitespace()).count();
+                    doc.buffer.set_cursor(Position::new(line, col), false);
+                    doc.scroll_to_cursor = true;
+                    doc.goal_col = None;
+                    clicked_editor = true;
+                }
+            }
+        }
 
         // Mouse → cursor.
         // Text position under a point: the nearest gap between chars
@@ -984,7 +1075,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
         let pos_at = |b: &Buffer, p: Pos2| point_to(b, p, true);
         // The blame column: its commit on hover, its hash copied on click.
         let in_blame = |p: Pos2| blame_w > 0.0 && p.x < origin.x + blame_w;
-        let on_blame = resp.clicked() && resp.interact_pointer_pos().is_some_and(in_blame);
+        let on_blame = !on_sticky && resp.clicked() && resp.interact_pointer_pos().is_some_and(in_blame);
         if let Some(b) = &blame {
             let hovered = resp.hover_pos().filter(|p| in_blame(*p));
             let commit = hovered.and_then(|p| b.commit_of(pos_at(&doc.buffer, p).line));
@@ -1001,7 +1092,8 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
         }
         // A click on the gutter's change mark opens its menu instead of
         // moving the cursor.
-        let on_mark = resp.clicked()
+        let on_mark = !on_sticky
+            && resp.clicked()
             && resp.interact_pointer_pos().is_some_and(|p| p.x >= origin.x + gutter_w - 9.0 && p.x < origin.x + gutter_w);
         if on_mark {
             if let Some(p) = resp.interact_pointer_pos() {
@@ -1015,7 +1107,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
         }
         // The fold arrow beside a header, or the ⋯ after a folded one.
         let mut on_fold = false;
-        if !on_mark && !on_blame && resp.clicked() {
+        if !on_mark && !on_blame && !on_sticky && resp.clicked() {
             if let Some(p) = resp.interact_pointer_pos() {
                 let row = ((p.y - content_top) / row_height).floor().max(0.0) as usize;
                 let vr = wl.row(row.min(row_total.saturating_sub(1)));
@@ -1041,7 +1133,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                 }
             }
         }
-        if !on_mark && !on_blame && !on_fold && (resp.clicked() || resp.drag_started()) {
+        if !on_mark && !on_blame && !on_fold && !on_sticky && (resp.clicked() || resp.drag_started()) {
             clicked_editor = true;
             if let Some(p) = resp.interact_pointer_pos() {
                 let (shift, alt) = ui.input(|i| (i.modifiers.shift, i.modifiers.alt));
@@ -1138,7 +1230,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
         doc.update_structure(&mut app.languages, tab_size);
         doc.update_changes();
         let spans = doc.spans(&mut app.languages).to_vec();
-        let rope = doc.buffer.rope();
+        let style = LineStyle { font: font.clone(), text: palette_text, color_of: &color_of, bracket_colors };
 
         // Bracket pair at the cursor, highlighted with a box.
         let cursor_pair = if cursor.selection.is_empty() { doc.brackets.pair_at(head.line, head.col) } else { None };
@@ -1327,42 +1419,8 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
             }
 
             // Text with highlighting.
-            let line_start_byte = rope.line_to_byte(row);
             let line_text = doc.buffer.line(row);
-            // This row's bytes of the line.
-            let byte_of = |c: usize| line_text.char_indices().nth(c).map_or(line_text.len(), |(b, _)| b);
-            let (bs, be) = (byte_of(vr.start), byte_of(seg_end));
-            // Brackets recoloured by depth: (byte in line, colour).
-            let recolor: Vec<(usize, Color32)> = if bracket_colors {
-                doc.brackets
-                    .on_line(row)
-                    .iter()
-                    .map(|b| {
-                        let color = if b.partner.is_some() { BRACKET_COLORS[b.depth % 3] } else { BRACKET_UNMATCHED };
-                        (b.byte - line_start_byte, color)
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            let mut job = LayoutJob::default();
-            let mut at = bs;
-            let plain = TextFormat { font_id: font.clone(), color: palette_text, ..Default::default() };
-            for s in spans_in(&spans, line_start_byte + bs, line_start_byte + be) {
-                let s0 = s.start.max(line_start_byte + bs) - line_start_byte;
-                let s1 = s.end.min(line_start_byte + be) - line_start_byte;
-                if s0 > at && line_text.is_char_boundary(at) && line_text.is_char_boundary(s0) {
-                    append_recolored(&mut job, &line_text, at, s0, &plain, &recolor);
-                }
-                if s1 > s0 && line_text.is_char_boundary(s0) && line_text.is_char_boundary(s1) {
-                    let fmt = token_format(s.kind, font.clone(), color_of(s.kind));
-                    append_recolored(&mut job, &line_text, s0, s1, &fmt, &recolor);
-                    at = s1;
-                }
-            }
-            if at < be {
-                append_recolored(&mut job, &line_text, at, be, &plain, &recolor);
-            }
+            let job = line_job(&doc.buffer, &doc.brackets, &spans, row, vr.start, seg_end, &style);
             // Tabs drawn as the spaces up to their tab stop.
             let job = expand_job_tabs(job, columns::disp(&cols, vr.start), tab_size);
             let galley = ui.fonts_mut(|f| f.layout_job(job));
@@ -1465,6 +1523,32 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
             if !msgs.is_empty() {
                 resp.clone().on_hover_text(msgs.join("\n\n"));
             }
+        }
+
+        // Sticky lines, drawn over the rows they cover.
+        for (i, &line) in sticky.iter().enumerate() {
+            let y = view_top + i as f32 * row_height;
+            let clip = ui.clip_rect();
+            let r = Rect::from_min_max(Pos2::new(clip.left(), y), Pos2::new(clip.right(), y + row_height));
+            painter.rect_filled(r, 0.0, palette_bg);
+            painter.text(
+                Pos2::new(origin.x + gutter_w - GUTTER_PAD, y + row_height / 2.0),
+                Align2::RIGHT_CENTER,
+                line + 1,
+                font_small.clone(),
+                palette_gutter,
+            );
+            let len = doc.buffer.line_len(line);
+            let job = expand_job_tabs(line_job(&doc.buffer, &doc.brackets, &spans, line, 0, len, &style), 0, tab_size);
+            let galley = ui.fonts_mut(|f| f.layout_job(job));
+            painter.galley(Pos2::new(origin.x + text_x0, y + 1.0), galley, palette_text);
+        }
+        if !sticky.is_empty() {
+            let clip = ui.clip_rect();
+            painter.hline(clip.x_range(), sticky_bottom - 0.5, Stroke::new(1.0_f32, palette_border));
+            // A soft shadow under it, as the text slides beneath.
+            let shade = Rect::from_min_max(Pos2::new(clip.left(), sticky_bottom), Pos2::new(clip.right(), sticky_bottom + 4.0));
+            painter.rect_filled(shade, 0.0, Color32::from_black_alpha(60));
         }
 
         // Keep the cursor in view.

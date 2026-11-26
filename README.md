@@ -168,6 +168,15 @@ bottom, and language-server completion for the languages you actually use.
   `aws_s3_bucket.logs`, functions, types and methods elsewhere. Qell reads
   the file itself for the languages it knows and asks the language server
   for the rest.
+- **Outline** — a section at the bottom of the Explorer lists what the open
+  file defines (functions, types, methods, Terraform resources…), nested by
+  indentation. The one around the cursor is highlighted and kept in view;
+  click a row to go there, click the header to fold it. Read by Qell for the
+  languages it parses, from the language server for the others, a moment
+  after you stop typing. *Settings → Outline* hides it.
+- **Sticky scroll** — while you scroll inside a function or a block, the
+  lines that open it (`func …`, `for …`, `if …`) stay at the top of the
+  editor, up to four. Click one to go to it. *Settings → Sticky Scroll*.
 - **Rename a symbol** (`F2`) through the language server, across every file
   it is used in. The files it touches open as tabs with unsaved changes, so
   nothing is written until you save them.
