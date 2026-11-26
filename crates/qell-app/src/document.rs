@@ -51,8 +51,11 @@ pub struct Document {
     pub conflict: Option<DiskChange>,
     /// Rows on screen (word wrap), for the width last drawn at.
     pub wrap: WrapLayout,
-    /// (buffer version, wrap width) `wrap` was computed for.
-    wrap_key: Option<(i32, usize, u64)>,
+    /// (buffer version, wrap width, tab size, folds) `wrap` was computed for.
+    wrap_key: Option<(i32, usize, usize, u64)>,
+    /// Width of the longest line in screen columns, and the (buffer
+    /// version, tab size) it was measured for.
+    max_cols: (usize, Option<(i32, usize)>),
     /// Folded regions, by header line.
     pub folds: std::collections::BTreeSet<usize>,
     /// What can be folded: header line → last line of its region.
@@ -270,6 +273,7 @@ impl Document {
             conflict: None,
             wrap: WrapLayout::plain(1),
             wrap_key: None,
+            max_cols: (0, None),
             folds: Default::default(),
             fold_regions: Default::default(),
             fold_key: None,
@@ -418,9 +422,28 @@ impl Document {
 
     /// Lay the text out in rows of `width` columns (0: no wrapping), if the
     /// text or the width changed.
-    pub fn update_wrap(&mut self, width: usize) {
+    /// Width of the longest line in screen columns (tabs reaching their
+    /// stop), for the horizontal scroll range.
+    pub fn max_display_cols(&mut self, tab: usize) -> usize {
+        let key = (self.buffer.version(), tab);
+        if self.max_cols.1 != Some(key) {
+            let tab = tab.max(1);
+            let mut widest = 0;
+            for l in self.buffer.rope().lines() {
+                let mut x = 0;
+                for c in l.chars().filter(|c| *c != '\n' && *c != '\r') {
+                    x = if c == '\t' { (x / tab + 1) * tab } else { x + 1 };
+                }
+                widest = widest.max(x);
+            }
+            self.max_cols = (widest, Some(key));
+        }
+        self.max_cols.0
+    }
+
+    pub fn update_wrap(&mut self, width: usize, tab: usize) {
         self.update_folds();
-        let key = (self.buffer.version(), width, self.folds_gen);
+        let key = (self.buffer.version(), width, tab, self.folds_gen);
         if self.wrap_key == Some(key) {
             return;
         }
@@ -434,7 +457,7 @@ impl Document {
                     *slot = true;
                 }
             }
-            WrapLayout::layout(self.buffer.rope().lines().map(|l| l.to_string()), width, |l| {
+            WrapLayout::layout(self.buffer.rope().lines().map(|l| l.to_string()), width, tab, |l| {
                 hidden.get(l).copied().unwrap_or(false)
             })
         };
@@ -551,18 +574,27 @@ impl Document {
     /// Whether `wrap` matches the current text (it is computed when drawing,
     /// so edits earlier in the frame make it stale).
     pub fn wrap_is_current(&self) -> bool {
-        self.wrap_key.is_some_and(|(v, _, _)| v == self.buffer.version())
+        self.wrap_key.is_some_and(|(v, _, _, _)| v == self.buffer.version())
     }
 
-    /// Up/Down over wrapped rows: `delta` rows, keeping the screen column.
-    pub fn move_rows(&mut self, delta: isize, extend: bool) {
+    /// Up/Down over rows (wrapped, folded or plain): `delta` rows, keeping
+    /// the screen column, tabs counted to their stop.
+    pub fn move_rows(&mut self, delta: isize, extend: bool, tab: usize) {
+        use qell_core::columns::{col_at, disp, display_cols};
         let w = &self.wrap;
         let head = self.buffer.cursor.head();
         let row = w.row_of(head);
-        let x = self.goal_col.unwrap_or_else(|| w.screen_col(row, head.col));
+        let x = self.goal_col.unwrap_or_else(|| {
+            let vr = w.row(row);
+            let cols = display_cols(&self.buffer.line(head.line), tab);
+            vr.indent + disp(&cols, head.col).saturating_sub(disp(&cols, vr.start))
+        });
         let target = (row as isize + delta).clamp(0, w.row_count() as isize - 1) as usize;
+        let vr = w.row(target);
+        let cols = display_cols(&self.buffer.line(vr.line), tab);
+        let col = col_at(&cols, vr.start, x.saturating_sub(vr.indent) as f32, true);
         let b = &self.buffer;
-        let pos = w.position_at(target, x, |l| b.line_len(l));
+        let pos = w.position_at(target, vr.indent + col.saturating_sub(vr.start), |l| b.line_len(l));
         self.buffer.set_cursor(pos, extend);
         self.goal_col = Some(x);
     }
@@ -725,7 +757,7 @@ mod fold_tests {
 
     fn doc() -> Document {
         let mut d = Document::new(Buffer::from_text(CODE, None));
-        d.update_wrap(0);
+        d.update_wrap(0, 4);
         d
     }
 
@@ -737,12 +769,12 @@ mod fold_tests {
     fn folding_hides_the_body_and_keeps_the_closing_line() {
         let mut d = doc();
         assert!(d.fold_at(1), "inside a's body folds a");
-        d.update_wrap(0);
+        d.update_wrap(0, 4);
         assert_eq!(rows(&d)[..3], [0, 3, 4]);
         // The cursor was inside: it is moved to the header.
         assert_eq!(d.buffer.cursor.head().line, 0);
         assert!(d.unfold_at(0));
-        d.update_wrap(0);
+        d.update_wrap(0, 4);
         assert_eq!(rows(&d).len(), d.buffer.line_count());
     }
 
@@ -750,10 +782,10 @@ mod fold_tests {
     fn a_fold_moves_with_lines_added_above_it() {
         let mut d = doc();
         d.set_fold(5, true);
-        d.update_wrap(0);
+        d.update_wrap(0, 4);
         d.buffer.set_cursor(Position::new(0, 0), false);
         d.buffer.insert("// one\n// two\n");
-        d.update_wrap(0);
+        d.update_wrap(0, 4);
         assert!(d.folds.contains(&7), "{:?}", d.folds);
         assert!(!rows(&d).contains(&8), "b's body is still hidden");
     }
@@ -762,11 +794,38 @@ mod fold_tests {
     fn going_into_a_fold_opens_it() {
         let mut d = doc();
         d.fold_all(true);
-        d.update_wrap(0);
+        d.update_wrap(0, 4);
         assert_eq!(d.folds.len(), 2);
         d.buffer.set_cursor(Position::new(6, 2), false);
-        d.update_wrap(0);
+        d.update_wrap(0, 4);
         assert!(!d.folds.contains(&5));
         assert!(d.folds.contains(&0));
+    }
+}
+
+#[cfg(test)]
+mod tab_tests {
+    use super::*;
+    use qell_core::Position;
+
+    #[test]
+    fn up_and_down_keep_the_screen_column_across_tabs() {
+        let mut d = Document::new(Buffer::from_text("\tif x {\n\t\tfoo()\n\t}\n", None));
+        d.update_wrap(0, 4);
+        // After "\tif " is screen column 7: below, that's inside the second
+        // tab, nearest its end.
+        d.buffer.set_cursor(Position::new(0, 4), false);
+        d.move_rows(1, false, 4);
+        assert_eq!(d.buffer.cursor.head(), Position::new(1, 2));
+        // The same column comes back on the way up.
+        d.move_rows(-1, false, 4);
+        assert_eq!(d.buffer.cursor.head(), Position::new(0, 4));
+    }
+
+    #[test]
+    fn widest_line_counts_tabs() {
+        let mut d = Document::new(Buffer::from_text("\t\tab\nabcdef\n", None));
+        assert_eq!(d.max_display_cols(4), 10);
+        assert_eq!(d.max_display_cols(2), 6);
     }
 }

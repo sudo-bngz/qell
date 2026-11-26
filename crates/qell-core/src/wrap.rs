@@ -42,13 +42,19 @@ impl WrapLayout {
 
     /// Wrap `lines` (without their line breaks) to `width` columns.
     pub fn wrapped<S: AsRef<str>>(lines: impl Iterator<Item = S>, width: usize) -> Self {
-        Self::layout(lines, width.max(MIN_WRAP_WIDTH), |_| false)
+        Self::layout(lines, width.max(MIN_WRAP_WIDTH), 1, |_| false)
     }
 
     /// Lay `lines` out: wrapped to `width` columns (0: not wrapped), with
     /// the lines for which `hidden` is true given no row (they are folded
-    /// away under the line before them).
-    pub fn layout<S: AsRef<str>>(lines: impl Iterator<Item = S>, width: usize, hidden: impl Fn(usize) -> bool) -> Self {
+    /// away under the line before them). A tab reaches the next multiple of
+    /// `tab` columns.
+    pub fn layout<S: AsRef<str>>(
+        lines: impl Iterator<Item = S>,
+        width: usize,
+        tab: usize,
+        hidden: impl Fn(usize) -> bool,
+    ) -> Self {
         let width = if width == 0 { 0 } else { width.max(MIN_WRAP_WIDTH) };
         let mut rows = Vec::new();
         let mut first = Vec::new();
@@ -62,7 +68,7 @@ impl WrapLayout {
                 continue;
             }
             let chars: Vec<char> = text.as_ref().trim_end_matches(['\n', '\r']).chars().collect();
-            for (start, end, indent) in wrap_line(&chars, width) {
+            for (start, end, indent) in wrap_line_tabs(&chars, width, tab) {
                 rows.push(VisualRow { line, start, end, indent });
             }
         }
@@ -152,24 +158,44 @@ impl WrapLayout {
 /// Split one line into `(start, end, indent)` rows of at most `width`
 /// columns, breaking after whitespace when possible.
 pub fn wrap_line(chars: &[char], width: usize) -> Vec<(usize, usize, usize)> {
+    wrap_line_tabs(chars, width, 1)
+}
+
+/// `wrap_line`, with widths in screen columns: a tab reaches the next
+/// multiple of `tab` (1: a tab is one column). Rows are still char ranges;
+/// the indent is in screen columns.
+pub fn wrap_line_tabs(chars: &[char], width: usize, tab: usize) -> Vec<(usize, usize, usize)> {
     let n = chars.len();
     let width = width.max(1);
-    if n <= width {
+    let tab = tab.max(1);
+    // Screen column where each char starts, and the end.
+    let mut disp = Vec::with_capacity(n + 1);
+    let mut x = 0;
+    for &c in chars {
+        disp.push(x);
+        x = if c == '\t' { (x / tab + 1) * tab } else { x + 1 };
+    }
+    disp.push(x);
+    if disp[n] <= width {
         return vec![(0, n, 0)];
     }
     let lead = chars.iter().take_while(|c| **c == ' ' || **c == '\t').count();
     // Continuation rows line up with the text, unless that leaves too little room.
-    let cont = if lead <= width / 2 { lead } else { 0 };
+    let cont = if disp[lead] <= width / 2 { disp[lead] } else { 0 };
     let mut out = Vec::new();
     let mut start = 0;
     while start < n {
         let indent = if start == 0 { 0 } else { cont };
         let room = (width - indent).max(1);
-        if n - start <= room {
+        if disp[n] - disp[start] <= room {
             out.push((start, n, indent));
             break;
         }
-        let limit = start + room;
+        // The most chars that fit (at least one).
+        let mut limit = start + 1;
+        while limit < n && disp[limit + 1] - disp[start] <= room {
+            limit += 1;
+        }
         // Don't break inside the leading indentation.
         let min = if start == 0 { lead + 1 } else { start + 1 };
         let brk = (min..limit).rev().find(|&i| chars[i].is_whitespace()).map_or(limit, |i| i + 1);
@@ -194,6 +220,16 @@ mod tests {
             rows("the quick brown fox jumps", 10),
             vec![("the quick ".into(), 0), ("brown fox ".into(), 0), ("jumps".into(), 0)]
         );
+    }
+
+    #[test]
+    fn tabs_count_to_their_stop() {
+        let chars: Vec<char> = "\t\taa bb cc dd ee".chars().collect();
+        // 8 columns of indent: rows of 20 columns hold 12 chars of text.
+        let rows = wrap_line_tabs(&chars, 20, 4);
+        assert_eq!(rows[0], (0, 14, 0));
+        assert_eq!(rows[1], (14, 16, 8));
+        assert_eq!(wrap_line_tabs(&chars, 20, 1), vec![(0, 16, 0)]);
     }
 
     #[test]
@@ -237,7 +273,7 @@ mod tests {
     #[test]
     fn folded_lines_have_no_rows() {
         let text = ["fn a() {", "  one", "  two", "}", "fn b() {}"];
-        let w = WrapLayout::layout(text.iter(), 0, |l| l == 1 || l == 2);
+        let w = WrapLayout::layout(text.iter(), 0, 1, |l| l == 1 || l == 2);
         assert!(w.by_rows() && !w.is_wrapped());
         assert_eq!(w.row_count(), 3);
         assert_eq!((w.row(0).line, w.row(1).line, w.row(2).line), (0, 3, 4));
