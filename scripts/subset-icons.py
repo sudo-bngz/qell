@@ -44,6 +44,8 @@ EXTRA = [
     0xEAFC, 0xEA66, 0xEBAA,
     # Search: search, case, whole word, regex, close, chevrons.
     0xEA6D, 0xEAB1, 0xEB7E, 0xEB38, 0xEA76, 0xEAB6, 0xEAB4,
+    # Activity bar: the AWS view (Material Design Icons' md-aws).
+    0xF0E0F,
 ]
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

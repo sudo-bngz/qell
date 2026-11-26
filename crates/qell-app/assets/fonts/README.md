@@ -9,5 +9,5 @@ Nerd Fonts is MIT licensed (`LICENSE-nerd-fonts.txt`). The glyphs come from
 the icon sets Nerd Fonts aggregates, chiefly Seti UI (MIT), Devicons (MIT),
 Material Design Icons (Apache 2.0), Font Awesome (OFL 1.1 / CC BY 4.0)
 and, for the activity bar and Source Control, Microsoft's Codicons
-(CC BY 4.0);
+(CC BY 4.0), plus Material Design Icons' `md-aws` for the AWS view;
 see the Nerd Fonts README for the full table.
