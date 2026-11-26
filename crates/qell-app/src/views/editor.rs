@@ -277,10 +277,10 @@ fn show_tabs(app: &mut QellApp, ui: &mut egui::Ui) {
                 if let Some((i, what)) = tab_menu {
                     let path = app.docs[i].buffer.path().map(std::path::Path::to_path_buf);
                     match what {
-                        TabMenu::Close => app.close_tabs_where(|j| j == i),
-                        TabMenu::CloseOthers => app.close_tabs_where(|j| j != i),
-                        TabMenu::CloseRight => app.close_tabs_where(|j| j > i),
-                        TabMenu::CloseAll => app.close_tabs_where(|_| true),
+                        TabMenu::Close => app.request_close(vec![i]),
+                        TabMenu::CloseOthers => app.request_close((0..app.docs.len()).filter(|&j| j != i).collect()),
+                        TabMenu::CloseRight => app.request_close((i + 1..app.docs.len()).collect()),
+                        TabMenu::CloseAll => app.request_close((0..app.docs.len()).collect()),
                         TabMenu::CopyPath => ui.ctx().copy_text(path.map(|p| p.display().to_string()).unwrap_or_default()),
                         TabMenu::CopyRelativePath => {
                             let rel = path.map(|p| app.relative_path(&p)).unwrap_or_default();
@@ -1336,6 +1336,63 @@ enum EditorMenu {
     Paste,
     SelectAll,
     Palette,
+}
+
+/// "Save before closing?", for tabs or the whole window with unsaved
+/// changes. Enter saves, Esc cancels.
+pub fn show_ask_close(app: &mut QellApp, ctx: &egui::Context) {
+    use crate::app::{CloseAnswer, CloseAsk};
+    let Some(ask) = app.ask_close.clone() else { return };
+    let unsaved = app.asked_unsaved();
+    if unsaved.is_empty() {
+        // Saved meanwhile (a format-on-save landing): nothing to ask.
+        app.answer_close(CloseAnswer::Discard, ctx);
+        return;
+    }
+    let names: Vec<String> =
+        unsaved.iter().map(|&i| app.docs[i].label.clone().unwrap_or_else(|| app.docs[i].buffer.file_name())).collect();
+    let (dim, text) = (app.palette.text_dim, app.palette.text);
+    let question = match (&ask, names.as_slice()) {
+        (CloseAsk::Tabs(_), [one]) => format!("Save the changes to {one} before closing it?"),
+        (CloseAsk::Tabs(_), _) => format!("Save the changes to {} files before closing them?", names.len()),
+        (CloseAsk::Quit, [one]) => format!("{one} has unsaved changes. Save them before quitting?"),
+        (CloseAsk::Quit, _) => format!("{} files have unsaved changes. Save them before quitting?", names.len()),
+    };
+    let mut answer = None;
+    let modal = egui::Modal::new(egui::Id::new("ask_close")).show(ctx, |ui| {
+        ui.set_width(380.0);
+        ui.label(egui::RichText::new(question).strong().color(text));
+        if names.len() > 1 {
+            ui.add_space(4.0);
+            for name in names.iter().take(10) {
+                ui.label(egui::RichText::new(format!("  {name}")).color(dim));
+            }
+            if names.len() > 10 {
+                ui.label(egui::RichText::new(format!("  and {} more", names.len() - 10)).color(dim));
+            }
+        }
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("Not saving loses the changes.").color(dim));
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            let save = if names.len() > 1 { "Save All" } else { "Save" };
+            if ui.button(save).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
+                answer = Some(CloseAnswer::Save);
+            }
+            if ui.button("Don't Save").clicked() {
+                answer = Some(CloseAnswer::Discard);
+            }
+            if ui.button("Cancel").clicked() {
+                answer = Some(CloseAnswer::Cancel);
+            }
+        });
+    });
+    if modal.should_close() && answer.is_none() {
+        answer = Some(CloseAnswer::Cancel);
+    }
+    if let Some(answer) = answer {
+        app.answer_close(answer, ctx);
+    }
 }
 
 /// The errors and warnings on the line the menu was opened on, in full,

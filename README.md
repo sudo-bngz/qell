@@ -104,6 +104,9 @@ bottom, and language-server completion for the languages you actually use.
   that spot), run **Quick Fix…** on the first, or copy them; a folder lists
   its files with errors. In the editor, right-clicking a line with an
   error or warning shows the message in full, with Quick Fix and Copy.
+- **Unsaved changes** — closing a tab (`Ctrl/⌘+W`, its ×, or *Close
+  Others / to the Right / All*) or the window with unsaved changes asks
+  first: *Save*, *Don't Save* or *Cancel* (Enter saves, Esc cancels).
 - **Problems** — the bottom panel has a *PROBLEMS* tab beside the
   terminals (`Ctrl/⌘+Shift+M`, or click the error count in the status
   bar): every error and warning the language servers report, by file,
