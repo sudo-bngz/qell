@@ -20,6 +20,12 @@ pub struct Tab {
     pub col: usize,
 }
 
+/// One remembered shell: where it was.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Shell {
+    pub cwd: PathBuf,
+}
+
 /// The tabs of one workspace.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Workspace {
@@ -28,7 +34,19 @@ pub struct Workspace {
     /// Which tab was in front.
     #[serde(default)]
     pub active: usize,
+    /// The shells of the terminal panel, each started again in its folder.
+    #[serde(default)]
+    pub shells: Vec<Shell>,
+    /// Which shell was in front.
+    #[serde(default)]
+    pub active_shell: usize,
+    /// Whether the terminal panel was showing.
+    #[serde(default)]
+    pub panel: bool,
 }
+
+/// Shells remembered per workspace, at most.
+const MAX_SHELLS: usize = 12;
 
 /// Tabs remembered per workspace, at most this many each.
 const MAX_TABS: usize = 60;
@@ -65,12 +83,24 @@ impl Store {
                 out.tabs.push(tab.clone());
             }
         }
+        // A folder that has gone starts nowhere; the others keep their order.
+        for (i, shell) in ws.shells.iter().enumerate() {
+            if shell.cwd.is_dir() {
+                if i == ws.active_shell {
+                    out.active_shell = out.shells.len();
+                }
+                out.shells.push(shell.clone());
+            }
+        }
+        out.panel = ws.panel && !out.shells.is_empty();
         out
     }
 
     /// Remember a workspace's tabs, and write the file.
     pub fn save(&mut self, root: &Path, mut ws: Workspace) {
         ws.tabs.truncate(MAX_TABS);
+        ws.shells.truncate(MAX_SHELLS);
+        ws.active_shell = ws.active_shell.min(ws.shells.len().saturating_sub(1));
         ws.active = ws.active.min(ws.tabs.len().saturating_sub(1));
         self.order.retain(|p| p != root);
         self.order.push(root.to_path_buf());
@@ -105,6 +135,26 @@ mod tests {
     }
 
     #[test]
+    fn shells_come_back_where_they_were_unless_the_folder_is_gone() {
+        let dir = std::env::temp_dir().join(format!("qell-shells-{}", std::process::id()));
+        let (a, b) = (dir.join("a"), dir.join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let mut store = Store::default();
+        let shells = [a.clone(), dir.join("gone"), b.clone()].map(|cwd| Shell { cwd }).to_vec();
+        store.roots.insert(dir.clone(), Workspace { shells, active_shell: 2, panel: true, ..Default::default() });
+        let ws = store.take(&dir);
+        assert_eq!(ws.shells, vec![Shell { cwd: a }, Shell { cwd: b }]);
+        // The one in front is still the one in front, after the gap closes.
+        assert_eq!(ws.active_shell, 1);
+        assert!(ws.panel);
+        std::fs::remove_dir_all(&dir).unwrap();
+        // No shells to show: the panel stays shut.
+        let none = store.take(&dir);
+        assert!(none.shells.is_empty() && !none.panel);
+    }
+
+    #[test]
     fn keeps_tabs_per_workspace_and_skips_missing_files() {
         let dir = tempfile::tempdir().unwrap();
         let (root, other) = (dir.path().join("ws"), dir.path().join("other"));
@@ -114,8 +164,8 @@ mod tests {
         std::fs::write(&b, "").unwrap();
 
         let mut s = Store::default();
-        s.save(&root, Workspace { tabs: vec![tab(&a), tab(&b)], active: 1 });
-        s.save(&other, Workspace { tabs: vec![tab(&a)], active: 0 });
+        s.save(&root, Workspace { tabs: vec![tab(&a), tab(&b)], active: 1, ..Default::default() });
+        s.save(&other, Workspace { tabs: vec![tab(&a)], active: 0, ..Default::default() });
         assert_eq!(s.take(&root).tabs.len(), 2);
         assert_eq!(s.take(&root).active, 1);
         assert_eq!(s.take(&other).tabs.len(), 1);
@@ -136,7 +186,7 @@ mod tests {
         let a = root.join("a.rs");
         std::fs::write(&a, "").unwrap();
         let mut s = Store::default();
-        s.save(root, Workspace { tabs: vec![tab(&a)], active: 0 });
+        s.save(root, Workspace { tabs: vec![tab(&a)], active: 0, ..Default::default() });
         let text = serde_json::to_string(&s).unwrap();
         let back: Store = serde_json::from_str(&text).unwrap();
         assert_eq!(back.take(root).tabs, vec![tab(&a)]);

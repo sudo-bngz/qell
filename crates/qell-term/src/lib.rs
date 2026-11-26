@@ -183,6 +183,8 @@ pub struct Terminal {
     exited: bool,
     cols: usize,
     rows: usize,
+    /// The shell's (or command's) process, for asking where it is.
+    pid: Option<u32>,
 }
 
 impl Terminal {
@@ -222,12 +224,16 @@ impl Terminal {
         let window_size =
             WindowSize { num_lines: rows.max(1) as u16, num_cols: cols.max(2) as u16, cell_width: 8, cell_height: 16 };
         let pty = tty::new(&options, window_size, 0).context("opening a pty for the integrated terminal")?;
+        #[cfg(unix)]
+        let pid = Some(pty.child().id());
+        #[cfg(not(unix))]
+        let pid = None;
 
         let event_loop = EventLoop::new(term.clone(), listener, pty, false, false)?;
         let notifier = Notifier(event_loop.channel());
         let _handle = event_loop.spawn();
 
-        Ok(Self { term, notifier, events, palette: Palette::default(), title: String::new(), exited: false, cols, rows })
+        Ok(Self { term, notifier, events, palette: Palette::default(), title: String::new(), exited: false, cols, rows, pid })
     }
 
     pub fn set_palette(&mut self, palette: Palette) {
@@ -238,6 +244,12 @@ impl Terminal {
     /// empty if none was set.
     pub fn title(&self) -> &str {
         &self.title
+    }
+
+    /// The directory the shell is in now (after any `cd`), as the system
+    /// knows it; `None` where that can't be asked (Windows) or it has gone.
+    pub fn cwd(&self) -> Option<PathBuf> {
+        process_cwd(self.pid?)
     }
 
     pub fn has_exited(&self) -> bool {
@@ -517,6 +529,39 @@ impl Drop for Terminal {
     fn drop(&mut self) {
         let _ = self.notifier.0.send(Msg::Shutdown);
     }
+}
+
+#[cfg(target_os = "linux")]
+fn process_cwd(pid: u32) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
+}
+
+#[cfg(target_os = "macos")]
+fn process_cwd(pid: u32) -> Option<PathBuf> {
+    use std::ffi::OsStr;
+    use std::mem::{size_of, MaybeUninit};
+    use std::os::unix::ffi::OsStrExt;
+    let size = size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
+    let mut info = MaybeUninit::<libc::proc_vnodepathinfo>::zeroed();
+    // SAFETY: the buffer is a zeroed proc_vnodepathinfo of the size given;
+    // the kernel fills at most that many bytes.
+    let n = unsafe { libc::proc_pidinfo(pid as libc::c_int, libc::PROC_PIDVNODEPATHINFO, 0, info.as_mut_ptr().cast(), size) };
+    if n != size {
+        return None;
+    }
+    // SAFETY: proc_pidinfo wrote the whole struct (checked above).
+    let info = unsafe { info.assume_init() };
+    // A C string of up to MAXPATHLEN bytes, which libc lays out as 32×32.
+    let raw = &info.pvi_cdir.vip_path;
+    // SAFETY: the 32 rows of 32 chars are one contiguous 1024-byte array.
+    let bytes: &[u8] = unsafe { std::slice::from_raw_parts(raw.as_ptr().cast::<u8>(), 32 * 32) };
+    let end = bytes.iter().position(|&b| b == 0)?;
+    (end > 0).then(|| PathBuf::from(OsStr::from_bytes(&bytes[..end])))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn process_cwd(_pid: u32) -> Option<PathBuf> {
+    None
 }
 
 #[cfg(test)]

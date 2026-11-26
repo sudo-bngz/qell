@@ -107,6 +107,10 @@ bottom, and language-server completion for the languages you actually use.
 - **Unsaved changes** — closing a tab (`Ctrl/⌘+W`, its ×, or *Close
   Others / to the Right / All*) or the window with unsaved changes asks
   first: *Save*, *Don't Save* or *Cancel* (Enter saves, Esc cancels).
+- **Shells come back** — with *Restore Session* on, the terminal's shells
+  are started again when the workspace reopens, each in the folder it was
+  in (after any `cd`), with the panel open if it was. Tabs that ran one
+  command (logs, a pod's shell) aren't rerun.
 - **Problems** — the bottom panel has a *PROBLEMS* tab beside the
   terminals (`Ctrl/⌘+Shift+M`, or click the error count in the status
   bar): every error and warning the language servers report, by file,
