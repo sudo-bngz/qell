@@ -14,6 +14,8 @@
 
 pub mod graph;
 
+pub mod blame;
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -1049,6 +1051,25 @@ mod tests {
         for args in [&["add", "."][..], &["commit", "-q", "-m", "init"]] {
             assert!(Command::new("git").arg("-C").arg(dir).args(args).output().unwrap().status.success());
         }
+    }
+
+    #[test]
+    fn blame_follows_unsaved_text() {
+        if !git_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        init_repo(root);
+        std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+        commit_all(root);
+        let b = crate::blame::blame(root, "a.txt", Some("one\nnew\ntwo\n")).unwrap();
+        assert_eq!(b.lines.len(), 3);
+        let c = |l| b.commit_of(l).unwrap();
+        assert_eq!((c(0).author.as_str(), c(0).summary.as_str()), ("t", "init"));
+        assert!(c(1).uncommitted());
+        assert_eq!(c(2).sha, c(0).sha);
+        assert!(crate::blame::blame(root, "missing.txt", None).is_err());
     }
 
     #[test]

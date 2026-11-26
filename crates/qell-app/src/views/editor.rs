@@ -20,6 +20,8 @@ const GUTTER_PAD: f32 = 12.0;
 const TEXT_PAD: f32 = 8.0;
 /// The column between the line numbers and the text where fold arrows sit.
 const FOLD_W: f32 = 12.0;
+/// Width of the blame column, in characters of the gutter's font.
+const BLAME_COLS: usize = 24;
 
 /// Central panel: tab strip + editor for the active document.
 pub fn show_central(app: &mut QellApp, ctx: &Context) {
@@ -785,7 +787,24 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
     // ---- layout + paint ---------------------------------------------------
     let line_count = app.docs[doc_idx].buffer.line_count().max(line_count.min(1));
     let digits = line_count.to_string().len().max(3);
-    let gutter_w = digits as f32 * char_width + GUTTER_PAD * 2.0;
+    // Blame: a column left of the line numbers, the commit's age and
+    // author on the first line of each run of lines it last changed.
+    let blame_on = app.docs[doc_idx].blame.on;
+    let blame = if blame_on { app.docs[doc_idx].blame.blame.clone() } else { None };
+    let blame_w = if blame_on { BLAME_COLS as f32 * char_width * 0.9 + GUTTER_PAD } else { 0.0 };
+    // Newer commits brighter: each commit's rank by date, 0 (oldest) to 1.
+    let blame_shade: Vec<f32> = blame.as_ref().map_or_else(Vec::new, |b| {
+        let mut order: Vec<usize> = (0..b.commits.len()).collect();
+        order.sort_by_key(|&i| b.commits[i].time);
+        let mut shade = vec![0.0; b.commits.len()];
+        let n = order.len().saturating_sub(1).max(1) as f32;
+        for (rank, i) in order.into_iter().enumerate() {
+            shade[i] = rank as f32 / n;
+        }
+        shade
+    });
+    let now = std::time::SystemTime::now();
+    let gutter_w = blame_w + digits as f32 * char_width + GUTTER_PAD * 2.0;
     let text_x0 = gutter_w + FOLD_W + TEXT_PAD;
 
     let palette_text = app.palette.text;
@@ -824,6 +843,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
     // the little Revert / Stage menu.
     let mut gutter_hunk: Option<(usize, Pos2)> = None;
     let mut cursor_screen: Option<Pos2> = None;
+    let mut blame_copied: Option<String> = None;
 
     // Clicks and drags on the minimap scroll the editor this frame.
     let mut area = egui::ScrollArea::both().id_salt(id).auto_shrink([false, false]);
@@ -859,6 +879,23 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
             let x = ((p.x - (origin.x + text_x0)) / char_width + 0.5).floor().max(0.0) as usize;
             wl.position_at(row.min(row_total.saturating_sub(1)), x, |l| b.line_len(l))
         };
+        // The blame column: its commit on hover, its hash copied on click.
+        let in_blame = |p: Pos2| blame_w > 0.0 && p.x < origin.x + blame_w;
+        let on_blame = resp.clicked() && resp.interact_pointer_pos().is_some_and(in_blame);
+        if let Some(b) = &blame {
+            let hovered = resp.hover_pos().filter(|p| in_blame(*p));
+            let commit = hovered.and_then(|p| b.commit_of(pos_at(&doc.buffer, p).line));
+            if let Some(c) = commit {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), id.with("blame-tip"), egui::PopupAnchor::Pointer)
+                    .gap(12.0)
+                    .show(|ui| blame_tooltip(ui, c));
+                if on_blame && !c.uncommitted() {
+                    ui.ctx().copy_text(c.sha.clone());
+                    blame_copied = Some(c.short().to_string());
+                }
+            }
+        }
         // A click on the gutter's change mark opens its menu instead of
         // moving the cursor.
         let on_mark = resp.clicked()
@@ -875,7 +912,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
         }
         // The fold arrow beside a header, or the ⋯ after a folded one.
         let mut on_fold = false;
-        if !on_mark && resp.clicked() {
+        if !on_mark && !on_blame && resp.clicked() {
             if let Some(p) = resp.interact_pointer_pos() {
                 let row = ((p.y - content_top) / row_height).floor().max(0.0) as usize;
                 let vr = wl.row(row.min(row_total.saturating_sub(1)));
@@ -900,7 +937,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                 }
             }
         }
-        if !on_mark && !on_fold && (resp.clicked() || resp.drag_started()) {
+        if !on_mark && !on_blame && !on_fold && (resp.clicked() || resp.drag_started()) {
             clicked_editor = true;
             if let Some(p) = resp.interact_pointer_pos() {
                 let (shift, alt) = ui.input(|i| (i.modifiers.shift, i.modifiers.alt));
@@ -1155,6 +1192,31 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                 );
             }
 
+            // Blame, on the first row of each run of lines from one commit
+            // (and at the top, so the first visible run is named).
+            if blame_on && vr.start == 0 {
+                let pos = Pos2::new(origin.x + 6.0, y + row_height / 2.0);
+                match &blame {
+                    Some(b) => {
+                        let here = b.lines.get(row).copied();
+                        let first = vrow == range.start || row == 0 || b.lines.get(row - 1).copied() != here;
+                        if let (Some(ci), true) = (here, first) {
+                            let c = &b.commits[ci];
+                            let color = if c.uncommitted() {
+                                GUTTER_MODIFIED
+                            } else {
+                                palette_gutter.lerp_to_gamma(palette_text, blame_shade.get(ci).copied().unwrap_or(0.0))
+                            };
+                            painter.text(pos, Align2::LEFT_CENTER, blame_label(c, now), font_small.clone(), color);
+                        }
+                    }
+                    None if vrow == range.start => {
+                        painter.text(pos, Align2::LEFT_CENTER, "blaming…", font_small.clone(), palette_gutter);
+                    }
+                    None => {}
+                }
+            }
+
             // Text with highlighting.
             let line_start_byte = rope.line_to_byte(row);
             let line_text = doc.buffer.line(row);
@@ -1352,6 +1414,9 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
     if let Some(p) = cursor_screen {
         app.completion.anchor = p;
     }
+    if let Some(short) = blame_copied {
+        app.notify(format!("Copied commit {short}."));
+    }
     if let Some((line, at)) = gutter_hunk {
         app.hunk_menu = Some((line, at));
     }
@@ -1529,6 +1594,47 @@ fn editor_menu(ui: &mut egui::Ui, choice: &mut Option<EditorMenu>, read_only: bo
     item(ui, "Select All", cmd(Command::SelectAll), true, EditorMenu::SelectAll);
     ui.separator();
     item(ui, "Command Palette…", cmd(Command::CommandPalette), true, EditorMenu::Palette);
+}
+
+/// The blame column's text for a commit: its age and author, cut to fit.
+fn blame_label(c: &qell_git::blame::Commit, now: std::time::SystemTime) -> String {
+    if c.uncommitted() {
+        return "   ● not committed".to_string();
+    }
+    let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(c.time.max(0) as u64);
+    let text = format!("{:>4}  {}", super::sidebar::ago(when, now), c.author);
+    if text.chars().count() > BLAME_COLS - 1 {
+        format!("{}…", text.chars().take(BLAME_COLS - 2).collect::<String>())
+    } else {
+        text
+    }
+}
+
+/// The commit behind a line, in full.
+fn blame_tooltip(ui: &mut egui::Ui, c: &qell_git::blame::Commit) {
+    ui.set_max_width(420.0);
+    if c.uncommitted() {
+        ui.label("Not committed yet");
+        return;
+    }
+    ui.label(egui::RichText::new(&c.summary).strong());
+    ui.label(format!("{}, {}", c.author, date(c.time)));
+    ui.label(egui::RichText::new(format!("{}  ·  click to copy", c.short())).monospace().weak());
+}
+
+/// `2026-11-26`, from seconds since the epoch (UTC).
+fn date(secs: i64) -> String {
+    // Howard Hinnant's days-to-civil.
+    let z = secs.div_euclid(86_400) + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}")
 }
 
 fn copy_text(b: &Buffer) -> String {
@@ -1888,5 +1994,15 @@ mod tests {
         let w = spans_in(&spans, 4, 11);
         assert_eq!(w.len(), 2);
         assert_eq!(w[0].kind, String);
+    }
+}
+
+#[cfg(test)]
+mod blame_tests {
+    #[test]
+    fn dates() {
+        assert_eq!(super::date(0), "1970-01-01");
+        assert_eq!(super::date(951_782_400), "2000-02-29");
+        assert_eq!(super::date(1_795_651_200), "2026-11-26");
     }
 }

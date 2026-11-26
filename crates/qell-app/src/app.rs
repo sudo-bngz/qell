@@ -315,6 +315,8 @@ pub struct QellApp {
     /// gutter's change marks.
     git_base_tx: std::sync::mpsc::Sender<(PathBuf, Option<String>)>,
     git_base_rx: std::sync::mpsc::Receiver<(PathBuf, Option<String>)>,
+    blame_tx: std::sync::mpsc::Sender<BlameResult>,
+    blame_rx: std::sync::mpsc::Receiver<BlameResult>,
     /// Find and replace in the open file.
     pub find: views::find::FindState,
     /// The tabs of each workspace, reopened on the next start.
@@ -425,6 +427,7 @@ impl QellApp {
         let indexer = qell_index::Indexer::new(root.clone(), config.ignore.clone(), Some(wake.clone()));
         let searcher = qell_index::Searcher::new(indexer.index(), Some(wake));
         let (git_base_tx, git_base_rx) = std::sync::mpsc::channel();
+        let (blame_tx, blame_rx) = std::sync::mpsc::channel();
         let mut app = Self {
             applied_config: config.clone(),
             config_dirty_since: None,
@@ -444,6 +447,8 @@ impl QellApp {
             rename_symbol: String::new(),
             git_base_tx,
             git_base_rx,
+            blame_tx,
+            blame_rx,
             find: Default::default(),
             session: crate::session::Store::load(),
             session_key: (Vec::new(), 0),
@@ -2355,9 +2360,59 @@ impl QellApp {
             // may have changed. Keep the marks until the new version is in.
             for d in &mut self.docs {
                 d.git_base_state = crate::document::BaseState::Unknown;
+                // A commit gives lines their author; redo the blame.
+                d.blame.version = None;
             }
         }
         self.handle_git_base(ctx);
+        self.handle_blame(ctx);
+    }
+
+    /// Keep the blame of the active file up to date while its column is
+    /// shown: one `git blame` at a time, on the text as edited, redone
+    /// when the text changed in the meantime.
+    fn handle_blame(&mut self, ctx: &Context) {
+        let results: Vec<BlameResult> = self.blame_rx.try_iter().collect();
+        for (path, version, result) in results {
+            let Some(i) = self.docs.iter().position(|d| d.buffer.path() == Some(path.as_path())) else { continue };
+            let b = &mut self.docs[i].blame;
+            b.loading = false;
+            match result {
+                Ok(blame) => {
+                    b.blame = Some(std::sync::Arc::new(blame));
+                    b.version = Some(version);
+                }
+                Err(e) => {
+                    // Shown once; the column goes away until asked again.
+                    b.on = false;
+                    b.blame = None;
+                    b.version = None;
+                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    self.notify_error(blame_error(&name, &e));
+                }
+            }
+        }
+        let Some(doc) = self.docs.get_mut(self.active) else { return };
+        let version = doc.buffer.version();
+        if !doc.blame.on || doc.blame.loading || doc.blame.version == Some(version) {
+            return;
+        }
+        let Some(path) = doc.buffer.path().map(Path::to_path_buf) else { return };
+        doc.blame.loading = true;
+        let text = doc.buffer.text();
+        let (tx, ctx) = (self.blame_tx.clone(), ctx.clone());
+        let spawned = std::thread::Builder::new().name("qell-git-blame".into()).spawn(move || {
+            let result = match qell_git::repo_of(&path) {
+                Some((root, rel)) => qell_git::blame::blame(&root, &rel, Some(&text)),
+                None => Err(NOT_IN_REPO.into()),
+            };
+            let _ = tx.send((path, version, result));
+            ctx.request_repaint();
+        });
+        if spawned.is_err() {
+            doc.blame.loading = false;
+            doc.blame.on = false;
+        }
     }
 
     /// Fetch git's version of the active file when it isn't known (one
@@ -2497,6 +2552,12 @@ impl QellApp {
             Command::ShowExplorer => self.show_sidebar_view(SidebarView::Explorer),
             Command::StageHunk => self.stage_hunk_at_cursor(),
             Command::RevertHunk => self.revert_hunk_at_cursor(),
+            Command::ToggleBlame => match self.docs.get_mut(self.active) {
+                Some(doc) if doc.buffer.path().is_some() && doc.media.is_none() && doc.label.is_none() => {
+                    doc.blame.on = !doc.blame.on;
+                }
+                _ => self.notify("Blame is for files saved in a git repository."),
+            },
             Command::ShowSearch => {
                 // Always shows (and focuses) Search, seeded with the selection.
                 let selection = self.docs.get(self.active).map(|d| d.buffer.selected_text());
@@ -3265,6 +3326,25 @@ fn new_lsp(ctx: &Context, root: &Path, config: &Config) -> LspRegistry {
         lsp.set_override(lang.clone(), cmd.clone());
     }
     lsp
+}
+
+/// A finished `git blame`: the file, the buffer version it was run on,
+/// and the lines' commits or git's error.
+type BlameResult = (PathBuf, i32, Result<qell_git::blame::Blame, String>);
+
+const NOT_IN_REPO: &str = "not in a git repository";
+
+/// Turn git's blame errors into what to do about them.
+fn blame_error(name: &str, err: &str) -> String {
+    if err == NOT_IN_REPO {
+        format!("{name} isn't in a git repository, so there is no history to blame.")
+    } else if err.contains("no such path") || err.contains("no such ref") || err.contains("does not have any commits") {
+        format!("{name} has no commit yet. Commit it once, then blame shows who changed each line.")
+    } else if err.starts_with("cannot run git") {
+        "Blame needs git. Install it and make sure `git` is on your PATH.".to_string()
+    } else {
+        format!("git blame failed for {name}: {err}")
+    }
 }
 
 #[cfg(test)]

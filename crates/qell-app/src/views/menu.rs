@@ -66,6 +66,7 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                 ui.separator();
                 item(ui, app, Command::StageHunk);
                 item(ui, app, Command::RevertHunk);
+                item(ui, app, Command::ToggleBlame);
                 item(ui, app, Command::ToggleSidebar);
                 item(ui, app, Command::ToggleWordWrap);
                 item(ui, app, Command::ToggleMinimap);

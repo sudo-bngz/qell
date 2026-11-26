@@ -42,6 +42,8 @@ pub struct Document {
     /// Per line: how it differs from `git_base`.
     pub changes: Vec<LineChange>,
     changes_key: Option<i32>,
+    /// Who last changed each line, shown beside the line numbers.
+    pub blame: BlameState,
     /// Size and time of the file when it was last read or written.
     pub disk: Option<DiskState>,
     /// It changed (or went) on disk since, and you have unsaved edits:
@@ -64,6 +66,18 @@ pub struct Document {
     pub goal_col: Option<usize>,
     /// The miniature beside the editor.
     pub minimap: crate::views::minimap::Minimap,
+}
+
+/// `git blame` of a file, kept in step with the text being edited.
+#[derive(Debug, Default)]
+pub struct BlameState {
+    /// The column is shown.
+    pub on: bool,
+    pub blame: Option<std::sync::Arc<qell_git::blame::Blame>>,
+    /// Buffer version `blame` was computed for (`None`: redo it).
+    pub version: Option<i32>,
+    /// A `git blame` is running for this file.
+    pub loading: bool,
 }
 
 /// What happened to a file while it was open.
@@ -251,6 +265,7 @@ impl Document {
             git_base_state: BaseState::Unknown,
             changes: Vec::new(),
             changes_key: None,
+            blame: BlameState::default(),
             disk: None,
             conflict: None,
             wrap: WrapLayout::plain(1),

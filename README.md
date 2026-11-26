@@ -54,6 +54,12 @@ bottom, and language-server completion for the languages you actually use.
   it changed, click a file to open its diff (read-only, inline, with
   syntax colours; `F7` / `Shift+F7` jump between changes). Right-click a
   commit to copy its hash or message.
+- **Git blame** — `Ctrl/⌘+Alt+B`, *View → Git Blame*, or the palette: a
+  column beside the line numbers names the author and age of the commit
+  that last changed each block of lines, newer commits brighter. Hover it
+  for the commit's message and date; click to copy its hash. It follows
+  your edits (unsaved lines show as *not committed*) and refreshes after a
+  commit.
 - **Integrated terminals** — the Alacritty terminal core in a panel
   (`` Ctrl+` ``), with 256/true colour, scrollback and application-cursor mode.
   Run several shells as tabs: `` Ctrl+Shift+` `` (`⌘T` on macOS) opens a new one,
