@@ -170,7 +170,7 @@ fn elide_branch(branch: &str) -> String {
 
 /// How long ago, as briefly as `ls` would put it: `now`, `5m`, `3h`,
 /// `2d`, `4mo`, `1y`.
-fn ago(when: SystemTime, now: SystemTime) -> String {
+pub(crate) fn ago(when: SystemTime, now: SystemTime) -> String {
     let s = now.duration_since(when).map(|d| d.as_secs()).unwrap_or(0);
     match s {
         0..60 => "now".into(),
