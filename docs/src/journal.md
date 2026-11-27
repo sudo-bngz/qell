@@ -34,6 +34,7 @@ For each repository you touched that day:
   branch names reach the summary);
 - the **files you saved**, with how often;
 - the **tests you ran** and how they went;
+- the **tasks you ran**;
 - the **git commands run from Qell** (commit, switch, stash…);
 - the **commands you ran in Qell's terminals**, with their folder, the
   failures and the long ones. `ls`, `cd`, `git status` and the like are

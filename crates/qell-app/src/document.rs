@@ -22,6 +22,9 @@ pub struct Document {
     pub line_marks: Vec<LineMark>,
     /// Tab title instead of the file name (diffs: "main.tf (f71c98)").
     pub label: Option<String>,
+    /// A version from the local history, compared with the file now:
+    /// (the file, the version's copy).
+    pub history_of: Option<(PathBuf, PathBuf)>,
     /// Opened from the cluster view (describe, YAML, a manifest), so Esc
     /// and closing the tab go back to the list.
     pub from_cluster: bool,
@@ -270,6 +273,7 @@ impl Document {
             read_only: false,
             line_marks: Vec::new(),
             label: None,
+            history_of: None,
             from_cluster: false,
             preview: false,
             media: None,
