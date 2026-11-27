@@ -1,17 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
-  <!-- Qell: a terminal-dark tile, a lowercase q drawn as a prompt glyph,
-       and a block cursor. -->
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#1d1915"/>
-      <stop offset="1" stop-color="#0f0d0b"/>
-    </linearGradient>
-  </defs>
-  <rect x="80" y="80" width="864" height="864" rx="190" fill="url(#bg)"/>
-  <rect x="81.5" y="81.5" width="861" height="861" rx="188.5" fill="none" stroke="#3a332c" stroke-width="3"/>
-  <!-- q: a ring and a stem going down -->
-  <circle cx="430" cy="470" r="150" fill="none" stroke="#efe9e1" stroke-width="64"/>
-  <rect x="548" y="320" width="64" height="420" rx="6" fill="#efe9e1"/>
-  <!-- the cursor -->
-  <rect x="660" y="640" width="96" height="100" rx="6" fill="#efe9e1" opacity="0.55"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Qell's LED mark (assets/logo) on a rounded tile, for the app icon. -->
+  <rect x="100.0" y="100.0" width="824" height="824" rx="185" fill="#110f0e"/>
+  <rect x="101.5" y="101.5" width="821" height="821" rx="183.5" fill="none" stroke="#2a2623" stroke-width="3"/>
+  <g transform="translate(120.60 120.60) scale(1.08571)"><circle cx="180.22" cy="90.11" r="35.14" fill="#2a2623"/><circle cx="270.34" cy="90.11" r="35.14" fill="#2a2623"/><circle cx="360.45" cy="90.11" r="35.14" fill="#2a2623"/><circle cx="450.56" cy="90.11" r="35.14" fill="#2a2623"/><circle cx="540.67" cy="90.11" r="35.14" fill="#2a2623"/><circle cx="180.22" cy="180.22" r="35.14" fill="#2a2623"/><circle cx="270.34" cy="180.22" r="35.14" fill="#e2ded8"/><circle cx="360.45" cy="180.22" r="35.14" fill="#e2ded8"/><circle cx="450.56" cy="180.22" r="35.14" fill="#e2ded8"/><circle cx="540.67" cy="180.22" r="35.14" fill="#e2ded8"/><circle cx="180.22" cy="270.34" r="35.14" fill="#e2ded8"/><circle cx="270.34" cy="270.34" r="35.14" fill="#2a2623"/><circle cx="360.45" cy="270.34" r="35.14" fill="#2a2623"/><circle cx="450.56" cy="270.34" r="35.14" fill="#2a2623"/><circle cx="540.67" cy="270.34" r="35.14" fill="#e2ded8"/><circle cx="180.22" cy="360.45" r="35.14" fill="#e2ded8"/><circle cx="270.34" cy="360.45" r="35.14" fill="#2a2623"/><circle cx="360.45" cy="360.45" r="35.14" fill="#2a2623"/><circle cx="450.56" cy="360.45" r="35.14" fill="#2a2623"/><circle cx="540.67" cy="360.45" r="35.14" fill="#e2ded8"/><circle cx="180.22" cy="450.56" r="35.14" fill="#2a2623"/><circle cx="270.34" cy="450.56" r="35.14" fill="#e2ded8"/><circle cx="360.45" cy="450.56" r="35.14" fill="#e2ded8"/><circle cx="450.56" cy="450.56" r="35.14" fill="#e2ded8"/><circle cx="540.67" cy="450.56" r="35.14" fill="#e2ded8"/><circle cx="180.22" cy="540.67" r="35.14" fill="#2a2623"/><circle cx="270.34" cy="540.67" r="35.14" fill="#2a2623"/><circle cx="360.45" cy="540.67" r="35.14" fill="#2a2623"/><circle cx="450.56" cy="540.67" r="35.14" fill="#2a2623"/><circle cx="540.67" cy="540.67" r="35.14" fill="#e2ded8"/><circle cx="180.22" cy="630.78" r="35.14" fill="#2a2623"/><circle cx="270.34" cy="630.78" r="35.14" fill="#2a2623"/><circle cx="360.45" cy="630.78" r="35.14" fill="#2a2623"/><circle cx="450.56" cy="630.78" r="35.14" fill="#2a2623"/><circle cx="540.67" cy="630.78" r="35.14" fill="#ffffff"/></g>
 </svg>
