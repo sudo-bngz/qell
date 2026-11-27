@@ -461,6 +461,16 @@ impl Terminal {
         self.term.lock().scroll_display(alacritty_terminal::grid::Scroll::Bottom);
     }
 
+    /// Lines kept (scrollback and screen), columns, and roughly the bytes
+    /// they take, for the memory report.
+    pub fn memory(&self) -> (usize, usize, usize) {
+        use alacritty_terminal::grid::Dimensions;
+        let term = self.term.lock();
+        let lines = term.grid().history_size() + term.screen_lines();
+        let cols = term.columns();
+        (lines, cols, lines * cols * std::mem::size_of::<alacritty_terminal::term::cell::Cell>())
+    }
+
     /// Copy the grid into a plain snapshot for rendering.
     pub fn snapshot(&self) -> Snapshot {
         let term = self.term.lock();

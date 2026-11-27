@@ -44,7 +44,27 @@ When a bug breaks a single frame, Qell doesn't close: it tells you
 *Something went wrong*, keeps your work backed up, and carries on. It
 stops only if that keeps happening.
 
-## Logs
+## Qell uses a lot of memory
+
+Most of Qell's memory is the search index: the text of every file of the
+folder you opened (up to 50,000 files of less than 1 MB each), about twice
+the size of that text. A folder holding many repositories can take several
+hundred MB. Open the project itself rather than a folder above it, or add
+big folders to `ignore` in the [configuration](configuration.md).
+
+When Qell passes 2 GB (`memory_warning_mb`), it writes a **memory report**
+— the index, each terminal's scrollback, the open files, diagnostics,
+language-server queues, git status — and shows **⚠ 2.1 GB** in the status
+bar; click it to open the report. Reports are in Qell's data folder, under
+`memory/`. Please [open an issue](https://github.com/sudo-bngz/qell/issues/new)
+with it: it says where the memory went.
+
+On macOS, a `sample` of Qell while it grows helps too:
+
+```sh
+sample qell 5 -file ~/qell-sample.txt
+```
+
 
 Start Qell from a terminal with `RUST_LOG` to see what it does:
 

@@ -148,6 +148,14 @@ impl Index {
         self.files.len()
     }
 
+    /// What the index holds, for the memory report: (files, bytes of text,
+    /// bytes of trigrams, definitions).
+    pub fn memory(&self) -> (usize, usize, usize, usize) {
+        let text = self.files.iter().map(|f| f.text.len()).sum();
+        let trigrams = self.files.iter().map(|f| f.trigrams.len() * std::mem::size_of::<u32>()).sum();
+        (self.files.len(), text, trigrams, self.symbol_count())
+    }
+
     pub fn symbol_count(&self) -> usize {
         self.by_name.values().map(Vec::len).sum()
     }

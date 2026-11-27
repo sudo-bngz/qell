@@ -244,6 +244,11 @@ impl Client {
         &self.language
     }
 
+    /// Messages waiting to be written to the server.
+    pub fn queued(&self) -> usize {
+        self.outgoing.len()
+    }
+
     pub fn is_ready(&self) -> bool {
         *self.ready.lock().unwrap_or_else(PoisonError::into_inner)
     }

@@ -15,6 +15,19 @@ All notable changes to Qell. Versions follow [Semantic Versioning](https://semve
   commands: `.qell/tasks.toml`, Makefile targets, package.json scripts and
   justfile recipes, nearest the open file. The one you pick runs in a
   terminal tab of its own; *Run Last Task Again* repeats it.
+- **Memory guard** — past 2 GB (`memory_warning_mb`), Qell writes a report
+  of what holds its memory (index, terminals, open files, diagnostics,
+  language servers, git) and shows ⚠ in the status bar, a click away.
+
+### Changed
+
+- Release builds keep their function names, so a `sample` or a crash
+  report says where things happened.
+
+### Fixed
+
+- The terminal's grid was briefly made 1,447 columns wide on the first
+  frame.
 
 ## [0.1.0] — unreleased
 

@@ -2731,6 +2731,7 @@ dependencies = [
  "egui_commonmark",
  "env_logger",
  "image",
+ "libc",
  "log",
  "muda",
  "qell-aws",
