@@ -6,6 +6,8 @@ A minimalist code editor in Rust that looks like a terminal: near-black,
 off-white, one monospace font, no decoration. One native window, a file tree, highlighted code, a terminal at the
 bottom, and language-server completion for the languages you actually use.
 
+**[Website](https://sudo-bngz.github.io/qell/) · [Documentation](https://sudo-bngz.github.io/qell/docs/)**
+
 > Status: **preview (0.1)**. Qell is used every day by its author for Go,
 > Rust, TypeScript and Terraform work: LSP, git (blame, branches, stash,
 > conflicts), split editor, terminals, tests, Kubernetes and AWS views. It
