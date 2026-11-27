@@ -85,6 +85,15 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
             // Right: position, language, LSP.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 14.0;
+                // Memory over the limit: say so until it comes down.
+                if let Some((used, report)) = app.memory.alert(app.config.memory_warning_mb) {
+                    let r = ui
+                        .add(egui::Label::new(small(format!("⚠ {}", crate::memory::mb(used))).color(error_color)).sense(egui::Sense::click()))
+                        .on_hover_text("Qell is using a lot of memory. Click to open the report of what holds it.");
+                    if r.clicked() {
+                        app.pending_report = Some(report);
+                    }
+                }
                 if let Some(doc) = app.docs.get(app.active) {
                     let p = doc.buffer.cursor.head();
                     let lang_id = doc.buffer.language().unwrap_or("plaintext");

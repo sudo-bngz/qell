@@ -451,6 +451,10 @@ pub struct QellApp {
     pub sidebar_view: SidebarView,
     /// In-memory index of the workspace, for search and definitions.
     pub indexer: qell_index::Indexer,
+    /// How much memory Qell uses, and when to say so.
+    pub(crate) memory: crate::memory::Guard,
+    /// A memory report to open (clicked in the status bar).
+    pub pending_report: Option<PathBuf>,
     pub searcher: qell_index::Searcher,
     pub search: views::search::SearchState,
     pub pending_nav: Option<(RequestId, NavRequest)>,
@@ -618,7 +622,13 @@ impl QellApp {
         let searcher = qell_index::Searcher::new(indexer.index(), Some(wake));
         let (git_base_tx, git_base_rx) = std::sync::mpsc::channel();
         let (blame_tx, blame_rx) = std::sync::mpsc::channel();
+        let memory = {
+            let ctx = cc.egui_ctx.clone();
+            crate::memory::Guard::start(move || ctx.request_repaint())
+        };
         let mut app = Self {
+            memory,
+            pending_report: None,
             applied_config: config.clone(),
             config_dirty_since: None,
             settings: Default::default(),
@@ -3724,6 +3734,10 @@ impl QellApp {
         views::k8s::update(self, ctx);
         self.poll_tests(ctx);
         self.poll_journal();
+        self.check_memory();
+        if let Some(report) = self.pending_report.take() {
+            self.open_file(report);
+        }
         views::outline::update(self, ctx);
         self.update_hints(ctx);
         views::aws::update(self, ctx);

@@ -233,6 +233,13 @@ pub struct WorkspaceStatus {
 }
 
 impl WorkspaceStatus {
+    /// Paths with a status (for the memory report).
+    pub fn entry_count(&self) -> usize {
+        self.entries.len() + self.inherited.len()
+    }
+}
+
+impl WorkspaceStatus {
     /// Merge per-repository statuses. Each status's paths are relative to
     /// its own root, given alongside it relative to the workspace.
     pub fn merge(mut repos: Vec<(PathBuf, RepoStatus)>) -> Self {

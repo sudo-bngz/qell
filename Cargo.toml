@@ -93,7 +93,9 @@ devicons = "0.6"
 opt-level = 3
 lto = "thin"
 codegen-units = 1
-strip = true
+# Keep function names (not debug info): a `sample` or crash report of a
+# release build then says where the time or memory went.
+strip = "debuginfo"
 
 [profile.dev.package."*"]
 opt-level = 2

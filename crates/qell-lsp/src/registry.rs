@@ -71,6 +71,13 @@ impl Registry {
         &self.root
     }
 
+    /// For the memory report: events not drained yet, and per running
+    /// server (language, project) the messages waiting to be sent to it.
+    pub fn queues(&self) -> (usize, Vec<(String, PathBuf, usize)>) {
+        let servers = self.clients.iter().map(|((lang, root), c)| (lang.clone(), root.clone(), c.queued())).collect();
+        (self.events_rx.len(), servers)
+    }
+
     /// Drain pending events. Call once per frame.
     pub fn poll(&mut self) -> Vec<Event> {
         let mut out: Vec<Event> = self.events_rx.try_iter().collect();

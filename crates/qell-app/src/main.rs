@@ -16,6 +16,7 @@ mod hints;
 mod history;
 mod icons;
 mod journal;
+mod memory;
 mod merge;
 mod native_menu;
 mod preview;

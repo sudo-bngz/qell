@@ -276,7 +276,11 @@ fn show_grid(app: &mut QellApp, ui: &mut egui::Ui) {
     let avail = ui.available_size();
     let cols = ((avail.x / char_width).floor() as usize).max(2);
     let rows = ((avail.y / row_height).floor() as usize).max(1);
-    term.resize(cols, rows);
+    // egui lays the first frame out wider than the window (12 000 px):
+    // a grid that wide would be kept, so wait for the real width.
+    if avail.x <= ui.ctx().content_rect().width() + 1.0 {
+        term.resize(cols, rows);
+    }
 
     let (rect, resp) = ui.allocate_exact_size(avail, Sense::click_and_drag());
     if resp.clicked() || resp.drag_started() {

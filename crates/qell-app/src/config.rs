@@ -78,6 +78,9 @@ pub struct Config {
     pub tree_branches: bool,
     /// Write the message of a line's error or warning after its end.
     pub inline_problems: bool,
+    /// Write a memory report and warn when Qell uses more than this many
+    /// MB (0: never).
+    pub memory_warning_mb: u64,
     /// Show the file tree on startup.
     pub show_sidebar: bool,
     /// Show the terminal panel on startup.
@@ -201,6 +204,7 @@ impl Default for Config {
             tree_changed: false,
             tree_branches: true,
             inline_problems: true,
+            memory_warning_mb: 2048,
             show_sidebar: true,
             show_terminal: true,
             shell: String::new(),

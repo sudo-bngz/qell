@@ -39,6 +39,7 @@ reported and left alone.
 | Key | Default | |
 |---|---|---|
 | `ui_scale` | `1.0` | Scale of the whole interface (0.75–2.0) |
+| `memory_warning_mb` | `2048` | Above this, write a memory report and warn ([why](troubleshooting.md#qell-uses-a-lot-of-memory)); `0` never |
 | `show_sidebar` | `true` | Show the file tree on startup |
 | `show_terminal` | `true` | Show the terminal panel on startup |
 | `restore_session` | `true` | Reopen tabs, the split and the terminals |
