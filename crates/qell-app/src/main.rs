@@ -103,7 +103,6 @@ fn shell_path() {
 
 fn main() -> eframe::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("qell=info,warn")).init();
-    shell_path();
 
     let arg = std::env::args().nth(1).map(PathBuf::from);
     let (root, file) = match arg {
@@ -116,6 +115,8 @@ fn main() -> eframe::Result {
     };
     let root = std::fs::canonicalize(&root).unwrap_or(root);
 
+    // Before anything starts a process: a Dock-launched app's PATH.
+    shell_path();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Qell")
