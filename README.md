@@ -407,9 +407,25 @@ bottom, and language-server completion for the languages you actually use.
 
 ## Install
 
-Requires a Rust toolchain (1.95+). On Linux you also need the usual
-windowing libraries (`libxkbcommon`, `libwayland`, `libgl`, and for the file
-dialogs `libgtk-3` or `xdg-desktop-portal`).
+**From a release** — download the build for your system from
+[Releases](https://github.com/sudo-bngz/qell/releases):
+
+- **macOS** (Apple silicon and Intel, macOS 11+): unzip
+  `Qell-<version>-macos-universal.zip` and move `Qell.app` to Applications.
+  It isn't signed by Apple yet, so macOS refuses it the first time:
+  right-click it → **Open** (once), or run
+  `xattr -dr com.apple.quarantine /Applications/Qell.app`. Started from
+  the Dock, Qell takes the `PATH` your login shell sets, so it finds your
+  language servers and tools as a terminal would.
+- **Linux** (x86_64): untar `qell-<version>-linux-x86_64.tar.gz` and run
+  `./install.sh` — the binary goes to `~/.local/bin`, with a menu entry and
+  an icon. It needs the usual windowing libraries (`libxkbcommon`,
+  `libwayland`, `libgl`, and for file dialogs `libgtk-3` or
+  `xdg-desktop-portal`).
+
+Each release has a `SHA256SUMS` to check the downloads against.
+
+**From source** — with a Rust toolchain (1.95+):
 
 ```sh
 cargo install --path crates/qell-app
@@ -417,6 +433,11 @@ qell                # current directory as workspace
 qell path/to/dir    # or a folder
 qell src/main.rs    # or a file
 ```
+
+**Making a release** — push a tag (`git tag v0.1.0 && git push origin
+v0.1.0`): the *Release* workflow builds the universal macOS app and the
+Linux archive and attaches them to a **draft** release, with this
+version's section of `CHANGELOG.md` as notes. Check it, then publish it.
 
 Language servers are found on `$PATH`. Install the ones you need, for example:
 

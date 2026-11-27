@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- Qell: a terminal-dark tile, a lowercase q drawn as a prompt glyph,
+       and a block cursor. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1d1915"/>
+      <stop offset="1" stop-color="#0f0d0b"/>
+    </linearGradient>
+  </defs>
+  <rect x="80" y="80" width="864" height="864" rx="190" fill="url(#bg)"/>
+  <rect x="81.5" y="81.5" width="861" height="861" rx="188.5" fill="none" stroke="#3a332c" stroke-width="3"/>
+  <!-- q: a ring and a stem going down -->
+  <circle cx="430" cy="470" r="150" fill="none" stroke="#efe9e1" stroke-width="64"/>
+  <rect x="548" y="320" width="64" height="420" rx="6" fill="#efe9e1"/>
+  <!-- the cursor -->
+  <rect x="660" y="640" width="96" height="100" rx="6" fill="#efe9e1" opacity="0.55"/>
+</svg>
