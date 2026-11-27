@@ -5,6 +5,7 @@
 pub mod aws;
 pub mod editor;
 pub mod find;
+pub mod ime;
 pub mod k8s;
 pub mod media;
 pub mod menu;

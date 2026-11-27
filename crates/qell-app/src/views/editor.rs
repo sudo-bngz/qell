@@ -715,7 +715,7 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
             app.vim.sync(&mut doc.buffer);
         }
         if has_focus_before {
-            let events = ui.input(|i| i.events.clone());
+            let events = crate::views::ime::as_text(ui.input(|i| i.events.clone()));
             let read_only = doc.read_only;
             for (idx, ev) in events.iter().enumerate() {
                 if vim_on {
@@ -1727,9 +1727,12 @@ fn show_editor(app: &mut QellApp, ui: &mut egui::Ui) {
                             palette_cursor,
                         );
                     }
-                    // The completion popup follows the main cursor.
+                    // The completion popup follows the main cursor, and dead
+                    // keys / input methods compose there.
                     if c.head() == head {
                         cursor_screen = Some(Pos2::new(x, y + row_height));
+                        let caret = Rect::from_min_size(Pos2::new(x, y), Vec2::new(2.0, row_height));
+                        crate::views::ime::allow(ui.ctx(), ui.clip_rect(), caret);
                     }
                 }
             }

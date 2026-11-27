@@ -329,6 +329,7 @@ fn show_grid(app: &mut QellApp, ui: &mut egui::Ui) {
     // ---- input ----
     if focused {
         let events = ui.input(|i| i.events.clone());
+        let events = crate::views::ime::as_text(events);
         let mut used = Vec::new();
         for (idx, ev) in events.iter().enumerate() {
             match ev {
@@ -470,6 +471,9 @@ fn show_grid(app: &mut QellApp, ui: &mut egui::Ui) {
             let y = rect.top() + r as f32 * row_height;
             let cell = Rect::from_min_size(Pos2::new(x, y), Vec2::new(char_width, row_height));
             if focused {
+                // Dead keys and input methods (⌥N then a space for ~ on a
+                // Mac) compose at the cursor.
+                crate::views::ime::allow(ui.ctx(), rect, cell);
                 painter.rect_filled(cell, 0.0, app.palette.cursor.gamma_multiply(0.8));
                 if let Some(ch) = snap.cells.get(r).and_then(|row| row.get(c)).map(|cc| cc.c) {
                     painter.text(cell.center(), egui::Align2::CENTER_CENTER, ch, font.clone(), app.palette.panel_bg);
