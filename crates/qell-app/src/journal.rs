@@ -87,7 +87,7 @@ fn parse_offset(s: &str) -> i64 {
 }
 
 /// Days since the epoch → (year, month, day), and the weekday.
-fn civil(days: i64) -> (i64, u32, u32, &'static str) {
+pub fn civil(days: i64) -> (i64, u32, u32, &'static str) {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;

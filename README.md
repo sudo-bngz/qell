@@ -40,6 +40,8 @@ you ask.
   the commit graph, branches, stash and a one-click conflict resolver;
   works on a folder of many repositories.
   → [Git](https://sudo-bngz.github.io/qell/docs/git.html)
+- **Local history** — a copy of each file every time you save it, on your
+  machine, to compare with or restore. → [Local history](https://sudo-bngz.github.io/qell/docs/history.html)
 - **Tests** — a ▶ beside each Go, Rust, Jest, Vitest or pytest test; ✓ or
   ✗ after the run, and a Tests tab that opens what failed.
   → [Tests](https://sudo-bngz.github.io/qell/docs/tests.html)

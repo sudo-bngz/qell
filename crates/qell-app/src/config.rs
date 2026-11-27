@@ -105,6 +105,30 @@ pub struct Config {
     /// The activity journal and its daily log (`[journal]`).
     #[serde(default)]
     pub journal: JournalConfig,
+    /// Local history: a copy of each file when it is saved (`[history]`).
+    #[serde(default)]
+    pub history: HistoryConfig,
+}
+
+/// `[history]`: the versions of your files Qell keeps when it saves them,
+/// on this machine only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HistoryConfig {
+    /// Keep a copy of a file each time it is saved.
+    pub enabled: bool,
+    /// Days a version is kept.
+    pub keep_days: i64,
+    /// Versions kept per file, the newest.
+    pub max_per_file: usize,
+    /// Files bigger than this (in KB) aren't kept.
+    pub max_file_kb: u64,
+}
+
+impl Default for HistoryConfig {
+    fn default() -> Self {
+        Self { enabled: true, keep_days: 30, max_per_file: 100, max_file_kb: 1024 }
+    }
 }
 
 /// `[journal]`: what Qell keeps of your day, and how the daily log is
@@ -188,6 +212,7 @@ impl Default for Config {
             lsp: Default::default(),
             format: Default::default(),
             journal: Default::default(),
+            history: Default::default(),
         }
     }
 }

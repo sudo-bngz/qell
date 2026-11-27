@@ -3,6 +3,15 @@
 All notable changes to Qell. Versions follow [Semantic Versioning](https://semver.org);
 0.x releases are previews, and things may still change between them.
 
+## [Unreleased]
+
+### Added
+
+- **Local history** — a copy of each file every time it's saved, kept on
+  your machine for 30 days, git or not. *Local History: Show File History…*
+  compares a version with the file now; *Restore Version…* brings it back,
+  unsaved and undoable. Settings under `[history]`.
+
 ## [0.1.0] — unreleased
 
 The first release: a native code editor in Rust (egui), terminal-like and

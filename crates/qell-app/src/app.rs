@@ -213,6 +213,11 @@ pub enum PaletteMode {
     },
     /// Picking a stash to apply, pop or drop.
     Stashes(StashAction),
+    /// Picking a version of the file from the local history, to compare
+    /// with the file now or to restore.
+    History {
+        restore: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -470,6 +475,8 @@ pub struct QellApp {
     pub rename_symbol: String,
     /// Branches or stashes being picked from in the palette.
     pub git_pick: GitPick,
+    /// The versions of a file being picked from in the palette.
+    pub history_pick: crate::history::Pick,
     /// Git's version of open files, fetched off the UI thread for the
     /// gutter's change marks.
     git_base_tx: std::sync::mpsc::Sender<(PathBuf, Option<String>)>,
@@ -560,6 +567,10 @@ impl QellApp {
                 crate::activity::prune(keep);
             });
         }
+        if config.history.enabled {
+            let history = config.history.clone();
+            std::thread::spawn(move || crate::history::prune(&history));
+        }
         let palette = Palette::dark();
         palette.apply(&cc.egui_ctx);
         crate::icons::install(&cc.egui_ctx);
@@ -623,6 +634,7 @@ impl QellApp {
             pending_action_resolve: None,
             rename_symbol: String::new(),
             git_pick: GitPick::default(),
+            history_pick: Default::default(),
             git_base_tx,
             git_base_rx,
             blame_tx,
@@ -955,8 +967,11 @@ impl QellApp {
 
     pub fn write_active_or_ask(&mut self, force_dialog: bool) {
         let Some(doc) = self.docs.get_mut(self.active) else { return };
+        // The file as it was, for the local history.
+        let before;
         if doc.buffer.path().is_none() || force_dialog {
             let Some(path) = rfd::FileDialog::new().set_directory(&self.root).save_file() else { return };
+            before = crate::history::before_write(&path, &self.config.history);
             if let Err(e) = doc.buffer.save_as(path) {
                 self.notify_error(format!("Save failed: {e}"));
                 return;
@@ -971,12 +986,16 @@ impl QellApp {
                     return;
                 }
             }
+            before = doc.buffer.path().and_then(|p| crate::history::before_write(p, &self.config.history));
             if let Err(e) = doc.buffer.save() {
                 self.notify_error(format!("Save failed: {e}"));
                 return;
             }
         }
         doc.note_disk();
+        if let Some(path) = doc.buffer.path() {
+            crate::history::record(path.to_path_buf(), before, doc.buffer.text(), self.config.history.clone());
+        }
         // A manifest tab goes back to the cluster when it is saved,
         // which is what `e` in the cluster view is for. The apply runs
         // on a worker, so it is started from the frame loop.
@@ -2983,6 +3002,8 @@ impl QellApp {
             Command::JournalToday => self.write_journal(false),
             Command::JournalPrevious => self.write_journal(true),
             Command::JournalFolder => self.open_journal_folder(),
+            Command::HistoryShow => self.pick_history(false),
+            Command::HistoryRestore => self.restore_history(),
             Command::TestRunFile => self.run_tests_in_file(),
             Command::TestRerun => self.rerun_tests(),
             Command::ShowTests => {

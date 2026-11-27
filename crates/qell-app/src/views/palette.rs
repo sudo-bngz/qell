@@ -50,6 +50,8 @@ enum Choice {
     /// "Create new branch…" at the top of the branch list.
     NewBranch,
     Stash(usize),
+    /// Index into `app.history_pick.versions`.
+    Version(usize),
 }
 
 pub fn show(app: &mut QellApp, ctx: &Context) {
@@ -159,6 +161,13 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                 choices.push((label, format!("{} · {}", s.reference(), super::sidebar::ago(when, now)), Choice::Stash(i)));
             }
         }
+        PaletteMode::History { .. } => {
+            for (i, (label, hint)) in app.history_pick.rows.iter().enumerate() {
+                if fuzzy_score(&query, label).is_some() {
+                    choices.push((label.clone(), hint.clone(), Choice::Version(i)));
+                }
+            }
+        }
         PaletteMode::GoToLine | PaletteMode::Rename | PaletteMode::NewBranch | PaletteMode::StashMessage { .. } => {}
     }
     if choices.is_empty() {
@@ -197,6 +206,8 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
         PaletteMode::Stashes(StashAction::Apply) => "Apply stash…",
         PaletteMode::Stashes(StashAction::Pop) => "Pop stash…",
         PaletteMode::Stashes(StashAction::Drop) => "Drop stash…",
+        PaletteMode::History { restore: false } => "Compare with a version from the local history…",
+        PaletteMode::History { restore: true } => "Restore a version from the local history…",
     };
     let text_dim = app.palette.text_dim;
     let screen = ctx.content_rect();
@@ -348,6 +359,10 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                         app.stash_action(i, action);
                     }
                 }
+                Choice::Version(i) => match mode {
+                    PaletteMode::History { restore: true } => app.restore_version(i),
+                    _ => app.compare_version(i),
+                },
             }
         }
         close = true;

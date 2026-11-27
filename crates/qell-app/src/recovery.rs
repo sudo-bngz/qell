@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 /// How often unsaved tabs are copied.
 const BACKUP_EVERY: Duration = Duration::from_secs(5);
 
-fn data() -> PathBuf {
+pub fn data() -> PathBuf {
     dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("qell")
 }
 
@@ -29,7 +29,7 @@ pub fn crash_dir() -> PathBuf {
 }
 
 /// FNV-1a: a short, stable name for a path.
-fn fnv(s: &str) -> String {
+pub fn fnv(s: &str) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in s.bytes() {
         h ^= u64::from(b);

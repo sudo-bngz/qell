@@ -14,6 +14,7 @@
 - [Languages and language servers](languages.md)
 - [Files and search](files.md)
 - [Git](git.md)
+- [Local history](history.md)
 - [Terminal](terminal.md)
 - [Running tests](tests.md)
 - [Daily log](journal.md)

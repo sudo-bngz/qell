@@ -13,6 +13,7 @@ mod document;
 mod format;
 mod gitops;
 mod hints;
+mod history;
 mod icons;
 mod journal;
 mod merge;

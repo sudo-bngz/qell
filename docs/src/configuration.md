@@ -126,3 +126,15 @@ language = "English"        # the log's language
 dir = ""                    # where logs go; empty: Qell's data folder
 keep_days = 60              # days of activity kept
 ```
+
+## Local history
+
+`[history]` — see [Local history](history.md):
+
+```toml
+[history]
+enabled = true              # keep a copy of a file each time it is saved
+keep_days = 30              # days a version is kept
+max_per_file = 100          # versions kept per file, the newest
+max_file_kb = 1024          # bigger files aren't kept
+```
