@@ -502,6 +502,8 @@ pub struct QellApp {
     /// The bottom panel shows the Tests tab.
     pub tests_open: bool,
     pub tests: crate::testrun::Tests,
+    /// A daily log being written.
+    pub journal: Option<crate::journal::Writing>,
     /// What the Markdown preview keeps between frames (scroll, layout).
     pub markdown: egui_commonmark::CommonMarkCache,
     /// Which pane had the keyboard last frame, to notice coming back to
@@ -548,6 +550,14 @@ pub struct QellApp {
 impl QellApp {
     pub fn new(cc: &eframe::CreationContext<'_>, root: PathBuf, file: Option<PathBuf>) -> Self {
         let config = Config::load();
+        if config.journal.enabled {
+            // The activity record keeps `keep_days` days.
+            let keep = config.journal.keep_days.max(1);
+            std::thread::spawn(move || {
+                crate::activity::private_files();
+                crate::activity::prune(keep);
+            });
+        }
         let palette = Palette::dark();
         palette.apply(&cc.egui_ctx);
         crate::icons::install(&cc.egui_ctx);
@@ -628,6 +638,7 @@ impl QellApp {
             problems_open: false,
             tests_open: false,
             tests: Default::default(),
+            journal: None,
             markdown: egui_commonmark::CommonMarkCache::default(),
             last_focus: Focus::Editor,
             k8s: views::k8s::K8sState::default(),
@@ -970,6 +981,11 @@ impl QellApp {
             }
         }
         self.lsp.did_save(&doc.buffer);
+        if self.config.journal.enabled {
+            if let Some(path) = doc.buffer.path() {
+                crate::activity::record(&crate::activity::Event::Save { t: crate::activity::now(), path: path.to_path_buf() });
+            }
+        }
         // Only this file changed: its repository and its index entry.
         match doc.buffer.path().map(Path::to_path_buf) {
             Some(path) => {
@@ -1233,6 +1249,7 @@ impl QellApp {
                         .map(|(h, s)| format!("{} {s}", h.rsplit(' ').next().unwrap_or("")))
                         .unwrap_or(first.to_string());
                     self.notify(format!("Committed {summary}"));
+                    self.note_git(&job.repo, format!("Committed {summary}"));
                 }
                 (
                     kind @ (views::scm::JobKind::Switch
@@ -1245,7 +1262,10 @@ impl QellApp {
                     // The stash list of that repository changed.
                     self.scm.stashes.remove(&job.repo);
                     match result {
-                        Ok(msg) => self.notify(msg),
+                        Ok(msg) => {
+                            self.note_git(&job.repo, msg.clone());
+                            self.notify(msg)
+                        }
                         Err(e) => {
                             log::warn!("git {kind:?} failed: {e}");
                             self.notify_error(crate::gitops::explain(kind, &e));
@@ -2955,6 +2975,9 @@ impl QellApp {
                 _ => self.notify("The preview is for Markdown files."),
             },
             Command::TestRunAtCursor => self.run_test_at_cursor(),
+            Command::JournalToday => self.write_journal(false),
+            Command::JournalPrevious => self.write_journal(true),
+            Command::JournalFolder => self.open_journal_folder(),
             Command::TestRunFile => self.run_tests_in_file(),
             Command::TestRerun => self.rerun_tests(),
             Command::ShowTests => {
@@ -3309,6 +3332,26 @@ impl QellApp {
 
     // ---- terminal --------------------------------------------------------
 
+    /// A shell in `dir`: with the journal's command hook when it's on and
+    /// the shell is zsh or bash, else as configured.
+    fn spawn_shell(&self, dir: PathBuf) -> anyhow::Result<Terminal> {
+        let j = &self.config.journal;
+        if j.enabled && j.shell_integration {
+            if let Some((argv, env)) = crate::activity::integrate(&self.config.shell) {
+                return Terminal::with_env(80, 24, Some(dir), Some(argv), env);
+            }
+        }
+        Terminal::new(80, 24, Some(dir), Some(self.config.shell.as_str()))
+    }
+
+    /// Note a git command Qell ran, for the daily log.
+    fn note_git(&self, repo: &Path, what: String) {
+        if self.config.journal.enabled {
+            let repo = self.root.join(repo);
+            crate::activity::record(&crate::activity::Event::Git { t: crate::activity::now(), repo, what });
+        }
+    }
+
     /// Open a new shell in the workspace root and make it active.
     pub fn new_terminal(&mut self) {
         self.new_terminal_in(self.root.clone());
@@ -3316,7 +3359,7 @@ impl QellApp {
 
     /// A new shell starting in `dir` ("Open in Integrated Terminal").
     pub fn new_terminal_in(&mut self, dir: PathBuf) {
-        match Terminal::new(80, 24, Some(dir), Some(self.config.shell.as_str())) {
+        match self.spawn_shell(dir) {
             Ok(term) => {
                 let number = self.next_terminal_number;
                 self.next_terminal_number += 1;
@@ -3374,8 +3417,12 @@ impl QellApp {
 
     /// Replace a shell with a fresh one in the same tab.
     pub fn restart_terminal(&mut self, index: usize) {
+        if index >= self.terminals.len() {
+            return;
+        }
+        let shell = self.spawn_shell(self.root.clone());
         let Some(tab) = self.terminals.get_mut(index) else { return };
-        match Terminal::new(80, 24, Some(self.root.clone()), Some(self.config.shell.as_str())) {
+        match shell {
             Ok(term) => tab.term = term,
             Err(e) => self.notify_error(format!("Terminal unavailable: {e:#}")),
         }
@@ -3615,6 +3662,7 @@ impl eframe::App for QellApp {
         // rather than while drawing the panel.
         views::k8s::update(self, ctx);
         self.poll_tests(ctx);
+        self.poll_journal();
         views::outline::update(self, ctx);
         self.update_hints(ctx);
         views::aws::update(self, ctx);

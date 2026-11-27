@@ -91,6 +91,23 @@ bottom, and language-server completion for the languages you actually use.
   ▶ turns into ✓ or ✗; the **Tests** tab beside Problems lists the results,
   failures first with their message, a click away from the failing line.
   The file is saved first; nothing ever runs on its own.
+- **Daily log** — *Journal: Write Today's Log* (or *for Last Working Day*,
+  for Monday's stand-up) writes what you did as a short stand-up note:
+  one line, *Done* by project, *Issues*, *Next*. It is built from what Qell
+  recorded that day: your commits in each repository, the files you saved,
+  the tests you ran, the git commands run from Qell, and the commands you
+  ran in Qell's terminals (folder, failures, long ones; `ls`, `cd`, `git
+  status`… left out, repeats folded). An LLM writes the summary: the
+  `[journal] command` you set (`claude -p`, `ollama run …`, `llm`; it gets
+  the day on stdin), else the Anthropic API with your key, else none — the
+  log then holds the activity only. It's saved as `YYYY-MM-DD.md` (the
+  previous one kept as `.md.bak`) and opened rendered, the raw activity
+  under the summary. The record stays on your machine (readable by you
+  only, kept `keep_days`), nothing is sent until you ask for a log; secrets
+  in commands (`--password x`, `TOKEN=…`, `Authorization:`, URL passwords)
+  are masked, and a command typed with a leading space isn't kept (with
+  `HISTCONTROL=ignorespace` in bash). The terminal hook only applies to the
+  zsh or bash Qell starts — your own `.zshrc` / `.bashrc` still load.
 - **Integrated terminals** — the Alacritty terminal core in a panel
   (`` Ctrl+` ``), with 256/true colour, scrollback and application-cursor mode.
   Run several shells as tabs: `` Ctrl+Shift+` `` (`⌘T` on macOS) opens a new one,
@@ -486,6 +503,16 @@ ignore = [".git", "target", "node_modules", ".terraform", "dist"]
 # Override a formatter (it reads the file on stdin and writes it on stdout;
 # {path} stands for the file). An empty list turns formatting off.
 # terraform = ["tofu", "fmt", "-"]
+
+[journal]
+enabled = true              # keep a record of your day (on this machine)
+shell_integration = true    # Qell's zsh/bash terminals report their commands
+command = ""                # LLM fed the day on stdin: "claude -p", "ollama run llama3.1", "llm"
+api_key = ""                # else the Anthropic API (empty: $ANTHROPIC_API_KEY)
+model = "claude-haiku-5-5"
+language = "English"        # the log's language
+dir = ""                    # where logs go; empty: <data>/qell/journal
+keep_days = 60              # days of activity kept
 ```
 
 ## Architecture

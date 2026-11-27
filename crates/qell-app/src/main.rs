@@ -5,6 +5,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod activity;
 mod app;
 mod commands;
 mod config;
@@ -13,6 +14,7 @@ mod format;
 mod gitops;
 mod hints;
 mod icons;
+mod journal;
 mod merge;
 mod native_menu;
 mod preview;

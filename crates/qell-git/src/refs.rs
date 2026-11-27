@@ -140,6 +140,51 @@ pub fn drop_stash(dir: &Path, stash: &Stash) -> Result<String, String> {
     run(dir, &["stash", "drop", &stash.reference()], None)
 }
 
+/// The repository holding `dir` (its top folder).
+pub fn toplevel(dir: &Path) -> Option<std::path::PathBuf> {
+    let out = run(dir, &["rev-parse", "--show-toplevel"], None).ok()?;
+    let root = std::path::PathBuf::from(out.trim());
+    Some(std::fs::canonicalize(&root).unwrap_or(root))
+}
+
+/// The branch checked out (`None`: detached).
+pub fn current_branch(dir: &Path) -> Option<String> {
+    let out = run(dir, &["branch", "--show-current"], None).ok()?;
+    let b = out.trim();
+    (!b.is_empty()).then(|| b.to_string())
+}
+
+/// Your commits (by `user.email`) made between two times, on any branch:
+/// `1a2b3c4 subject (branch)`, oldest first.
+pub fn my_commits(dir: &Path, since: i64, until: i64) -> Vec<String> {
+    let email = run(dir, &["config", "user.email"], None).map(|e| e.trim().to_string()).unwrap_or_default();
+    let mut args = vec![
+        "log".to_string(),
+        "--all".into(),
+        "--no-merges".into(),
+        "--reverse".into(),
+        format!("--since=@{since}"),
+        format!("--until=@{until}"),
+        "--pretty=format:%h %s%x00%D".into(),
+    ];
+    if !email.is_empty() {
+        args.push(format!("--author={email}"));
+    }
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    run(dir, &args, None)
+        .unwrap_or_default()
+        .lines()
+        .map(|l| {
+            let (subject, refs) = l.split_once('\0').unwrap_or((l, ""));
+            let branch = refs.split(", ").map(|r| r.trim_start_matches("HEAD -> ")).find(|r| !r.is_empty() && !r.contains('/'));
+            match branch {
+                Some(b) => format!("{subject} ({b})"),
+                None => subject.to_string(),
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
