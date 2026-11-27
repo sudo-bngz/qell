@@ -144,10 +144,18 @@ impl Buffer {
         self.rope.len_lines()
     }
 
-    /// Line text without its trailing newline.
+    /// Line text without its trailing newline; empty past the end.
+    ///
+    /// Line numbers come from many places that can lag behind the text —
+    /// diagnostics, inlay hints and edits from a language server, folds,
+    /// blame, a test run — and a file can shrink under them (a reload, a
+    /// format, a checkout). A line that no longer exists is empty rather
+    /// than a crash.
     pub fn line(&self, idx: usize) -> String {
-        let s = self.rope.line(idx).to_string();
-        s.trim_end_matches(['\n', '\r']).to_string()
+        match self.rope.get_line(idx) {
+            Some(s) => s.to_string().trim_end_matches(['\n', '\r']).to_string(),
+            None => String::new(),
+        }
     }
 
     pub fn line_len(&self, idx: usize) -> usize {
@@ -823,6 +831,15 @@ impl Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_line_past_the_end_is_empty() {
+        let b = Buffer::from_text("one\ntwo\n", None);
+        assert_eq!(b.line(1), "two");
+        assert_eq!(b.line(2), "");
+        assert_eq!(b.line(186), "");
+        assert_eq!(b.line_len(186), 0);
+    }
 
     #[test]
     fn insert_and_undo() {
