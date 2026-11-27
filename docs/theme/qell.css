@@ -1,0 +1,51 @@
+/* Qell's palette over mdBook's coal theme: the LED logo's colours, monospace. */
+.coal, html.coal {
+  --bg: #110f0e;
+  --fg: #e2ded8;
+  --sidebar-bg: #0c0b0a;
+  --sidebar-fg: #a8a19a;
+  --sidebar-non-existant: #5a544e;
+  --sidebar-active: #ffffff;
+  --sidebar-spacer: #2a2623;
+  --scrollbar: #2a2623;
+  --icons: #8a837c;
+  --icons-hover: #ffffff;
+  --links: #e2ded8;
+  --inline-code-color: #f0ece6;
+  --theme-popup-bg: #181614;
+  --theme-popup-border: #2a2623;
+  --theme-hover: #221f1c;
+  --quote-bg: #181614;
+  --quote-border: #2a2623;
+  --table-border-color: #2a2623;
+  --table-header-bg: #1a1816;
+  --table-alternate-bg: #151312;
+  --searchbar-border-color: #2a2623;
+  --searchbar-bg: #181614;
+  --searchbar-fg: #e2ded8;
+  --searchbar-shadow-color: #000;
+  --searchresults-header-fg: #8a837c;
+  --searchresults-border-color: #2a2623;
+  --searchresults-li-bg: #181614;
+  --search-mark-bg: #4a443e;
+}
+html, body, .content, .sidebar, .menu-title, input, button {
+  font-family: "JetBrains Mono", "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+}
+html { font-size: 15px; }
+.content main { max-width: 820px; }
+.content p, .content li { line-height: 1.7; }
+.content h1, .content h2, .content h3 { font-weight: 600; letter-spacing: -0.01em; }
+.content h1 { border-bottom: 1px solid #2a2623; padding-bottom: .4em; }
+.content a { text-decoration: underline; text-decoration-color: #5a544e; text-underline-offset: 3px; }
+.content a:hover { text-decoration-color: #ffffff; }
+.content img { max-width: 100%; border: 1px solid #2a2623; border-radius: 8px; }
+.content img[src$="logo.svg"] { border: 0; width: 96px; }
+code, pre { font-family: inherit !important; }
+pre { border: 1px solid #2a2623; border-radius: 6px; }
+.coal .hljs { background: #0c0b0a; }
+.content :not(pre) > code { background: #1d1a18; padding: .1em .35em; border-radius: 4px; }
+kbd { background: #1d1a18; border: 1px solid #2a2623; border-radius: 4px; padding: 0 .35em; }
+.menu-title { color: #e2ded8; font-weight: 600; }
+.chapter li.chapter-item a.active { color: #ffffff; }
+.chapter li.part-title { color: #8a837c; text-transform: uppercase; font-size: .8em; letter-spacing: .08em; }

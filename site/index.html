@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Qell — a quiet, native code editor</title>
+<meta name="description" content="Qell is a minimalist native code editor written in Rust. It looks like a terminal, opens instantly, and does nothing in the background you didn't ask for.">
+<meta property="og:title" content="Qell — a quiet, native code editor">
+<meta property="og:description" content="A minimalist native code editor in Rust: language servers, git, tests, a terminal, Kubernetes and AWS — and nothing in the background.">
+<meta property="og:image" content="assets/demo-poster.png">
+<meta name="theme-color" content="#110f0e">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="assets/icon-256.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="bar">
+  <a class="brand" href="./"><img src="assets/qell-mark.svg" alt="" width="22" height="22"> qell</a>
+  <nav>
+    <a href="#features">features</a>
+    <a href="docs/">docs</a>
+    <a href="docs/changelog.html">changelog</a>
+    <a href="https://github.com/sudo-bngz/qell">github</a>
+  </nav>
+</header>
+
+<main>
+<section class="hero">
+  <svg class="led" viewBox="0 0 450 631" role="img" aria-label="Qell"><circle cx="45.0" cy="45.0" r="35.14" class="off"/><circle cx="135.1" cy="45.0" r="35.14" class="off"/><circle cx="225.2" cy="45.0" r="35.14" class="off"/><circle cx="315.3" cy="45.0" r="35.14" class="off"/><circle cx="405.4" cy="45.0" r="35.14" class="off"/><circle cx="45.0" cy="135.1" r="35.14" class="off"/><circle cx="135.1" cy="135.1" r="35.14" class="on" style="--i:0"/><circle cx="225.2" cy="135.1" r="35.14" class="on" style="--i:1"/><circle cx="315.3" cy="135.1" r="35.14" class="on" style="--i:2"/><circle cx="405.4" cy="135.1" r="35.14" class="on" style="--i:3"/><circle cx="45.0" cy="225.2" r="35.14" class="on" style="--i:11"/><circle cx="135.1" cy="225.2" r="35.14" class="off"/><circle cx="225.2" cy="225.2" r="35.14" class="off"/><circle cx="315.3" cy="225.2" r="35.14" class="off"/><circle cx="405.4" cy="225.2" r="35.14" class="on" style="--i:4"/><circle cx="45.0" cy="315.3" r="35.14" class="on" style="--i:10"/><circle cx="135.1" cy="315.3" r="35.14" class="off"/><circle cx="225.2" cy="315.3" r="35.14" class="off"/><circle cx="315.3" cy="315.3" r="35.14" class="off"/><circle cx="405.4" cy="315.3" r="35.14" class="on" style="--i:5"/><circle cx="45.0" cy="405.4" r="35.14" class="off"/><circle cx="135.1" cy="405.4" r="35.14" class="on" style="--i:9"/><circle cx="225.2" cy="405.4" r="35.14" class="on" style="--i:8"/><circle cx="315.3" cy="405.4" r="35.14" class="on" style="--i:7"/><circle cx="405.4" cy="405.4" r="35.14" class="on" style="--i:6"/><circle cx="45.0" cy="495.6" r="35.14" class="off"/><circle cx="135.1" cy="495.6" r="35.14" class="off"/><circle cx="225.2" cy="495.6" r="35.14" class="off"/><circle cx="315.3" cy="495.6" r="35.14" class="off"/><circle cx="405.4" cy="495.6" r="35.14" class="on" style="--i:12"/><circle cx="45.0" cy="585.7" r="35.14" class="off"/><circle cx="135.1" cy="585.7" r="35.14" class="off"/><circle cx="225.2" cy="585.7" r="35.14" class="off"/><circle cx="315.3" cy="585.7" r="35.14" class="off"/><circle cx="405.4" cy="585.7" r="35.14" class="cursor" style="--i:13"/></svg>
+  <h1>qell</h1>
+  <p class="tag">A quiet, native code editor.<span class="caret"></span></p>
+  <p class="lede">Written in Rust. Looks like a terminal. Opens instantly.
+  Language servers, git, tests, a terminal, Kubernetes and AWS in one
+  window — and <strong>nothing running in the background you didn't ask for</strong>.</p>
+  <div class="cta">
+    <a class="btn primary" href="https://github.com/sudo-bngz/qell/releases/latest">Download for macOS</a>
+    <a class="btn" href="https://github.com/sudo-bngz/qell/releases/latest">Linux x86_64</a>
+    <a class="btn ghost" href="docs/install.html">Build from source →</a>
+  </div>
+  <p class="small">Version 0.1 · preview · MIT/Apache-2.0</p>
+</section>
+
+<section class="demo">
+  <div class="window">
+    <div class="chrome"><i></i><i></i><i></i><span>~/src/shop — qell</span></div>
+    <video autoplay muted loop playsinline preload="metadata" poster="assets/demo-poster.png">
+      <source src="assets/demo.mp4" type="video/mp4">
+    </video>
+  </div>
+</section>
+
+<section class="quiet">
+  <h2><span class="prompt">$</span> nothing in the background</h2>
+  <div class="cols">
+    <p>No telemetry. No auto-updates. No extension marketplace pulling code
+    at start-up. No language server downloaded behind your back.</p>
+    <p>Missing a tool? Qell tells you, in plain words, the one command to
+    install it — and lets you decide. Your <code>kubectl</code>, your
+    <code>aws</code>, your <code>gopls</code>, your shell.</p>
+    <p>Lists refresh only while you look at them. Tests run when you click
+    ▶. The daily log talks to an LLM only when you ask it to.</p>
+  </div>
+</section>
+
+<section id="features" class="features">
+  <h2><span class="prompt">$</span> what's inside</h2>
+  <div class="grid">
+    <article>
+      <h3>An editor that stays out of the way</h3>
+      <p>Multiple cursors, folding, split view, minimap, sticky scroll,
+      outline, soft wrap and an optional Vim mode. Tree-sitter colours for
+      some twenty languages.</p>
+      <a href="docs/editing.html">Editing →</a>
+    </article>
+    <article>
+      <h3>Language servers, your way</h3>
+      <p>Completion, hover, go to definition, rename, diagnostics,
+      signature help, inlay hints and format on save — with the servers you
+      already have.</p>
+      <a href="docs/languages.html">Languages →</a>
+    </article>
+    <article>
+      <h3>Git, everywhere</h3>
+      <p>Status in the tree, changes in the gutter, stage a hunk, blame,
+      the commit graph, branches, stash and a one-click merge conflict
+      resolver.</p>
+      <a href="docs/git.html">Git →</a>
+    </article>
+    <article>
+      <h3>Tests with a ▶</h3>
+      <p>Go, Rust, Jest, Vitest and pytest. Click beside a test to run it in
+      the terminal and see ✓ or ✗ — a Tests tab jumps to what failed.</p>
+      <a href="docs/tests.html">Tests →</a>
+    </article>
+    <article>
+      <h3>A real terminal</h3>
+      <p>On the Alacritty core: true colour, tabs, mouse selection, shells
+      that come back where they were.</p>
+      <a href="docs/terminal.html">Terminal →</a>
+    </article>
+    <article>
+      <h3>Kubernetes, k9s-style</h3>
+      <p>Pods, deployments, logs, shells, port-forwards and edit-to-apply,
+      from the keyboard, through your own <code>kubectl</code>.</p>
+      <a href="docs/kubernetes.html">Kubernetes →</a>
+    </article>
+    <article>
+      <h3>AWS at a glance</h3>
+      <p>Lambda, ECS, CloudFront, CodePipeline, S3, SQS and more — read-only,
+      through your own <code>aws</code> CLI and SSO sessions.</p>
+      <a href="docs/aws.html">AWS →</a>
+    </article>
+    <article>
+      <h3>A daily log for stand-up</h3>
+      <p>What you committed, saved, tested and ran in the terminal, summed
+      up by the LLM you choose. Stays on your machine, secrets masked.</p>
+      <a href="docs/journal.html">Daily log →</a>
+    </article>
+    <article>
+      <h3>Small WebAssembly plugins</h3>
+      <p>Commands written in any language that targets wasm32, sandboxed,
+      with no access to files or the network.</p>
+      <a href="docs/plugins.html">Plugins →</a>
+    </article>
+  </div>
+</section>
+
+<section class="shots">
+  <figure><img src="docs/images/editor.png" alt="Editing Go with the file tree and terminal" loading="lazy"><figcaption>editor, tree, terminal</figcaption></figure>
+  <figure><img src="docs/images/tests.png" alt="Tests in the gutter and the Tests tab" loading="lazy"><figcaption>▶ tests</figcaption></figure>
+  <figure><img src="docs/images/git.png" alt="Source Control and blame" loading="lazy"><figcaption>git and blame</figcaption></figure>
+  <figure><img src="docs/images/aws.png" alt="The AWS view" loading="lazy"><figcaption>aws</figcaption></figure>
+</section>
+
+<section class="install">
+  <h2><span class="prompt">$</span> install</h2>
+  <div class="cols">
+    <div>
+      <h3>macOS (Apple silicon and Intel)</h3>
+      <p>Download <code>Qell.app</code> from the
+      <a href="https://github.com/sudo-bngz/qell/releases/latest">latest release</a>,
+      move it to Applications. It isn't notarised yet: right-click → Open, once.</p>
+    </div>
+    <div>
+      <h3>Linux</h3>
+<pre><code>tar xzf qell-*-linux-x86_64.tar.gz
+cd qell-*-linux-x86_64 && ./install.sh</code></pre>
+    </div>
+    <div>
+      <h3>From source</h3>
+<pre><code>git clone https://github.com/sudo-bngz/qell
+cd qell && cargo install --path crates/qell-app</code></pre>
+    </div>
+  </div>
+  <p><a class="btn" href="docs/">Read the documentation →</a></p>
+</section>
+</main>
+
+<footer>
+  <img src="assets/qell-led.svg" alt="Qell" height="34">
+  <p>Made by <a href="https://github.com/sudo-bngz">Nicolas Bounoughaz</a> ·
+  <a href="https://github.com/sudo-bngz/qell">source</a> ·
+  <a href="https://github.com/sudo-bngz/qell/issues">issues</a></p>
+</footer>
+</body>
+</html>

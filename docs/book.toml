@@ -1,0 +1,18 @@
+[book]
+title = "Qell"
+description = "User documentation for Qell, a minimalist native code editor"
+authors = ["Nicolas Bounoughaz"]
+language = "en"
+src = "src"
+
+[output.html]
+default-theme = "coal"
+preferred-dark-theme = "coal"
+additional-css = ["theme/qell.css"]
+git-repository-url = "https://github.com/sudo-bngz/qell"
+git-repository-icon = "fa-github"
+edit-url-template = "https://github.com/sudo-bngz/qell/edit/main/docs/{path}"
+no-section-label = true
+
+[output.html.search]
+limit-results = 20
