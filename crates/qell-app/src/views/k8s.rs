@@ -954,9 +954,9 @@ fn header(app: &mut QellApp, ui: &mut egui::Ui, font: &FontId, colors: &Colors) 
         x += right_w;
     }
     // The logo, right-aligned, when the rest has left room for it whole.
-    let logo_w = LOGO.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    let logo_w = K8S_LOGO.iter().map(|l| l.chars().count()).max().unwrap_or(0);
     if columns >= x + logo_w + 2 {
-        for (row, line) in LOGO.iter().enumerate() {
+        for (row, line) in K8S_LOGO.iter().enumerate() {
             let left = rect.right() - 12.0 - logo_w as f32 * char_w;
             painter.text(Pos2::new(left, at(0, row).y), Align2::LEFT_TOP, *line, font.clone(), colors.logo);
         }
@@ -995,7 +995,17 @@ pub(super) fn elide(text: &str, max: usize) -> String {
     text.chars().take(max.saturating_sub(1)).chain(std::iter::once('…')).collect()
 }
 
-/// Qell, in the spirit of the thing.
+/// Qell, in the spirit of the thing: a letter's width apart, so the Q's
+/// tail doesn't run into the E.
+const K8S_LOGO: [&str; 5] = [
+    r"  ___    _____   _       _     ",
+    r" / _ \  | ____| | |     | |    ",
+    r"| | | | |  _|   | |     | |    ",
+    r"| |_| | | |___  | |___  | |___ ",
+    r" \__\_\ |_____| |_____| |_____|",
+];
+
+/// The AWS view's logo.
 pub(super) const LOGO: [&str; 5] = [
     r"  ___  _____ _     _     ",
     r" / _ \| ____| |   | |    ",
