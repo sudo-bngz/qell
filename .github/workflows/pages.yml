@@ -27,7 +27,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: taiki-e/install-action@v2
         with:
-          tool: mdbook
+          tool: mdbook@0.4.40
       - name: Build
         run: |
           mkdir -p _site

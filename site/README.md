@@ -8,7 +8,7 @@ into one site — `/` is this page, `/docs/` the book — on every push to `main
 Preview locally:
 
 ```sh
-cargo install mdbook
+cargo install mdbook --version 0.4.40
 mkdir -p /tmp/qell-site && cp -R site/. /tmp/qell-site/
 mdbook build docs -d /tmp/qell-site/docs
 python3 -m http.server -d /tmp/qell-site
