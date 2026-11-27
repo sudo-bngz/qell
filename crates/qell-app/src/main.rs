@@ -23,6 +23,7 @@ mod recent;
 mod recovery;
 mod session;
 mod snippet;
+mod tasks;
 mod testrun;
 mod theme;
 mod views;

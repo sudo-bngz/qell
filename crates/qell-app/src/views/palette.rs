@@ -52,6 +52,8 @@ enum Choice {
     Stash(usize),
     /// Index into `app.history_pick.versions`.
     Version(usize),
+    /// Index into `app.task_pick.tasks`.
+    Task(usize),
 }
 
 pub fn show(app: &mut QellApp, ctx: &Context) {
@@ -168,6 +170,29 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                 }
             }
         }
+        PaletteMode::Tasks => {
+            let mut scored: Vec<(usize, usize)> = app
+                .task_pick
+                .tasks
+                .iter()
+                .enumerate()
+                .filter_map(|(i, t)| fuzzy_score(&query, &format!("{} {}", t.name, t.command)).map(|s| (s, i)))
+                .collect();
+            if !query.is_empty() {
+                scored.sort_by_key(|(s, _)| *s);
+            }
+            for (_, i) in scored {
+                let t = &app.task_pick.tasks[i];
+                let dir =
+                    t.cwd.strip_prefix(&root).map(|d| d.display().to_string()).unwrap_or_else(|_| t.cwd.display().to_string());
+                // "test   Run the tests" … "make test · api"
+                let described = !t.detail.is_empty() && t.detail != t.command;
+                let label = format!("{}   {}", t.name, if described { &t.detail } else { &t.command });
+                let what = if described { t.command.clone() } else { t.source.tag().to_string() };
+                let place = if dir.is_empty() { what } else { format!("{what} · {dir}") };
+                choices.push((label, place, Choice::Task(i)));
+            }
+        }
         PaletteMode::GoToLine | PaletteMode::Rename | PaletteMode::NewBranch | PaletteMode::StashMessage { .. } => {}
     }
     if choices.is_empty() {
@@ -208,6 +233,7 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
         PaletteMode::Stashes(StashAction::Drop) => "Drop stash…",
         PaletteMode::History { restore: false } => "Compare with a version from the local history…",
         PaletteMode::History { restore: true } => "Restore a version from the local history…",
+        PaletteMode::Tasks => "Run task…",
     };
     let text_dim = app.palette.text_dim;
     let screen = ctx.content_rect();
@@ -359,6 +385,7 @@ pub fn show(app: &mut QellApp, ctx: &Context) {
                         app.stash_action(i, action);
                     }
                 }
+                Choice::Task(i) => app.run_task_at(i),
                 Choice::Version(i) => match mode {
                     PaletteMode::History { restore: true } => app.restore_version(i),
                     _ => app.compare_version(i),

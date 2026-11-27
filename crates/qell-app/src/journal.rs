@@ -142,6 +142,7 @@ struct RepoDay {
     saves: BTreeMap<String, usize>,
     tests: Vec<String>,
     git: Vec<String>,
+    tasks: Vec<String>,
     commands: Vec<(i64, Command)>,
 }
 
@@ -215,6 +216,10 @@ pub fn gather(days: i64, offset: i64) -> Day {
                 let root = repos.of(&repo.join(".")).or(Some(repo.clone()));
                 by_repo.entry(root).or_default().git.push(what.clone());
             }
+            Event::Task { cwd, command, .. } => {
+                let root = repos.of(&cwd.join("."));
+                by_repo.entry(root).or_default().tasks.push(format!("`{command}`"));
+            }
         }
     }
     for c in commands {
@@ -265,6 +270,17 @@ pub fn gather(days: i64, offset: i64) -> Day {
             md.push_str("\nGit (from Qell):\n");
             for g in &day.git {
                 md.push_str(&format!("- {g}\n"));
+            }
+        }
+        if !day.tasks.is_empty() {
+            md.push_str("\nTasks run:\n");
+            let mut seen: Vec<&String> = Vec::new();
+            for t in &day.tasks {
+                if !seen.contains(&t) {
+                    let n = day.tasks.iter().filter(|x| *x == t).count();
+                    md.push_str(&format!("- {t}{}\n", if n > 1 { format!(" ×{n}") } else { String::new() }));
+                    seen.push(t);
+                }
             }
         }
         let lines = command_lines(&day.commands, root.as_deref(), offset);

@@ -218,6 +218,8 @@ pub enum PaletteMode {
     History {
         restore: bool,
     },
+    /// Picking a task to run.
+    Tasks,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -477,6 +479,9 @@ pub struct QellApp {
     pub git_pick: GitPick,
     /// The versions of a file being picked from in the palette.
     pub history_pick: crate::history::Pick,
+    /// The tasks being picked from in the palette, and the last one run.
+    pub task_pick: crate::tasks::Pick,
+    pub last_task: Option<crate::tasks::Task>,
     /// Git's version of open files, fetched off the UI thread for the
     /// gutter's change marks.
     git_base_tx: std::sync::mpsc::Sender<(PathBuf, Option<String>)>,
@@ -635,6 +640,8 @@ impl QellApp {
             rename_symbol: String::new(),
             git_pick: GitPick::default(),
             history_pick: Default::default(),
+            task_pick: Default::default(),
+            last_task: None,
             git_base_tx,
             git_base_rx,
             blame_tx,
@@ -2405,7 +2412,7 @@ impl QellApp {
     // ---- file operations (file tree menu) -----------------------------------
 
     /// Something changed on disk: refresh the tree, file list, git and index.
-    fn files_changed(&mut self) {
+    pub fn files_changed(&mut self) {
         self.tree_cache.clear();
         self.command_palette.files.clear();
         self.git.refresh();
@@ -3004,6 +3011,9 @@ impl QellApp {
             Command::JournalFolder => self.open_journal_folder(),
             Command::HistoryShow => self.pick_history(false),
             Command::HistoryRestore => self.restore_history(),
+            Command::TaskRun => self.pick_task(),
+            Command::TaskRerun => self.rerun_task(),
+            Command::TaskConfigure => self.configure_tasks(),
             Command::TestRunFile => self.run_tests_in_file(),
             Command::TestRerun => self.rerun_tests(),
             Command::ShowTests => {

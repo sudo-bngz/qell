@@ -17,6 +17,7 @@
 - [Local history](history.md)
 - [Terminal](terminal.md)
 - [Running tests](tests.md)
+- [Tasks](tasks.md)
 - [Daily log](journal.md)
 
 # Cloud

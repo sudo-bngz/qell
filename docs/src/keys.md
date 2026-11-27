@@ -66,6 +66,7 @@ command is also in the palette (`Ctrl/⌘+Shift+P`), with its shortcut.
 | Rename symbol | `F2` |
 | Quick fix | `Ctrl+.` |
 | Run test at cursor | `Ctrl+Alt+T` |
+| Run task | `Ctrl+Shift+B` |
 | Git blame | `Ctrl+Alt+B` |
 
 ## Terminal

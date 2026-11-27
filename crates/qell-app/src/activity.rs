@@ -44,12 +44,14 @@ pub enum Event {
     Tests { t: i64, file: PathBuf, command: String, passed: usize, failed: usize, ok: bool },
     /// A git command Qell ran (commit, switch, stash…), with what it said.
     Git { t: i64, repo: PathBuf, what: String },
+    /// A task started from the palette.
+    Task { t: i64, cwd: PathBuf, name: String, command: String },
 }
 
 impl Event {
     pub fn time(&self) -> i64 {
         match self {
-            Event::Save { t, .. } | Event::Tests { t, .. } | Event::Git { t, .. } => *t,
+            Event::Save { t, .. } | Event::Tests { t, .. } | Event::Git { t, .. } | Event::Task { t, .. } => *t,
         }
     }
 }
