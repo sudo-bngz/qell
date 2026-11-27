@@ -196,17 +196,36 @@ impl Terminal {
             let program = words.next()?.to_string();
             Some((program, words.map(String::from).collect()))
         });
-        Self::start(cols, rows, cwd, argv)
+        Self::start(cols, rows, cwd, argv, Vec::new())
+    }
+
+    /// Start a shell with extra environment variables (shell integration:
+    /// where the shell's hooks write the commands it runs). `argv` is the
+    /// program and its arguments; `None` uses `$SHELL`.
+    pub fn with_env(
+        cols: usize,
+        rows: usize,
+        cwd: Option<PathBuf>,
+        argv: Option<(String, Vec<String>)>,
+        env: Vec<(String, String)>,
+    ) -> Result<Self> {
+        Self::start(cols, rows, cwd, argv, env)
     }
 
     /// Start one command instead of a shell, with its arguments given one
     /// by one (`kubectl exec … -- sh -c 'exec bash || exec sh'`), which
     /// splitting a command line on spaces could not express.
     pub fn command(cols: usize, rows: usize, cwd: Option<PathBuf>, program: &str, args: Vec<String>) -> Result<Self> {
-        Self::start(cols, rows, cwd, Some((program.to_string(), args)))
+        Self::start(cols, rows, cwd, Some((program.to_string(), args)), Vec::new())
     }
 
-    fn start(cols: usize, rows: usize, cwd: Option<PathBuf>, argv: Option<(String, Vec<String>)>) -> Result<Self> {
+    fn start(
+        cols: usize,
+        rows: usize,
+        cwd: Option<PathBuf>,
+        argv: Option<(String, Vec<String>)>,
+        env: Vec<(String, String)>,
+    ) -> Result<Self> {
         let (tx, events) = unbounded();
         let listener = Listener(tx);
 
@@ -220,6 +239,7 @@ impl Terminal {
         options.env.insert("TERM".into(), "xterm-256color".into());
         options.env.insert("COLORTERM".into(), "truecolor".into());
         options.env.insert("TERM_PROGRAM".into(), "qell".into());
+        options.env.extend(env);
 
         let window_size =
             WindowSize { num_lines: rows.max(1) as u16, num_cols: cols.max(2) as u16, cell_width: 8, cell_height: 16 };

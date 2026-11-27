@@ -1088,6 +1088,26 @@ mod tests {
     }
 
     #[test]
+    fn todays_commits() {
+        use crate::refs;
+        if !git_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        init_repo(root);
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        commit_all(root);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        let c = refs::my_commits(root, now - 3600, now + 60);
+        assert_eq!(c.len(), 1);
+        assert!(c[0].ends_with("init (main)"), "{c:?}");
+        assert!(refs::my_commits(root, now - 7200, now - 3600).is_empty());
+        assert_eq!(refs::current_branch(root).as_deref(), Some("main"));
+        assert!(refs::toplevel(&root.join(".")).is_some());
+    }
+
+    #[test]
     fn blame_follows_unsaved_text() {
         if !git_available() {
             return;

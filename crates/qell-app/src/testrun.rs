@@ -343,6 +343,17 @@ impl QellApp {
         }
         let Some(code) = exit else { return };
         run.exit = Some(code);
+        if self.config.journal.enabled {
+            let named = |s: Status| run.outcomes.iter().filter(|o| o.status == s && !o.name.is_empty()).count();
+            crate::activity::record(&crate::activity::Event::Tests {
+                t: crate::activity::now(),
+                file: run.file.clone(),
+                command: run.command.clone(),
+                passed: named(Status::Passed),
+                failed: named(Status::Failed),
+                ok: code == 0,
+            });
+        }
         run.finished = Some(Instant::now());
         // Asked for but never reported: the run failed before them (a
         // build error) or they don't exist any more.

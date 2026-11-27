@@ -102,6 +102,52 @@ pub struct Config {
     /// formatting off for that language.
     #[serde(default)]
     pub format: BTreeMap<String, Vec<String>>,
+    /// The activity journal and its daily log (`[journal]`).
+    #[serde(default)]
+    pub journal: JournalConfig,
+}
+
+/// `[journal]`: what Qell keeps of your day, and how the daily log is
+/// written.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct JournalConfig {
+    /// Keep a record of saves, test runs, git commands and terminal
+    /// commands (on this machine only).
+    pub enabled: bool,
+    /// Qell's own terminals report the commands they run (a hook added to
+    /// the zsh or bash Qell starts).
+    pub shell_integration: bool,
+    /// The command that writes the summary, given the day's activity on
+    /// stdin: `claude -p`, `ollama run llama3.1`, `llm -m gpt-4o-mini`…
+    /// Tried first.
+    pub command: String,
+    /// Anthropic API key, when no command is set. Empty: the
+    /// `ANTHROPIC_API_KEY` environment variable.
+    pub api_key: String,
+    /// The model the API is asked with.
+    pub model: String,
+    /// The language the log is written in.
+    pub language: String,
+    /// Where the daily logs go. Empty: `<data>/qell/journal`.
+    pub dir: String,
+    /// Days of activity kept.
+    pub keep_days: i64,
+}
+
+impl Default for JournalConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            shell_integration: true,
+            command: String::new(),
+            api_key: String::new(),
+            model: "claude-haiku-5-5".into(),
+            language: "English".into(),
+            dir: String::new(),
+            keep_days: 60,
+        }
+    }
 }
 
 impl Default for Config {
@@ -141,6 +187,7 @@ impl Default for Config {
             ignore: vec![".git".into(), "target".into(), "node_modules".into(), ".terraform".into(), "dist".into()],
             lsp: Default::default(),
             format: Default::default(),
+            journal: Default::default(),
         }
     }
 }
