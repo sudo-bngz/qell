@@ -5,7 +5,9 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, Mutex};
+// A reader thread that panics poisons the locks it held: the editor goes
+// on with the data as it was rather than panicking in turn.
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 
 use anyhow::{anyhow, Context, Result};
@@ -164,7 +166,7 @@ impl Client {
             let head = stderr_head.clone();
             thread::Builder::new().name(format!("lsp-stderr-{language}")).spawn(move || {
                 for line in BufReader::new(stderr).lines().map_while(std::result::Result::ok) {
-                    let mut h = head.lock().unwrap();
+                    let mut h = head.lock().unwrap_or_else(PoisonError::into_inner);
                     if h.len() < 4096 {
                         h.push_str(&line);
                         h.push('\n');
@@ -209,8 +211,8 @@ impl Client {
                         Err(e) => {
                             // Give the stderr thread a moment to read the last words.
                             thread::sleep(std::time::Duration::from_millis(50));
-                            let said = stderr_head.lock().unwrap().clone();
-                            let never_started = !*ready.lock().unwrap();
+                            let said = stderr_head.lock().unwrap_or_else(PoisonError::into_inner).clone();
+                            let never_started = !*ready.lock().unwrap_or_else(PoisonError::into_inner);
                             let event = if never_started && is_missing_component(&said) {
                                 Event::NotInstalled { language: lang.clone(), program: program.clone() }
                             } else {
@@ -243,7 +245,7 @@ impl Client {
     }
 
     pub fn is_ready(&self) -> bool {
-        *self.ready.lock().unwrap()
+        *self.ready.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn initialize(&self, root: &Path) -> Result<()> {
@@ -340,7 +342,7 @@ impl Client {
 
     fn request<P: serde::Serialize>(&self, method: &str, params: P, kind: Pending) -> RequestId {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        self.pending.lock().unwrap().insert(id, kind);
+        self.pending.lock().unwrap_or_else(PoisonError::into_inner).insert(id, kind);
         let _ = self.outgoing.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
         id
     }
@@ -411,7 +413,7 @@ impl Client {
     pub fn resolves_completions(&self) -> bool {
         self.capabilities
             .lock()
-            .unwrap()
+            .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
             .and_then(|c| c.completion_provider.as_ref())
             .and_then(|p| p.resolve_provider)
@@ -422,7 +424,7 @@ impl Client {
     pub fn completion_triggers(&self) -> Vec<String> {
         self.capabilities
             .lock()
-            .unwrap()
+            .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
             .and_then(|c| c.completion_provider.as_ref())
             .and_then(|p| p.trigger_characters.clone())
@@ -431,18 +433,18 @@ impl Client {
 
     /// Whether the server answers go-to-definition / find-references.
     pub fn supports_definition(&self) -> bool {
-        let caps = self.capabilities.lock().unwrap();
+        let caps = self.capabilities.lock().unwrap_or_else(PoisonError::into_inner);
         caps.as_ref().and_then(|c| c.definition_provider.as_ref()).is_some_and(|p| !matches!(p, OneOf::Left(false)))
     }
 
     pub fn supports_references(&self) -> bool {
-        let caps = self.capabilities.lock().unwrap();
+        let caps = self.capabilities.lock().unwrap_or_else(PoisonError::into_inner);
         caps.as_ref().and_then(|c| c.references_provider.as_ref()).is_some_and(|p| !matches!(p, OneOf::Left(false)))
     }
 
     /// Whether the server can format a whole file.
     pub fn supports_formatting(&self) -> bool {
-        let caps = self.capabilities.lock().unwrap();
+        let caps = self.capabilities.lock().unwrap_or_else(PoisonError::into_inner);
         caps.as_ref().and_then(|c| c.document_formatting_provider.as_ref()).is_some_and(|p| !matches!(p, OneOf::Left(false)))
     }
 
@@ -494,13 +496,13 @@ impl Client {
 
     /// Whether the server can rename a symbol across the workspace.
     pub fn supports_rename(&self) -> bool {
-        let caps = self.capabilities.lock().unwrap();
+        let caps = self.capabilities.lock().unwrap_or_else(PoisonError::into_inner);
         caps.as_ref().and_then(|c| c.rename_provider.as_ref()).is_some_and(|p| !matches!(p, OneOf::Left(false)))
     }
 
     /// Whether the server offers quick fixes and refactorings.
     pub fn supports_code_actions(&self) -> bool {
-        let caps = self.capabilities.lock().unwrap();
+        let caps = self.capabilities.lock().unwrap_or_else(PoisonError::into_inner);
         caps.as_ref()
             .and_then(|c| c.code_action_provider.as_ref())
             .is_some_and(|p| !matches!(p, CodeActionProviderCapability::Simple(false)))
@@ -521,7 +523,7 @@ impl Client {
 
     /// Whether the server lists what a file defines.
     pub fn supports_document_symbols(&self) -> bool {
-        let caps = self.capabilities.lock().unwrap();
+        let caps = self.capabilities.lock().unwrap_or_else(PoisonError::into_inner);
         caps.as_ref().and_then(|c| c.document_symbol_provider.as_ref()).is_some_and(|p| !matches!(p, OneOf::Left(false)))
     }
 
@@ -592,12 +594,16 @@ impl Client {
 
     /// Whether the server shows the parameters of the call being typed.
     pub fn supports_signature_help(&self) -> bool {
-        self.capabilities.lock().unwrap().as_ref().is_some_and(|c| c.signature_help_provider.is_some())
+        self.capabilities
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|c| c.signature_help_provider.is_some())
     }
 
     /// Characters that open (and keep up to date) the signature help.
     pub fn signature_triggers(&self) -> Vec<String> {
-        let caps = self.capabilities.lock().unwrap();
+        let caps = self.capabilities.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(p) = caps.as_ref().and_then(|c| c.signature_help_provider.as_ref()) else { return Vec::new() };
         let mut out = p.trigger_characters.clone().unwrap_or_default();
         out.extend(p.retrigger_characters.clone().unwrap_or_default());
@@ -626,7 +632,7 @@ impl Client {
 
     /// Whether the server gives inlay hints (types, parameter names).
     pub fn supports_inlay_hints(&self) -> bool {
-        let caps = self.capabilities.lock().unwrap();
+        let caps = self.capabilities.lock().unwrap_or_else(PoisonError::into_inner);
         caps.as_ref().and_then(|c| c.inlay_hint_provider.as_ref()).is_some_and(|p| !matches!(p, OneOf::Left(false)))
     }
 
@@ -824,7 +830,7 @@ fn dispatch(
 
     // Response.
     let Some(id) = msg.get("id").and_then(Value::as_i64) else { return };
-    let kind = pending.lock().unwrap().remove(&id);
+    let kind = pending.lock().unwrap_or_else(PoisonError::into_inner).remove(&id);
     if let Some(err) = msg.get("error") {
         let _ = events.send(Event::Error { id: Some(id), message: err["message"].as_str().unwrap_or("unknown error").into() });
         return;
@@ -907,10 +913,10 @@ fn dispatch(
             // The only "other" request we care about is initialize (id 1).
             if id == 1 {
                 if let Some(init) = parse::<InitializeResult>(result) {
-                    *capabilities.lock().unwrap() = Some(init.capabilities);
+                    *capabilities.lock().unwrap_or_else(PoisonError::into_inner) = Some(init.capabilities);
                 }
                 let _ = outgoing.send(json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
-                *ready.lock().unwrap() = true;
+                *ready.lock().unwrap_or_else(PoisonError::into_inner) = true;
                 let _ = events.send(Event::Ready { language: lang.to_string() });
             }
         }

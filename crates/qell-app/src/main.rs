@@ -19,6 +19,7 @@ mod merge;
 mod native_menu;
 mod preview;
 mod recent;
+mod recovery;
 mod session;
 mod snippet;
 mod testrun;
@@ -45,6 +46,7 @@ fn project_root(dir: &std::path::Path) -> PathBuf {
 
 fn main() -> eframe::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("qell=info,warn")).init();
+    recovery::install_panic_hook();
 
     let arg = std::env::args().nth(1).map(PathBuf::from);
     let (root, file) = match arg {
