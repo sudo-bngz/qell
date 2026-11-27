@@ -71,4 +71,4 @@ quiet — nothing is downloaded or run in the background unless you ask.
 
 - Session restore: tabs, cursors, the split and the terminals' folders (#16, #56, #63)
 - Crash reports; a broken frame no longer closes the window; unsaved tabs are backed up and put back after a crash (#71)
-- Release builds: a universal macOS app and a Linux archive, with an app icon (#72)
+- Release builds: a universal macOS app and a Linux archive (#72), with the LED logo as the app icon (#74)

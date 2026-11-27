@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo/qell-led.svg" alt="Qell" width="200"></p>
+
 # Qell
 
 A minimalist code editor in Rust that looks like a terminal: near-black,
