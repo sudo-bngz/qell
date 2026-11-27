@@ -595,7 +595,7 @@ fn line_job(
     c1: usize,
     style: &LineStyle,
 ) -> LayoutJob {
-    let line_start_byte = buffer.rope().line_to_byte(row);
+    let line_start_byte = buffer.rope().try_line_to_byte(row).unwrap_or_else(|_| buffer.rope().len_bytes());
     let line_text = buffer.line(row);
     let byte_of = |c: usize| line_text.char_indices().nth(c).map_or(line_text.len(), |(b, _)| b);
     let (bs, be) = (byte_of(c0), byte_of(c1));
