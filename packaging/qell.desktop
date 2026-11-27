@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Qell
+GenericName=Code Editor
+Comment=A minimalist native code editor
+Exec=qell %F
+Icon=qell
+Terminal=false
+Categories=Development;TextEditor;IDE;
+MimeType=text/plain;inode/directory;
+StartupWMClass=qell

@@ -1,0 +1,124 @@
+name: Release
+
+# Push a tag like v0.1.0 (or run it by hand) to build Qell for macOS and
+# Linux and attach the builds to a draft GitHub release. The draft is only
+# published when you publish it.
+on:
+  push:
+    tags: ["v*"]
+  # A change to the packaging builds it (without releasing) to check it.
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - scripts/bundle-macos.sh
+      - scripts/package-linux.sh
+      - packaging/**
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (without the v), e.g. 0.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  macos:
+    name: macOS (universal)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Version
+        run: echo "VERSION=${{ inputs.version || (github.event_name == 'pull_request' && '0.0.0-dev' || github.ref_name) }}" | sed 's/=v/=/' >> "$GITHUB_ENV"
+      - name: Build (Apple silicon and Intel)
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          cargo build --release --locked -p qell --target aarch64-apple-darwin
+          cargo build --release --locked -p qell --target x86_64-apple-darwin
+          mkdir -p dist
+          lipo -create -output dist/qell \
+            target/aarch64-apple-darwin/release/qell \
+            target/x86_64-apple-darwin/release/qell
+          lipo -info dist/qell
+      - name: Qell.app
+        run: scripts/bundle-macos.sh dist/qell "$VERSION" dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*.zip
+
+  linux:
+    name: Linux (x86_64)
+    # The oldest supported runner, for the oldest glibc the build will need.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgtk-3-dev libgl1-mesa-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: Version
+        run: echo "VERSION=${{ inputs.version || (github.event_name == 'pull_request' && '0.0.0-dev' || github.ref_name) }}" | sed 's/=v/=/' >> "$GITHUB_ENV"
+      - name: Build
+        run: |
+          cargo build --release --locked -p qell
+          strip target/release/qell
+      - name: Package
+        run: scripts/package-linux.sh target/release/qell "$VERSION" x86_64 dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*.tar.gz
+
+  release:
+    name: Draft release
+    needs: [macos, linux]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Version and notes
+        run: |
+          VERSION="${{ inputs.version || (github.event_name == 'pull_request' && '0.0.0-dev' || github.ref_name) }}"
+          VERSION="${VERSION#v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          (cd dist && sha256sum * > SHA256SUMS)
+          # This version's section of the changelog, if there is one.
+          awk -v v="$VERSION" '
+            $0 ~ "^## \\[?" v "\\]?" { on = 1; next }
+            on && /^## / { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md 2>/dev/null || true
+          cat >> notes.md <<'EOF'
+
+          ### Install
+
+          - **macOS** (Apple silicon and Intel): unzip `Qell-*-macos-universal.zip` and move `Qell.app` to Applications. It isn't signed by Apple yet, so the first time right-click it → **Open**, or run `xattr -dr com.apple.quarantine /Applications/Qell.app`.
+          - **Linux** (x86_64): untar `qell-*-linux-x86_64.tar.gz` and run `./install.sh` (installs to `~/.local`).
+
+          Check the downloads against `SHA256SUMS`.
+          EOF
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: Qell ${{ env.VERSION }}
+          body_path: notes.md
+          draft: true
+          # 0.x versions are previews.
+          prerelease: ${{ startsWith(env.VERSION, '0.') }}
+          files: dist/*
