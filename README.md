@@ -91,6 +91,12 @@ bottom, and language-server completion for the languages you actually use.
   ▶ turns into ✓ or ✗; the **Tests** tab beside Problems lists the results,
   failures first with their message, a click away from the failing line.
   The file is saved first; nothing ever runs on its own.
+- **Crash safety** — every few seconds the tabs with unsaved changes are
+  copied aside (`<data>/qell/backup`); after a crash the next start puts
+  them back, still unsaved. A crash writes a report to
+  `<data>/qell/crash/` and Qell tells you at the next start. A bug that
+  breaks one frame no longer closes the window: Qell carries on and says
+  so (it stops only if it keeps happening).
 - **Daily log** — *Journal: Write Today's Log* (or *for Last Working Day*,
   for Monday's stand-up) writes what you did as a short stand-up note:
   one line, *Done* by project, *Issues*, *Next*. It is built from what Qell

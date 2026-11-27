@@ -504,6 +504,8 @@ pub struct QellApp {
     pub tests: crate::testrun::Tests,
     /// A daily log being written.
     pub journal: Option<crate::journal::Writing>,
+    /// Crash guard and unsaved-tab backups.
+    pub guard: crate::recovery::Guard,
     /// What the Markdown preview keeps between frames (scroll, layout).
     pub markdown: egui_commonmark::CommonMarkCache,
     /// Which pane had the keyboard last frame, to notice coming back to
@@ -639,6 +641,7 @@ impl QellApp {
             tests_open: false,
             tests: Default::default(),
             journal: None,
+            guard: Default::default(),
             markdown: egui_commonmark::CommonMarkCache::default(),
             last_focus: Focus::Editor,
             k8s: views::k8s::K8sState::default(),
@@ -693,6 +696,8 @@ impl QellApp {
             None if restored == 0 => app.docs.push(Document::untitled()),
             None => {}
         }
+        // What a crash left unsaved comes back in its tabs.
+        app.recover();
         app.session_key = app.session_state().0;
         app
     }
@@ -3605,6 +3610,31 @@ impl QellApp {
 
 impl eframe::App for QellApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        // A panic while drawing drops the frame, not the window (the crash
+        // report is written all the same); one that keeps coming stops
+        // Qell, the unsaved tabs copied first.
+        let frame = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.frame(ctx)));
+        if let Err(panic) = frame {
+            self.backup_unsaved(true);
+            if self.guard.caught() {
+                std::panic::resume_unwind(panic);
+            }
+            let (what, report) = crate::recovery::take_last_panic().unwrap_or_else(|| ("unknown".into(), PathBuf::new()));
+            log::error!("frame dropped after a panic: {what}");
+            let name = report.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            self.notify_error(format!("Something went wrong — Qell carries on, unsaved files are backed up. Report: {name}"));
+            ctx.request_repaint();
+        }
+    }
+
+    fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
+        self.exit(gl);
+    }
+}
+
+impl QellApp {
+    fn frame(&mut self, ctx: &Context) {
+        crate::recovery::debug_panic();
         // Closing the window (its button, ⌘Q, Quit) with unsaved changes
         // waits for an answer.
         if ctx.input(|i| i.viewport().close_requested()) && !self.quit_confirmed && self.any_unsaved() {
@@ -3675,9 +3705,12 @@ impl eframe::App for QellApp {
         // Language servers and the shell produce output without user input,
         // so keep polling at a modest rate.
         ctx.request_repaint_after(Duration::from_millis(if self.show_terminal { 33 } else { 100 }));
+        self.backup_unsaved(false);
     }
 
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    fn exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // A normal quit: you saved or chose to discard.
+        self.drop_backups();
         if self.config_dirty_since.is_some() {
             self.save_config();
         }
